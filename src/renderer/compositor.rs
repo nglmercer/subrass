@@ -396,7 +396,29 @@ impl Compositor {
         let scale_y = video_height as f64 / play_res_y as f64;
 
         if let Some((px, py)) = resolved.position {
-            return (px * scale_x, py * scale_y);
+            // \pos(x,y) specifies the anchor point based on alignment.
+            // Adjust position so the anchor point lands at (px, py).
+            let scaled_x = px * scale_x;
+            let scaled_y = py * scale_y;
+            let alignment = resolved.alignment;
+
+            // X offset based on horizontal alignment
+            let x = match alignment {
+                1 | 4 | 7 => scaled_x,                    // Left: left edge at px
+                2 | 5 | 8 => scaled_x - text_width / 2.0, // Center: center at px
+                3 | 6 | 9 => scaled_x - text_width,       // Right: right edge at px
+                _ => scaled_x - text_width / 2.0,
+            };
+
+            // Y offset based on vertical alignment (using baseline)
+            let y = match alignment {
+                7..=9 => scaled_y,                     // Top: top at py
+                4..=6 => scaled_y - text_height / 2.0, // Middle: center at py
+                1..=3 => scaled_y - text_height,       // Bottom: bottom at py
+                _ => scaled_y - text_height / 2.0,
+            };
+
+            return (x, y);
         }
 
         let descent = baseline - text_height;
@@ -503,46 +525,33 @@ impl Compositor {
         let scale_x = video_width as f64 / play_res_x as f64;
         let scale_y = video_height as f64 / play_res_y as f64;
 
-        // Calculate position (using full event text for measurement)
-        // Skip if position is explicitly set (calculate_position returns early)
+        // Calculate position (always need text measurement for alignment offsets)
         let (clean_text, _) = self.extract_clean_text(&event.text);
-        let (mut base_x, mut base_y) = if resolved.position.is_some() {
-            Self::calculate_position(
-                resolved,
-                0.0,
-                0.0,
-                0.0,
-                play_res_x,
-                play_res_y,
-                video_width,
-                video_height,
-            )
-        } else {
-            let shaped_full = TextShaper::shape(
-                &clean_text,
-                font,
-                font_size,
-                resolved.scale_x / 100.0,
-                resolved.scale_y / 100.0,
-                resolved.bold,
-                resolved.italic,
-                resolved.spacing,
-                resolved.color,
-                resolved.outline_color,
-                resolved.shadow_color,
-                resolved.angle,
-            );
-            Self::calculate_position(
-                resolved,
-                shaped_full.width,
-                shaped_full.height,
-                shaped_full.baseline,
-                play_res_x,
-                play_res_y,
-                video_width,
-                video_height,
-            )
-        };
+        let shaped_full = TextShaper::shape(
+            &clean_text,
+            font,
+            font_size,
+            resolved.scale_x / 100.0,
+            resolved.scale_y / 100.0,
+            resolved.bold,
+            resolved.italic,
+            resolved.spacing,
+            resolved.color,
+            resolved.outline_color,
+            resolved.shadow_color,
+            resolved.angle,
+        );
+
+        let (mut base_x, mut base_y) = Self::calculate_position(
+            resolved,
+            shaped_full.width,
+            shaped_full.height,
+            shaped_full.baseline,
+            play_res_x,
+            play_res_y,
+            video_width,
+            video_height,
+        );
 
         // Apply move animation
         if let Some(ref move_data) = resolved.move_data {

@@ -155,6 +155,7 @@ impl SubtitleRenderer {
         .map_err(|e| format!("Failed to create ImageData: {:?}", e))?;
 
         // Draw to canvas
+        ctx.clear_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);
         ctx.put_image_data(&image_data, 0.0, 0.0)
             .map_err(|e| format!("Failed to put image data: {:?}", e))?;
 

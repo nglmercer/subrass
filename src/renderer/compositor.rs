@@ -25,6 +25,8 @@ pub struct ResolvedStyle {
     pub scale_y: f64,
     pub spacing: f64,
     pub angle: f64,
+    pub rotation_x: f64,
+    pub rotation_y: f64,
     pub border_style: i32,
     pub outline: f64,
     pub shadow: f64,
@@ -177,6 +179,14 @@ impl Compositor {
                     let from = resolved.angle;
                     resolved.angle = from + (r - from) * progress;
                 }
+                OverrideTag::RotationX(r) => {
+                    let from = resolved.rotation_x;
+                    resolved.rotation_x = from + (r - from) * progress;
+                }
+                OverrideTag::RotationY(r) => {
+                    let from = resolved.rotation_y;
+                    resolved.rotation_y = from + (r - from) * progress;
+                }
                 _ => {}
             }
         }
@@ -200,6 +210,8 @@ impl Compositor {
             scale_y: base_style.scale_y,
             spacing: base_style.spacing,
             angle: base_style.angle,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
             border_style: base_style.border_style,
             outline: base_style.outline,
             shadow: base_style.shadow,
@@ -283,6 +295,8 @@ impl Compositor {
             OverrideTag::ScaleX(s) => resolved.scale_x = *s,
             OverrideTag::ScaleY(s) => resolved.scale_y = *s,
             OverrideTag::RotationZ(r) => resolved.angle = *r,
+            OverrideTag::RotationX(r) => resolved.rotation_x = *r,
+            OverrideTag::RotationY(r) => resolved.rotation_y = *r,
             OverrideTag::Border(b) => resolved.outline = *b,
             OverrideTag::BorderX(b) => resolved.outline = *b,
             OverrideTag::BorderY(b) => resolved.outline = *b,
@@ -605,11 +619,13 @@ impl Compositor {
                 } = tag
                 {
                     let elapsed = time_ms.saturating_sub(start_ms);
-                    if elapsed < *t1 || elapsed > *t2 {
+                    if elapsed < *t1 {
                         continue;
                     }
                     let duration = t2 - t1;
-                    let raw_progress = if duration > 0 {
+                    let raw_progress = if elapsed >= *t2 {
+                        1.0
+                    } else if duration > 0 {
                         (elapsed - *t1) as f64 / duration as f64
                     } else {
                         1.0
@@ -668,18 +684,64 @@ impl Compositor {
                     continue;
                 }
 
-                let gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
-                let gy = (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
+                let mut gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
+                let mut gy = (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
+
+                // Use rotated bitmap if Z-axis rotation is active
+                let angle = segment_resolved.angle;
+                let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
+                    RenderBuffer::rotate_coverage_bitmap(
+                        &cached.bitmap,
+                        cached.width,
+                        cached.height,
+                        angle,
+                    );
+
+                // Apply X/Y perspective offset to glyph position
+                let rx = segment_resolved.rotation_x;
+                let ry = segment_resolved.rotation_y;
+                if rx.abs() > 0.01 || ry.abs() > 0.01 {
+                    let perspective = 800.0;
+                    let center_x = video_width as f64 / 2.0;
+                    let center_y = video_height as f64 / 2.0;
+
+                    let glyph_center_x = gx as f64 + rot_w as f64 / 2.0;
+                    let glyph_center_y = gy as f64 + rot_h as f64 / 2.0;
+
+                    let dx = glyph_center_x - center_x;
+                    let dy = glyph_center_y - center_y;
+
+                    let rx_rad = rx.to_radians();
+                    let ry_rad = ry.to_radians();
+
+                    let cos_rx = rx_rad.cos();
+                    let sin_rx = rx_rad.sin();
+                    let cos_ry = ry_rad.cos();
+                    let sin_ry = ry_rad.sin();
+
+                    let z = dy * sin_rx + dx * sin_ry;
+                    let scale_factor = perspective / (perspective + z);
+
+                    let new_dx = dx * cos_ry * scale_factor;
+                    let new_dy = dy * cos_rx * scale_factor;
+
+                    gx = (center_x + new_dx - rot_w as f64 / 2.0) as i32;
+                    gy = (center_y + new_dy - rot_h as f64 / 2.0) as i32;
+                }
+
+                // Adjust position for rotated bitmap offset
+                let final_gx = gx + rot_ox;
+                let final_gy = gy + rot_oy;
 
                 // Render outline
                 if outline_active {
                     effects::apply_outline(
                         buffer,
-                        &cached.bitmap,
-                        cached.width,
-                        cached.height,
-                        gx,
-                        gy,
+                        &rot_bitmap,
+                        rot_w,
+                        rot_h,
+                        final_gx,
+                        final_gy,
                         outline_scale,
                         [
                             outline_color_rgba[0],
@@ -694,11 +756,11 @@ impl Compositor {
                 if shadow_active {
                     effects::apply_shadow(
                         buffer,
-                        &cached.bitmap,
-                        cached.width,
-                        cached.height,
-                        gx,
-                        gy,
+                        &rot_bitmap,
+                        rot_w,
+                        rot_h,
+                        final_gx,
+                        final_gy,
                         shadow_offset_x,
                         shadow_offset_y,
                         [
@@ -714,15 +776,15 @@ impl Compositor {
                 let color = glyph.color.to_rgba();
                 let color_alpha = 255 - color[3];
 
-                for py in 0..cached.height {
-                    for px in 0..cached.width {
-                        let coverage = cached.bitmap[(py * cached.width + px) as usize];
+                for py in 0..rot_h {
+                    for px in 0..rot_w {
+                        let coverage = rot_bitmap[(py * rot_w + px) as usize];
                         if coverage > 0 {
                             let a = ((coverage as u32 * color_alpha as u32 / 255) * alpha as u32
                                 / 255) as u8;
                             buffer.blend_pixel(
-                                (gx + px as i32) as u32,
-                                (gy + py as i32) as u32,
+                                (final_gx + px as i32) as u32,
+                                (final_gy + py as i32) as u32,
                                 color[0],
                                 color[1],
                                 color[2],
@@ -737,9 +799,9 @@ impl Compositor {
                     let line_width = 2;
                     let color = segment_resolved.color.to_rgba();
                     let color_alpha = 255 - color[3];
-                    let ul_gy = (gy as f64 + shaped.baseline * 0.9) as i32;
+                    let ul_gy = (final_gy as f64 + shaped.baseline * 0.9) as i32;
                     buffer.fill_rect(
-                        gx,
+                        final_gx,
                         ul_gy,
                         glyph.advance as i32,
                         line_width,
@@ -755,9 +817,9 @@ impl Compositor {
                     let line_width = 2;
                     let color = segment_resolved.color.to_rgba();
                     let color_alpha = 255 - color[3];
-                    let so_gy = (gy as f64 + shaped.baseline * 0.35) as i32;
+                    let so_gy = (final_gy as f64 + shaped.baseline * 0.35) as i32;
                     buffer.fill_rect(
-                        gx,
+                        final_gx,
                         so_gy,
                         glyph.advance as i32,
                         line_width,

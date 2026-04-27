@@ -29,9 +29,9 @@ Dialogue: 0,0:00:15.00,0:00:20.00,Default,,0,0,0,,Welcome to the subrass demo!
 Dialogue: 0,0:00:21.00,0:00:26.00,Default,,0,0,0,,This showcases ASS subtitle rendering in the browser via WebAssembly.
 
 ; === Color overrides ===
-Dialogue: 0,0:00:30.00,0:00:34.00,Default,,0,0,0,,{\c&HFF0000&}This text is red
+Dialogue: 0,0:00:30.00,0:00:34.00,Default,,0,0,0,,{\c&H0000FF&}This text is red
 Dialogue: 0,0:00:35.00,0:00:39.00,Default,,0,0,0,,{\c&H00FF00&}This text is green
-Dialogue: 0,0:00:40.00,0:00:44.00,Default,,0,0,0,,{\c&H0000FF&}This text is blue
+Dialogue: 0,0:00:40.00,0:00:44.00,Default,,0,0,0,,{\c&HFF0000&}This text is blue
 Dialogue: 0,0:00:45.00,0:00:50.00,Default,,0,0,0,,{\c&HFF00FF&\b1}Bold magenta text
 
 ; === Font formatting ===
@@ -54,7 +54,7 @@ Dialogue: 0,0:02:15.00,0:02:25.00,Default,,0,0,0,,{\move(0,540,1920,540)}Sliding
 Dialogue: 0,0:02:28.00,0:02:38.00,Default,,0,0,0,,{\move(960,1080,960,0,0,8000)}Text rising from bottom to top
 
 ; === Transform ===
-Dialogue: 0,0:02:45.00,0:02:55.00,Default,,0,0,0,,{\t(0,5000,\c&HFF0000&\fs80)}Gradually turning red and growing
+Dialogue: 0,0:02:45.00,0:02:55.00,Default,,0,0,0,,{\t(0,5000,\c&H0000FF&\fs80)}Gradually turning red and growing
 Dialogue: 0,0:03:00.00,0:03:10.00,Default,,0,0,0,,{\t(0,3000,\c&HFF00FF&\b1)}{\t(3000,6000,\c&H00FFFF&\b0)}Multi-stage color transform
 
 ; === Rotation ===
@@ -65,7 +65,7 @@ Dialogue: 0,0:03:28.00,0:03:38.00,Default,,0,0,0,,{\frz45}Rotated 45 degrees clo
 Dialogue: 0,0:03:45.00,0:03:52.00,Default,,0,0,0,,{\bord5}Thick border (5px)
 Dialogue: 0,0:03:55.00,0:04:02.00,Default,,0,0,0,,{\shad5}Large shadow (5px)
 Dialogue: 0,0:04:05.00,0:04:12.00,Default,,0,0,0,,{\bord0\shad0}No border, no shadow
-Dialogue: 0,0:04:15.00,0:04:22.00,Default,,0,0,0,,{\bord3\shad4\c&HFFD700&}Gold text with border and shadow
+Dialogue: 0,0:04:15.00,0:04:22.00,Default,,0,0,0,,{\bord3\shad4\c&H00D7FF&}Gold text with border and shadow
 
 ; === Scale and spacing ===
 Dialogue: 0,0:04:30.00,0:04:38.00,Default,,0,0,0,,{\fscx200}200% horizontal scale

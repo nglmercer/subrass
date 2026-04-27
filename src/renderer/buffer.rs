@@ -118,6 +118,101 @@ impl RenderBuffer {
         &self.pixels
     }
 
+    /// Rotate a coverage bitmap by angle (degrees) and return the new bitmap,
+    /// its dimensions, and the offset from the original center to the new top-left.
+    pub fn rotate_coverage_bitmap(
+        bitmap: &[u8],
+        src_w: u32,
+        src_h: u32,
+        angle_deg: f64,
+    ) -> (Vec<u8>, u32, u32, i32, i32) {
+        if angle_deg.abs() < 0.01 {
+            return (bitmap.to_vec(), src_w, src_h, 0, 0);
+        }
+
+        let angle = angle_deg.to_radians();
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        let cx = src_w as f64 / 2.0;
+        let cy = src_h as f64 / 2.0;
+
+        // Compute rotated bounding box
+        let corners = [
+            (-cx, -cy),
+            (src_w as f64 - cx, -cy),
+            (-cx, src_h as f64 - cy),
+            (src_w as f64 - cx, src_h as f64 - cy),
+        ];
+
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::MIN;
+        let mut min_y = f64::MAX;
+        let mut max_y = f64::MIN;
+
+        for (x, y) in &corners {
+            let rx = x * cos_a - y * sin_a;
+            let ry = x * sin_a + y * cos_a;
+            min_x = min_x.min(rx);
+            max_x = max_x.max(rx);
+            min_y = min_y.min(ry);
+            max_y = max_y.max(ry);
+        }
+
+        let dst_w = (max_x - min_x).ceil() as u32 + 1;
+        let dst_h = (max_y - min_y).ceil() as u32 + 1;
+        let off_x = min_x as i32;
+        let off_y = min_y as i32;
+
+        let mut new_bitmap = vec![0u8; (dst_w * dst_h) as usize];
+
+        // Inverse rotation: for each dst pixel, find source pixel
+        let inv_cos = cos_a; // cos(-angle) = cos(angle)
+        let inv_sin = -sin_a; // sin(-angle) = -sin(angle)
+
+        for dy in 0..dst_h {
+            for dx in 0..dst_w {
+                // Center the destination pixel
+                let ddx = dx as f64 + off_x as f64 + 0.5 - cx;
+                let ddy = dy as f64 + off_y as f64 + 0.5 - cy;
+
+                // Inverse rotate to find source
+                let sx = ddx * inv_cos - ddy * inv_sin + cx;
+                let sy = ddx * inv_sin + ddy * inv_cos + cy;
+
+                // Bilinear sample
+                let sx0 = sx.floor() as i32;
+                let sy0 = sy.floor() as i32;
+                let fx = sx - sx.floor();
+                let fy = sy - sy.floor();
+
+                if sx0 >= 0
+                    && sx0 + 1 < src_w as i32
+                    && sy0 >= 0
+                    && sy0 + 1 < src_h as i32
+                {
+                    let v00 = bitmap[(sy0 as u32 * src_w + sx0 as u32) as usize] as f64;
+                    let v10 = bitmap[(sy0 as u32 * src_w + (sx0 + 1) as u32) as usize] as f64;
+                    let v01 = bitmap[((sy0 + 1) as u32 * src_w + sx0 as u32) as usize] as f64;
+                    let v11 = bitmap
+                        [((sy0 + 1) as u32 * src_w + (sx0 + 1) as u32) as usize] as f64;
+
+                    let v = v00 * (1.0 - fx) * (1.0 - fy)
+                        + v10 * fx * (1.0 - fy)
+                        + v01 * (1.0 - fx) * fy
+                        + v11 * fx * fy;
+
+                    new_bitmap[(dy * dst_w + dx) as usize] = v as u8;
+                } else if sx0 >= 0 && sx0 < src_w as i32 && sy0 >= 0 && sy0 < src_h as i32 {
+                    new_bitmap[(dy * dst_w + dx) as usize] =
+                        bitmap[(sy0 as u32 * src_w + sx0 as u32) as usize];
+                }
+            }
+        }
+
+        (new_bitmap, dst_w, dst_h, off_x, off_y)
+    }
+
     /// Apply box blur (3-pass for Gaussian approximation) with sliding window
     pub fn box_blur(&mut self, radius: u32) {
         if radius == 0 {

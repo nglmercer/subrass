@@ -6,6 +6,7 @@ use super::shaper::TextShaper;
 use crate::types::color::Color;
 use crate::types::override_tag::parse_text_segments;
 use crate::types::{Event, EventType, OverrideTag, Style};
+use crate::utils::Matrix3x3;
 
 /// Resolved style with all overrides applied
 #[derive(Debug, Clone)]
@@ -523,6 +524,27 @@ impl Compositor {
             video_height,
         );
 
+        // Rotation origin for 3D effects
+        let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
+            (ox * scale_x, oy * scale_y)
+        } else {
+            // Default origin is the alignment point.
+            // Deriving it from base_x, base_y and text dimensions.
+            let ax = match resolved.alignment {
+                1 | 4 | 7 => base_x,
+                2 | 5 | 8 => base_x + shaped_full.width / 2.0,
+                3 | 6 | 9 => base_x + shaped_full.width,
+                _ => base_x + shaped_full.width / 2.0,
+            };
+            let ay = match resolved.alignment {
+                7 | 8 | 9 => base_y,
+                4 | 5 | 6 => base_y + shaped_full.height / 2.0,
+                1 | 2 | 3 => base_y + shaped_full.height,
+                _ => base_y + shaped_full.height / 2.0,
+            };
+            (ax, ay)
+        };
+
         // Apply move animation
         if let Some(ref move_data) = resolved.move_data {
             let elapsed = time_ms - start_ms;
@@ -684,54 +706,51 @@ impl Compositor {
                     continue;
                 }
 
-                let mut gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
-                let mut gy = (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
+                // Calculate original center of the glyph relative to origin
+                let orig_cx = base_x + x_offset + glyph.x + cached.bearing_x as f64 + cached.width as f64 / 2.0;
+                let orig_cy = base_y + line_y_offset + glyph.y + cached.bearing_y as f64 + cached.height as f64 / 2.0;
+                
+                let dx = orig_cx - org_x;
+                let dy = orig_cy - org_y;
 
-                // Use rotated bitmap if Z-axis rotation is active
-                let angle = segment_resolved.angle;
+                // Construction of exact 3D rotation matrix (Order: Z, then Y, then X)
+                // ASS \frx and \fry rotations are negated compared to standard math
+                let rz = segment_resolved.angle;
+                let rx = segment_resolved.rotation_x;
+                let ry = segment_resolved.rotation_y;
+                
+                let mat_z = Matrix3x3::rotation_z(rz.to_radians());
+                let mat_y = Matrix3x3::rotation_y(-ry.to_radians());
+                let mat_x = Matrix3x3::rotation_x(-rx.to_radians());
+                
+                let matrix = mat_x.multiply(&mat_y).multiply(&mat_z);
+
+                // Perspective distance (standard ASS is ~312.5-500 depending on resolution)
+                let perspective = 500.0 * (video_height as f64 / play_res_y as f64);
+
+                // Use projective transform for exact perspective warping
                 let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
-                    RenderBuffer::rotate_coverage_bitmap(
+                    RenderBuffer::projective_transform_coverage_bitmap(
                         &cached.bitmap,
                         cached.width,
                         cached.height,
-                        angle,
+                        &matrix,
+                        perspective,
                     );
+                // Calculate 3D position and perspective scale for the glyph center
+                let (x3, y3, z3) = matrix.transform(dx, dy, 0.0);
+                let scale_factor = perspective / (perspective + z3);
+                let px = x3 * scale_factor;
+                let py = y3 * scale_factor;
 
-                // Apply X/Y perspective offset to glyph position
-                let rx = segment_resolved.rotation_x;
-                let ry = segment_resolved.rotation_y;
-                if rx.abs() > 0.01 || ry.abs() > 0.01 {
-                    let perspective = 800.0;
-                    let center_x = video_width as f64 / 2.0;
-                    let center_y = video_height as f64 / 2.0;
+                // Final screen position
+                let final_gx = (org_x + px + rot_ox as f64) as i32;
+                let final_gy = (org_y + py + rot_oy as f64) as i32;
 
-                    let glyph_center_x = gx as f64 + rot_w as f64 / 2.0;
-                    let glyph_center_y = gy as f64 + rot_h as f64 / 2.0;
-
-                    let dx = glyph_center_x - center_x;
-                    let dy = glyph_center_y - center_y;
-
-                    let rx_rad = rx.to_radians();
-                    let ry_rad = ry.to_radians();
-
-                    let cos_rx = rx_rad.cos();
-                    let sin_rx = rx_rad.sin();
-                    let cos_ry = ry_rad.cos();
-                    let sin_ry = ry_rad.sin();
-
-                    let z = dy * sin_rx + dx * sin_ry;
-                    let scale_factor = perspective / (perspective + z);
-
-                    let new_dx = dx * cos_ry * scale_factor;
-                    let new_dy = dy * cos_rx * scale_factor;
-
-                    gx = (center_x + new_dx - rot_w as f64 / 2.0) as i32;
-                    gy = (center_y + new_dy - rot_h as f64 / 2.0) as i32;
-                }
-
-                // Adjust position for rotated bitmap offset
-                let final_gx = gx + rot_ox;
-                let final_gy = gy + rot_oy;
+                // Adjust effect scales by perspective factor
+                let current_outline_scale = outline_scale * scale_factor;
+                let current_shadow_x = shadow_offset_x * scale_factor;
+                let current_shadow_y = shadow_offset_y * scale_factor;
 
                 // Render outline
                 if outline_active {
@@ -742,7 +761,7 @@ impl Compositor {
                         rot_h,
                         final_gx,
                         final_gy,
-                        outline_scale,
+                        current_outline_scale,
                         [
                             outline_color_rgba[0],
                             outline_color_rgba[1],
@@ -761,8 +780,8 @@ impl Compositor {
                         rot_h,
                         final_gx,
                         final_gy,
-                        shadow_offset_x,
-                        shadow_offset_y,
+                        current_shadow_x,
+                        current_shadow_y,
                         [
                             shadow_color_rgba[0],
                             shadow_color_rgba[1],

@@ -1,3 +1,5 @@
+use crate::utils::Matrix3x3;
+
 /// RGBA render buffer for subtitle compositing
 pub struct RenderBuffer {
     pub width: u32,
@@ -114,30 +116,25 @@ impl RenderBuffer {
     }
 
     /// Get raw pixel slice for ImageData creation
+
+    /// Get raw pixel slice for ImageData creation
     pub fn as_bytes(&self) -> &[u8] {
         &self.pixels
     }
 
-    /// Rotate a coverage bitmap by angle (degrees) and return the new bitmap,
-    /// its dimensions, and the offset from the original center to the new top-left.
-    pub fn rotate_coverage_bitmap(
+    /// Transform (rotate and perspective project) a coverage bitmap using projective mapping.
+    /// Returns the new bitmap, its dimensions, and the offset from the original center to the new top-left.
+    pub fn projective_transform_coverage_bitmap(
         bitmap: &[u8],
         src_w: u32,
         src_h: u32,
-        angle_deg: f64,
+        matrix: &Matrix3x3,
+        perspective: f64,
     ) -> (Vec<u8>, u32, u32, i32, i32) {
-        if angle_deg.abs() < 0.01 {
-            return (bitmap.to_vec(), src_w, src_h, 0, 0);
-        }
-
-        let angle = angle_deg.to_radians();
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
-
         let cx = src_w as f64 / 2.0;
         let cy = src_h as f64 / 2.0;
 
-        // Compute rotated bounding box
+        // Compute transformed bounding box by projecting the 4 corners
         let corners = [
             (-cx, -cy),
             (src_w as f64 - cx, -cy),
@@ -151,34 +148,44 @@ impl RenderBuffer {
         let mut max_y = f64::MIN;
 
         for (x, y) in &corners {
-            let rx = x * cos_a - y * sin_a;
-            let ry = x * sin_a + y * cos_a;
-            min_x = min_x.min(rx);
-            max_x = max_x.max(rx);
-            min_y = min_y.min(ry);
-            max_y = max_y.max(ry);
+            let (x3, y3, z3) = matrix.transform(*x, *y, 0.0);
+            let scale = perspective / (perspective + z3);
+            let px = x3 * scale;
+            let py = y3 * scale;
+            min_x = min_x.min(px);
+            max_x = max_x.max(px);
+            min_y = min_y.min(py);
+            max_y = max_y.max(py);
         }
 
         let dst_w = (max_x - min_x).ceil() as u32 + 1;
         let dst_h = (max_y - min_y).ceil() as u32 + 1;
-        let off_x = min_x as i32;
-        let off_y = min_y as i32;
+        let off_x = min_x.floor() as i32;
+        let off_y = min_y.floor() as i32;
 
         let mut new_bitmap = vec![0u8; (dst_w * dst_h) as usize];
+        let m = &matrix.0;
+        let inv_matrix = matrix.transpose(); // Rotation matrix inverse is transpose
 
-        // Inverse rotation: for each dst pixel, find source pixel
-        let inv_cos = cos_a; // cos(-angle) = cos(angle)
-        let inv_sin = -sin_a; // sin(-angle) = -sin(angle)
-
+        // Perspective inverse mapping
         for dy in 0..dst_h {
             for dx in 0..dst_w {
-                // Center the destination pixel
-                let ddx = dx as f64 + off_x as f64 + 0.5 - cx;
-                let ddy = dy as f64 + off_y as f64 + 0.5 - cy;
+                let px = dx as f64 + off_x as f64 + 0.5;
+                let py = dy as f64 + off_y as f64 + 0.5;
 
-                // Inverse rotate to find source
-                let sx = ddx * inv_cos - ddy * inv_sin + cx;
-                let sy = ddx * inv_sin + ddy * inv_cos + cy;
+                // Solve for z3: 0 = m31*px*(d+z3)/d + m32*py*(d+z3)/d + m33*z3
+                let denom = m[6] * px / perspective + m[7] * py / perspective + m[8];
+                if denom.abs() < 1e-6 { continue; }
+                
+                let z3 = -(m[6] * px + m[7] * py) / denom;
+                let scale_inv = (perspective + z3) / perspective;
+                let x3 = px * scale_inv;
+                let y3 = py * scale_inv;
+
+                // Transform back to source space
+                let (sx_rel, sy_rel, _) = inv_matrix.transform(x3, y3, z3);
+                let sx = sx_rel + cx;
+                let sy = sy_rel + cy;
 
                 // Bilinear sample
                 let sx0 = sx.floor() as i32;
@@ -186,16 +193,11 @@ impl RenderBuffer {
                 let fx = sx - sx.floor();
                 let fy = sy - sy.floor();
 
-                if sx0 >= 0
-                    && sx0 + 1 < src_w as i32
-                    && sy0 >= 0
-                    && sy0 + 1 < src_h as i32
-                {
+                if sx0 >= 0 && sx0 + 1 < src_w as i32 && sy0 >= 0 && sy0 + 1 < src_h as i32 {
                     let v00 = bitmap[(sy0 as u32 * src_w + sx0 as u32) as usize] as f64;
                     let v10 = bitmap[(sy0 as u32 * src_w + (sx0 + 1) as u32) as usize] as f64;
                     let v01 = bitmap[((sy0 + 1) as u32 * src_w + sx0 as u32) as usize] as f64;
-                    let v11 = bitmap
-                        [((sy0 + 1) as u32 * src_w + (sx0 + 1) as u32) as usize] as f64;
+                    let v11 = bitmap[((sy0 + 1) as u32 * src_w + (sx0 + 1) as u32) as usize] as f64;
 
                     let v = v00 * (1.0 - fx) * (1.0 - fy)
                         + v10 * fx * (1.0 - fy)
@@ -204,8 +206,8 @@ impl RenderBuffer {
 
                     new_bitmap[(dy * dst_w + dx) as usize] = v as u8;
                 } else if sx0 >= 0 && sx0 < src_w as i32 && sy0 >= 0 && sy0 < src_h as i32 {
-                    new_bitmap[(dy * dst_w + dx) as usize] =
-                        bitmap[(sy0 as u32 * src_w + sx0 as u32) as usize];
+                    let v = bitmap[(sy0 as u32 * src_w + sx0 as u32) as usize] as f64;
+                    new_bitmap[(dy * dst_w + dx) as usize] = (v * (1.0 - fx) * (1.0 - fy)) as u8;
                 }
             }
         }

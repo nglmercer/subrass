@@ -11,20 +11,23 @@ import {
 import {
     initPlayer,
     loadVideoUrl,
+    isVideoMode,
     togglePlay as togglePlayer,
     stop as stopPlayer,
     seek as seekPlayer,
     getCurrentTimeMs,
+    getDurationMs,
+    isPaused,
 } from "./player.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
 const canvas = $("subtitleCanvas");
+const ctx = canvas.getContext("2d");
 const playPauseBtn = $("playPauseBtn");
 const stopBtn = $("stopBtn");
 const seekBar = $("seekBar");
 const error = $("error");
-const eventList = $("eventList");
 
 async function main() {
     await init();
@@ -32,8 +35,11 @@ async function main() {
 
     initPlayer(video, {
         onFrame(timeMs) {
+            if (endedCheck(timeMs)) return;
             syncCanvasSize();
+            if (!isVideoMode()) clearCanvas();
             renderFrame(timeMs);
+            updateUI(timeMs);
         },
     });
 
@@ -74,20 +80,24 @@ async function main() {
 
     playPauseBtn.addEventListener("click", () => {
         togglePlayer();
-        playPauseBtn.textContent = video.paused ? "Play" : "Pause";
+        playPauseBtn.textContent = isPaused() ? "Play" : "Pause";
     });
 
     stopBtn.addEventListener("click", () => {
         stopPlayer();
         playPauseBtn.textContent = "Play";
         syncCanvasSize();
-        renderFrame(getCurrentTimeMs());
+        if (!isVideoMode()) clearCanvas();
+        renderFrame(0);
+        updateUI(0);
     });
 
     seekBar.addEventListener("input", () => {
         seekPlayer(seekBar.value);
         syncCanvasSize();
+        if (!isVideoMode()) clearCanvas();
         renderFrame(getCurrentTimeMs());
+        updateUI(getCurrentTimeMs());
     });
 
     video.addEventListener("loadedmetadata", () => {
@@ -97,10 +107,8 @@ async function main() {
     });
 
     video.addEventListener("timeupdate", () => {
-        const ms = getCurrentTimeMs();
-        $("timeDisplay").textContent = formatTime(ms);
-        if (!seekBar.matches(":active")) {
-            seekBar.value = (ms / 1000 / video.duration) * 1000;
+        if (isVideoMode() && !isPaused()) {
+            updateUI(getCurrentTimeMs());
         }
     });
 
@@ -114,14 +122,13 @@ async function main() {
     });
 
     window.addEventListener("resize", () => {
-        if (video.videoWidth) {
-            syncCanvasSize();
+        syncCanvasSize();
+        if (isVideoMode()) {
             setVideoSize(video.videoWidth, video.videoHeight);
-            renderFrame(getCurrentTimeMs());
         }
+        renderFrame(getCurrentTimeMs());
     });
 
-    $("videoName").textContent = "BigBuckBunny.mp4";
     enableControls();
 
     try {
@@ -134,26 +141,63 @@ async function main() {
     }
 }
 
-function syncCanvasSize() {
-    if (!video.videoWidth) return;
-    if (
-        canvas.width !== video.videoWidth ||
-        canvas.height !== video.videoHeight
-    ) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        setVideoSize(video.videoWidth, video.videoHeight);
+function endedCheck(timeMs) {
+    const durMs = getDurationMs();
+    if (timeMs < durMs) return false;
+    if ($("loopCheck").checked) {
+        seekPlayer(0);
+        if (!isVideoMode()) {
+            syncCanvasSize();
+            clearCanvas();
+            renderFrame(0);
+            updateUI(0);
+        }
+        return true;
     }
+    stopPlayer();
+    playPauseBtn.textContent = "Play";
+    return true;
+}
+
+function syncCanvasSize() {
+    let w, h;
+    if (video.videoWidth) {
+        w = video.videoWidth;
+        h = video.videoHeight;
+    } else {
+        w = 1920;
+        h = 1080;
+    }
+    if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        setVideoSize(w, h);
+    }
+}
+
+function clearCanvas() {
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 async function loadAss(content) {
     createRenderer(content, canvas);
+    syncCanvasSize();
     if (video.videoWidth) {
         setVideoSize(video.videoWidth, video.videoHeight);
     }
-    syncCanvasSize();
+    if (!isVideoMode()) clearCanvas();
     renderFrame(getCurrentTimeMs());
     updateSummary();
+    updateUI(getCurrentTimeMs());
+}
+
+function updateUI(timeMs) {
+    $("timeDisplay").textContent = formatTime(timeMs);
+    const durMs = getDurationMs();
+    if (!seekBar.matches(":active")) {
+        seekBar.value = (timeMs / durMs) * 1000;
+    }
 }
 
 function updateSummary() {

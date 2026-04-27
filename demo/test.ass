@@ -1,0 +1,19 @@
+[Script Info]
+; Demo ASS file for subrass
+Title: Demo Subtitle
+ScriptType: v4.00+
+ScaledBorderAndShadow: yes
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Welcome to subrass!
+Dialogue: 0,0:00:05.00,0:00:09.00,Default,,0,0,0,,This is a Rust-based ASS subtitle parser.
+Dialogue: 0,0:00:10.00,0:00:14.00,Default,,0,0,0,,{\pos(960,100)\an8}Positioned at top center
+Dialogue: 0,0:00:15.00,0:00:20.00,Default,,0,0,0,,{\fad(500,500)}Fade in and fade out
+Dialogue: 0,0:00:21.00,0:00:26.00,Default,,0,0,0,,{\c&H0000FF&\b1}Blue and bold text

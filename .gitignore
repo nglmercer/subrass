@@ -1,0 +1,6 @@
+/target
+/pkg
+/node_modules
+*.wasm
+Cargo.lock
+.DS_Store

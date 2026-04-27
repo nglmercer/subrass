@@ -1,6 +1,7 @@
 use crate::renderer::buffer::RenderBuffer;
 
 /// Apply shadow effect to a glyph bitmap
+#[allow(clippy::too_many_arguments)]
 pub fn apply_shadow(
     buffer: &mut RenderBuffer,
     glyph_bitmap: &[u8],
@@ -36,6 +37,7 @@ pub fn apply_shadow(
 }
 
 /// Apply outline effect to a glyph bitmap (border style 1)
+#[allow(clippy::too_many_arguments)]
 pub fn apply_outline(
     buffer: &mut RenderBuffer,
     glyph_bitmap: &[u8],
@@ -80,6 +82,7 @@ pub fn apply_outline(
 }
 
 /// Apply border style 3 (opaque box background)
+#[allow(clippy::too_many_arguments)]
 pub fn apply_opaque_box(
     buffer: &mut RenderBuffer,
     x: i32,

@@ -218,6 +218,7 @@ impl Compositor {
 
     /// Calculate event position based on alignment, margins, and resolution
     /// Returns the BASELINE position for the text
+    #[allow(clippy::too_many_arguments)]
     pub fn calculate_position(
         resolved: &ResolvedStyle,
         text_width: f64,
@@ -265,7 +266,7 @@ impl Compositor {
         // For bottom alignment: text bottom at video_height - margin_v, baseline at (video_height - margin_v) - descent
         // Note: descent is negative, so (video_height - margin_v) - descent = (video_height - margin_v) + |descent|
         let y = match alignment {
-            7..=9 => margin_v + baseline, // Top: baseline at margin + ascent
+            7..=9 => margin_v + baseline,       // Top: baseline at margin + ascent
             4..=6 => video_height as f64 / 2.0, // Middle: baseline at center
             1..=3 => (video_height as f64 - margin_v) - descent, // Bottom: baseline above margin by |descent|
             _ => (video_height as f64 - margin_v) - descent,
@@ -275,6 +276,7 @@ impl Compositor {
     }
 
     /// Composite a single event into the buffer
+    #[allow(clippy::too_many_arguments)]
     pub fn composite_event(
         &mut self,
         buffer: &mut RenderBuffer,
@@ -554,8 +556,7 @@ impl Compositor {
                         let coverage = cached.bitmap[(py * cached.width + px) as usize];
                         if coverage > 0 {
                             // Combine coverage, color alpha, and fade alpha
-                            let a = ((coverage as u32 * color_alpha as u32 / 255)
-                                * alpha as u32
+                            let a = ((coverage as u32 * color_alpha as u32 / 255) * alpha as u32
                                 / 255) as u8;
                             buffer.blend_pixel(
                                 (gx + px as i32) as u32,

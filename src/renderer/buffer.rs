@@ -95,6 +95,7 @@ impl RenderBuffer {
     }
 
     /// Fill a rectangle with color
+    #[allow(clippy::too_many_arguments)]
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8, a: u8) {
         if a == 0 {
             return;

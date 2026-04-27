@@ -2,15 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Script type version
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ScriptType {
-    V400,         // SSA v4.00
+    V400, // SSA v4.00
     #[default]
-    V400Plus,     // ASS v4.00+
+    V400Plus, // ASS v4.00+
     V400PlusPlus, // ASS2 v4.00++ (rare)
 }
-
 
 impl std::fmt::Display for ScriptType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,8 +34,7 @@ impl std::str::FromStr for ScriptType {
 }
 
 /// YCbCr matrix type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum YCbCrMatrix {
     #[default]
     None,
@@ -46,7 +43,6 @@ pub enum YCbCrMatrix {
     PC601,
     PC709,
 }
-
 
 impl std::fmt::Display for YCbCrMatrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

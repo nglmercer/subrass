@@ -35,6 +35,7 @@ pub struct TextShaper;
 
 impl TextShaper {
     /// Shape a text string into positioned glyphs (supports multi-line with \n)
+    #[allow(clippy::too_many_arguments)]
     pub fn shape(
         text: &str,
         font: &FontArc,

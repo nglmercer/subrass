@@ -37,6 +37,7 @@ pub fn apply_shadow(
 }
 
 /// Apply outline effect to a glyph bitmap (border style 1)
+/// Uses squared distance comparison to avoid sqrt in hot loop
 #[allow(clippy::too_many_arguments)]
 pub fn apply_outline(
     buffer: &mut RenderBuffer,
@@ -49,20 +50,24 @@ pub fn apply_outline(
     outline_color: [u8; 4],
 ) {
     let radius = outline_width.ceil() as i32;
+    let max_dist = outline_width + 0.5;
+    let max_dist_sq = max_dist * max_dist;
+    let inv_dist = 1.0 / (outline_width + 1.0);
+    let base_alpha = outline_color[3] as f64;
 
     for gy in 0..glyph_height as i32 {
         for gx in 0..glyph_width as i32 {
             let alpha = glyph_bitmap[(gy as u32 * glyph_width + gx as u32) as usize];
             if alpha > 0 {
-                // Draw outline around the glyph
                 for dy in -radius..=radius {
+                    let dy_sq = (dy * dy) as f64;
                     for dx in -radius..=radius {
-                        let dist = ((dx * dx + dy * dy) as f64).sqrt();
-                        if dist <= outline_width + 0.5 {
+                        let dist_sq = dy_sq + (dx * dx) as f64;
+                        if dist_sq <= max_dist_sq {
                             let px = x + gx + dx;
                             let py = y + gy + dy;
-                            let a = (outline_color[3] as f64 * (1.0 - dist / (outline_width + 1.0)))
-                                as u8;
+                            let dist = dist_sq.sqrt();
+                            let a = (base_alpha * (1.0 - dist * inv_dist)) as u8;
                             if a > 0 {
                                 buffer.blend_pixel(
                                     px as u32,
@@ -96,7 +101,6 @@ pub fn apply_opaque_box(
     _play_res_x: u32,
     _play_res_y: u32,
 ) {
-    // Calculate box position based on alignment
     let box_x = x - margin_l;
     let box_y = y - margin_v;
     let box_w = width + margin_l + margin_r;
@@ -114,41 +118,84 @@ pub fn apply_opaque_box(
     );
 }
 
-/// Apply clipping rectangle
+/// Apply clipping rectangle - only clears edge strips (O(perimeter) not O(area))
 pub fn apply_clip(buffer: &mut RenderBuffer, clip_rect: (i32, i32, i32, i32)) {
     let (x1, y1, x2, y2) = clip_rect;
     let w = buffer.width as i32;
     let h = buffer.height as i32;
 
-    // Clear pixels outside clip region
-    for y in 0..h {
-        for x in 0..w {
-            if x < x1 || x > x2 || y < y1 || y > y2 {
-                let idx = ((y as u32 * buffer.width + x as u32) * 4) as usize;
-                buffer.pixels[idx] = 0;
-                buffer.pixels[idx + 1] = 0;
-                buffer.pixels[idx + 2] = 0;
-                buffer.pixels[idx + 3] = 0;
+    // Clamp clip region to buffer bounds
+    let cx0 = x1.max(0);
+    let cy0 = y1.max(0);
+    let cx1 = x2.min(w - 1);
+    let cy1 = y2.min(h - 1);
+
+    // Clear top strip (y: 0..cy0)
+    for y in 0..cy0 {
+        let row_start = (y as u32 * buffer.width * 4) as usize;
+        let row_end = row_start + (buffer.width * 4) as usize;
+        buffer.pixels[row_start..row_end].fill(0);
+    }
+
+    // Clear bottom strip (y: cy1+1..h)
+    for y in (cy1 + 1)..h {
+        let row_start = (y as u32 * buffer.width * 4) as usize;
+        let row_end = row_start + (buffer.width * 4) as usize;
+        buffer.pixels[row_start..row_end].fill(0);
+    }
+
+    // Clear left strip (x: 0..cx0) for rows in clip y range
+    for y in cy0..=cy1 {
+        if cy0 < 0 || cy1 >= h {
+            continue;
+        }
+        let row_start = (y as u32 * buffer.width * 4) as usize;
+        let left_end = (cx0.max(0) as u32 * 4) as usize;
+        if left_end > 0 {
+            let end = (row_start + left_end).min(buffer.pixels.len());
+            buffer.pixels[row_start..end].fill(0);
+        }
+    }
+
+    // Clear right strip (x: cx1+1..w) for rows in clip y range
+    for y in cy0..=cy1 {
+        if cy0 < 0 || cy1 >= h {
+            continue;
+        }
+        let right_start = ((cx1 + 1).max(0) as u32 * 4) as usize;
+        let row_start = (y as u32 * buffer.width * 4) as usize;
+        let row_end = row_start + (buffer.width * 4) as usize;
+        if right_start < (buffer.width * 4) as usize {
+            let start = row_start + right_start;
+            if start < buffer.pixels.len() {
+                buffer.pixels[start..row_end].fill(0);
             }
         }
     }
 }
 
-/// Apply inverse clipping (hide inside clip region)
+/// Apply inverse clipping (hide inside clip region) - only clears inside rect
 pub fn apply_inverse_clip(buffer: &mut RenderBuffer, clip_rect: (i32, i32, i32, i32)) {
     let (x1, y1, x2, y2) = clip_rect;
     let w = buffer.width as i32;
     let h = buffer.height as i32;
 
-    for y in 0..h {
-        for x in 0..w {
-            if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
-                let idx = ((y as u32 * buffer.width + x as u32) * 4) as usize;
-                buffer.pixels[idx] = 0;
-                buffer.pixels[idx + 1] = 0;
-                buffer.pixels[idx + 2] = 0;
-                buffer.pixels[idx + 3] = 0;
-            }
+    // Clamp clip region to buffer bounds
+    let cx0 = x1.max(0);
+    let cy0 = y1.max(0);
+    let cx1 = x2.min(w - 1);
+    let cy1 = y2.min(h - 1);
+
+    // Only clear the inside of the clip rect
+    for y in cy0..=cy1 {
+        let row_start = (y as u32 * buffer.width * 4) as usize;
+        let left = (cx0.max(0) as u32 * 4) as usize;
+        let right = ((cx1 + 1).min(w) as u32 * 4) as usize;
+        let start = row_start + left;
+        let end = row_start + right;
+        if start < buffer.pixels.len() {
+            let end = end.min(buffer.pixels.len());
+            buffer.pixels[start..end].fill(0);
         }
     }
 }

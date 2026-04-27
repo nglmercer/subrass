@@ -504,32 +504,45 @@ impl Compositor {
         let scale_y = video_height as f64 / play_res_y as f64;
 
         // Calculate position (using full event text for measurement)
+        // Skip if position is explicitly set (calculate_position returns early)
         let (clean_text, _) = self.extract_clean_text(&event.text);
-        let shaped_full = TextShaper::shape(
-            &clean_text,
-            font,
-            font_size,
-            resolved.scale_x / 100.0,
-            resolved.scale_y / 100.0,
-            resolved.bold,
-            resolved.italic,
-            resolved.spacing,
-            resolved.color,
-            resolved.outline_color,
-            resolved.shadow_color,
-            resolved.angle,
-        );
-
-        let (mut base_x, mut base_y) = Self::calculate_position(
-            resolved,
-            shaped_full.width,
-            shaped_full.height,
-            shaped_full.baseline,
-            play_res_x,
-            play_res_y,
-            video_width,
-            video_height,
-        );
+        let (mut base_x, mut base_y) = if resolved.position.is_some() {
+            Self::calculate_position(
+                resolved,
+                0.0,
+                0.0,
+                0.0,
+                play_res_x,
+                play_res_y,
+                video_width,
+                video_height,
+            )
+        } else {
+            let shaped_full = TextShaper::shape(
+                &clean_text,
+                font,
+                font_size,
+                resolved.scale_x / 100.0,
+                resolved.scale_y / 100.0,
+                resolved.bold,
+                resolved.italic,
+                resolved.spacing,
+                resolved.color,
+                resolved.outline_color,
+                resolved.shadow_color,
+                resolved.angle,
+            );
+            Self::calculate_position(
+                resolved,
+                shaped_full.width,
+                shaped_full.height,
+                shaped_full.baseline,
+                play_res_x,
+                play_res_y,
+                video_width,
+                video_height,
+            )
+        };
 
         // Apply move animation
         if let Some(ref move_data) = resolved.move_data {
@@ -602,35 +615,15 @@ impl Compositor {
                 continue;
             }
 
-            // Resolve segment style (base + accumulated tags, no transforms)
-            let mut segment_resolved = Self::resolve_base_style(
-                &crate::types::Style {
-                    name: "Default".to_string(),
-                    font_name: resolved.font_name.clone(),
-                    font_size: resolved.font_size,
-                    primary_color: resolved.color,
-                    secondary_color: resolved.secondary_color,
-                    outline_color: resolved.outline_color,
-                    back_color: resolved.back_color,
-                    bold: resolved.bold,
-                    italic: resolved.italic,
-                    underline: resolved.underline,
-                    strike_out: resolved.strike_out,
-                    scale_x: resolved.scale_x,
-                    scale_y: resolved.scale_y,
-                    spacing: resolved.spacing,
-                    angle: resolved.angle,
-                    border_style: resolved.border_style,
-                    outline: resolved.outline,
-                    shadow: resolved.shadow,
-                    alignment: resolved.alignment,
-                    margin_l: resolved.margin_l,
-                    margin_r: resolved.margin_r,
-                    margin_v: resolved.margin_v,
-                    encoding: 1,
-                },
-                &segment.tags,
-            );
+            // Resolve segment style incrementally from parent (no heap allocation)
+            let mut segment_resolved = resolved.clone();
+            // Apply segment-level overrides (skip Transform tags)
+            for tag in &segment.tags {
+                if let OverrideTag::Transform { .. } = tag {
+                    continue;
+                }
+                Self::apply_single_tag(&mut segment_resolved, tag);
+            }
 
             // Apply event-level margin overrides
             if event.margin_l != 0 {
@@ -670,87 +663,20 @@ impl Compositor {
                 segment_resolved.angle,
             );
 
-            // Render outline for this segment
-            if segment_resolved.border_style == 1 && segment_resolved.outline > 0.0 {
-                let outline_scale = segment_resolved.outline * (scale_x + scale_y) / 2.0;
-                let outline_color = segment_resolved.outline_color.to_rgba();
-                let outline_alpha = 255 - outline_color[3];
+            // Pre-compute effect parameters
+            let outline_active =
+                segment_resolved.border_style == 1 && segment_resolved.outline > 0.0;
+            let outline_scale = segment_resolved.outline * (scale_x + scale_y) / 2.0;
+            let outline_color_rgba = segment_resolved.outline_color.to_rgba();
+            let outline_alpha = (255 - outline_color_rgba[3] as u32) as u8;
 
-                for glyph in &shaped.glyphs {
-                    let cached = self.glyph_cache.get_or_rasterize(
-                        segment_font,
-                        glyph.glyph_id,
-                        font_size,
-                        glyph.bold,
-                        glyph.italic,
-                    );
+            let shadow_active = segment_resolved.shadow > 0.0;
+            let shadow_offset_x = segment_resolved.shadow * scale_x;
+            let shadow_offset_y = segment_resolved.shadow * scale_y;
+            let shadow_color_rgba = segment_resolved.shadow_color.to_rgba();
+            let shadow_alpha = (255 - shadow_color_rgba[3] as u32) as u8;
 
-                    if cached.width > 0 && cached.height > 0 {
-                        let gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
-                        let gy =
-                            (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
-
-                        effects::apply_outline(
-                            buffer,
-                            &cached.bitmap,
-                            cached.width,
-                            cached.height,
-                            gx,
-                            gy,
-                            outline_scale,
-                            [
-                                outline_color[0],
-                                outline_color[1],
-                                outline_color[2],
-                                (outline_alpha as f64 * alpha_mult) as u8,
-                            ],
-                        );
-                    }
-                }
-            }
-
-            // Render shadow for this segment
-            if segment_resolved.shadow > 0.0 {
-                let shadow_offset_x = segment_resolved.shadow * scale_x;
-                let shadow_offset_y = segment_resolved.shadow * scale_y;
-                let shadow_color = segment_resolved.shadow_color.to_rgba();
-                let shadow_alpha = 255 - shadow_color[3];
-
-                for glyph in &shaped.glyphs {
-                    let cached = self.glyph_cache.get_or_rasterize(
-                        segment_font,
-                        glyph.glyph_id,
-                        font_size,
-                        glyph.bold,
-                        glyph.italic,
-                    );
-
-                    if cached.width > 0 && cached.height > 0 {
-                        let gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
-                        let gy =
-                            (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
-
-                        effects::apply_shadow(
-                            buffer,
-                            &cached.bitmap,
-                            cached.width,
-                            cached.height,
-                            gx,
-                            gy,
-                            shadow_offset_x,
-                            shadow_offset_y,
-                            [
-                                shadow_color[0],
-                                shadow_color[1],
-                                shadow_color[2],
-                                (shadow_alpha as f64 * alpha_mult) as u8,
-                            ],
-                        );
-                    }
-                }
-            }
-
-            // Render main text glyphs for this segment
+            // Single pass over glyphs: cache lookup once, render outline + shadow + fill
             for glyph in &shaped.glyphs {
                 let cached = self.glyph_cache.get_or_rasterize(
                     segment_font,
@@ -760,49 +686,84 @@ impl Compositor {
                     glyph.italic,
                 );
 
-                if cached.width > 0 && cached.height > 0 {
-                    let gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
-                    let gy = (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
+                if cached.width == 0 || cached.height == 0 {
+                    continue;
+                }
 
-                    let color = glyph.color.to_rgba();
-                    let color_alpha = 255 - color[3];
+                let gx = (base_x + x_offset + glyph.x + cached.bearing_x as f64) as i32;
+                let gy = (base_y + line_y_offset + glyph.y + cached.bearing_y as f64) as i32;
 
-                    for py in 0..cached.height {
-                        for px in 0..cached.width {
-                            let coverage = cached.bitmap[(py * cached.width + px) as usize];
-                            if coverage > 0 {
-                                let a = ((coverage as u32 * color_alpha as u32 / 255)
-                                    * alpha as u32
-                                    / 255) as u8;
-                                buffer.blend_pixel(
-                                    (gx + px as i32) as u32,
-                                    (gy + py as i32) as u32,
-                                    color[0],
-                                    color[1],
-                                    color[2],
-                                    a,
-                                );
-                            }
+                // Render outline
+                if outline_active {
+                    effects::apply_outline(
+                        buffer,
+                        &cached.bitmap,
+                        cached.width,
+                        cached.height,
+                        gx,
+                        gy,
+                        outline_scale,
+                        [
+                            outline_color_rgba[0],
+                            outline_color_rgba[1],
+                            outline_color_rgba[2],
+                            (outline_alpha as f64 * alpha_mult) as u8,
+                        ],
+                    );
+                }
+
+                // Render shadow
+                if shadow_active {
+                    effects::apply_shadow(
+                        buffer,
+                        &cached.bitmap,
+                        cached.width,
+                        cached.height,
+                        gx,
+                        gy,
+                        shadow_offset_x,
+                        shadow_offset_y,
+                        [
+                            shadow_color_rgba[0],
+                            shadow_color_rgba[1],
+                            shadow_color_rgba[2],
+                            (shadow_alpha as f64 * alpha_mult) as u8,
+                        ],
+                    );
+                }
+
+                // Render main text
+                let color = glyph.color.to_rgba();
+                let color_alpha = 255 - color[3];
+
+                for py in 0..cached.height {
+                    for px in 0..cached.width {
+                        let coverage = cached.bitmap[(py * cached.width + px) as usize];
+                        if coverage > 0 {
+                            let a = ((coverage as u32 * color_alpha as u32 / 255) * alpha as u32
+                                / 255) as u8;
+                            buffer.blend_pixel(
+                                (gx + px as i32) as u32,
+                                (gy + py as i32) as u32,
+                                color[0],
+                                color[1],
+                                color[2],
+                                a,
+                            );
                         }
                     }
                 }
-            }
 
-            // Render underline for this segment
-            if segment_resolved.underline {
-                let line_width = 2;
-                let color = segment_resolved.color.to_rgba();
-                let color_alpha = 255 - color[3];
-
-                for glyph in &shaped.glyphs {
-                    let gx = (base_x + x_offset + glyph.x) as i32;
-                    let gy = (base_y + line_y_offset + glyph.y + shaped.baseline * 0.9) as i32;
-                    let gw = glyph.advance as i32;
-
+                // Render underline
+                if segment_resolved.underline {
+                    let line_width = 2;
+                    let color = segment_resolved.color.to_rgba();
+                    let color_alpha = 255 - color[3];
+                    let ul_gy = (gy as f64 + shaped.baseline * 0.9) as i32;
                     buffer.fill_rect(
                         gx,
-                        gy,
-                        gw,
+                        ul_gy,
+                        glyph.advance as i32,
                         line_width,
                         color[0],
                         color[1],
@@ -810,23 +771,17 @@ impl Compositor {
                         (color_alpha as f64 * alpha_mult) as u8,
                     );
                 }
-            }
 
-            // Render strikeout for this segment
-            if segment_resolved.strike_out {
-                let line_width = 2;
-                let color = segment_resolved.color.to_rgba();
-                let color_alpha = 255 - color[3];
-
-                for glyph in &shaped.glyphs {
-                    let gx = (base_x + x_offset + glyph.x) as i32;
-                    let gy = (base_y + line_y_offset + glyph.y + shaped.baseline * 0.35) as i32;
-                    let gw = glyph.advance as i32;
-
+                // Render strikeout
+                if segment_resolved.strike_out {
+                    let line_width = 2;
+                    let color = segment_resolved.color.to_rgba();
+                    let color_alpha = 255 - color[3];
+                    let so_gy = (gy as f64 + shaped.baseline * 0.35) as i32;
                     buffer.fill_rect(
                         gx,
-                        gy,
-                        gw,
+                        so_gy,
+                        glyph.advance as i32,
                         line_width,
                         color[0],
                         color[1],

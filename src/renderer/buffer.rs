@@ -55,26 +55,28 @@ impl RenderBuffer {
 
     /// Blend a pixel with alpha compositing (source-over)
     #[inline]
+    #[allow(clippy::manual_checked_ops)]
     pub fn blend_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
         if x >= self.width || y >= self.height || a == 0 {
             return;
         }
         let idx = ((y * self.width + x) * 4) as usize;
-        let src_a = a as f32 / 255.0;
-        let dst_a = self.pixels[idx + 3] as f32 / 255.0;
-        let out_a = src_a + dst_a * (1.0 - src_a);
+        let src_a = a as u32;
+        let dst_a = self.pixels[idx + 3] as u32;
+        let out_a = src_a + dst_a * (255 - src_a) / 255;
 
-        if out_a > 0.0 {
-            self.pixels[idx] = ((r as f32 * src_a
-                + self.pixels[idx] as f32 * dst_a * (1.0 - src_a))
+        if out_a > 0 {
+            let inv_src = 255 - src_a;
+            self.pixels[idx] = ((r as u32 * src_a
+                + self.pixels[idx] as u32 * dst_a * inv_src / 255)
                 / out_a) as u8;
-            self.pixels[idx + 1] = ((g as f32 * src_a
-                + self.pixels[idx + 1] as f32 * dst_a * (1.0 - src_a))
+            self.pixels[idx + 1] = ((g as u32 * src_a
+                + self.pixels[idx + 1] as u32 * dst_a * inv_src / 255)
                 / out_a) as u8;
-            self.pixels[idx + 2] = ((b as f32 * src_a
-                + self.pixels[idx + 2] as f32 * dst_a * (1.0 - src_a))
+            self.pixels[idx + 2] = ((b as u32 * src_a
+                + self.pixels[idx + 2] as u32 * dst_a * inv_src / 255)
                 / out_a) as u8;
-            self.pixels[idx + 3] = (out_a * 255.0) as u8;
+            self.pixels[idx + 3] = ((out_a * 255 + 128) / 255) as u8;
         }
     }
 
@@ -85,13 +87,12 @@ impl RenderBuffer {
             return;
         }
         let idx = ((y * self.width + x) * 4) as usize;
-        let src_a = a as f32 / 255.0;
-        let inv_src_a = 1.0 - src_a;
+        let inv = 255 - a as u32;
 
-        self.pixels[idx] = (r as f32 + self.pixels[idx] as f32 * inv_src_a) as u8;
-        self.pixels[idx + 1] = (g as f32 + self.pixels[idx + 1] as f32 * inv_src_a) as u8;
-        self.pixels[idx + 2] = (b as f32 + self.pixels[idx + 2] as f32 * inv_src_a) as u8;
-        self.pixels[idx + 3] = (a as f32 + self.pixels[idx + 3] as f32 * inv_src_a) as u8;
+        self.pixels[idx] = (r as u32 + self.pixels[idx] as u32 * inv / 255) as u8;
+        self.pixels[idx + 1] = (g as u32 + self.pixels[idx + 1] as u32 * inv / 255) as u8;
+        self.pixels[idx + 2] = (b as u32 + self.pixels[idx + 2] as u32 * inv / 255) as u8;
+        self.pixels[idx + 3] = (a as u32 + self.pixels[idx + 3] as u32 * inv / 255) as u8;
     }
 
     /// Fill a rectangle with color
@@ -117,7 +118,7 @@ impl RenderBuffer {
         &self.pixels
     }
 
-    /// Apply box blur (3-pass for Gaussian approximation)
+    /// Apply box blur (3-pass for Gaussian approximation) with sliding window
     pub fn box_blur(&mut self, radius: u32) {
         if radius == 0 {
             return;
@@ -127,25 +128,55 @@ impl RenderBuffer {
         let h = self.height as i32;
         let mut out = vec![0u8; self.pixels.len()];
 
-        // Horizontal pass
+        // Horizontal pass with sliding window
         for y in 0..h {
-            for x in 0..w {
-                let mut sum_r = 0u32;
-                let mut sum_g = 0u32;
-                let mut sum_b = 0u32;
-                let mut sum_a = 0u32;
-                let mut count = 0u32;
+            // Initialize window sums for x=0
+            let mut sum_r = 0u32;
+            let mut sum_g = 0u32;
+            let mut sum_b = 0u32;
+            let mut sum_a = 0u32;
+            let mut count = 0u32;
 
-                for dx in -r..=r {
-                    let sx = x + dx;
-                    if sx >= 0 && sx < w {
-                        let idx = ((y * w + sx) * 4) as usize;
-                        sum_r += self.pixels[idx] as u32;
-                        sum_g += self.pixels[idx + 1] as u32;
-                        sum_b += self.pixels[idx + 2] as u32;
-                        sum_a += self.pixels[idx + 3] as u32;
-                        count += 1;
-                    }
+            for dx in -r..=r {
+                let sx = dx;
+                if sx >= 0 && sx < w {
+                    let idx = ((y * w + sx) * 4) as usize;
+                    sum_r += self.pixels[idx] as u32;
+                    sum_g += self.pixels[idx + 1] as u32;
+                    sum_b += self.pixels[idx + 2] as u32;
+                    sum_a += self.pixels[idx + 3] as u32;
+                    count += 1;
+                }
+            }
+
+            let idx = ((y * w) * 4) as usize;
+            out[idx] = (sum_r / count) as u8;
+            out[idx + 1] = (sum_g / count) as u8;
+            out[idx + 2] = (sum_b / count) as u8;
+            out[idx + 3] = (sum_a / count) as u8;
+
+            // Slide window: for each subsequent x, add right edge, remove left edge
+            for x in 1..w {
+                // Add new pixel entering window (right side)
+                let add_x = x + r;
+                if add_x < w {
+                    let idx = ((y * w + add_x) * 4) as usize;
+                    sum_r += self.pixels[idx] as u32;
+                    sum_g += self.pixels[idx + 1] as u32;
+                    sum_b += self.pixels[idx + 2] as u32;
+                    sum_a += self.pixels[idx + 3] as u32;
+                    count += 1;
+                }
+
+                // Remove pixel leaving window (left side)
+                let remove_x = x - r - 1;
+                if remove_x >= 0 && remove_x < w {
+                    let idx = ((y * w + remove_x) * 4) as usize;
+                    sum_r -= self.pixels[idx] as u32;
+                    sum_g -= self.pixels[idx + 1] as u32;
+                    sum_b -= self.pixels[idx + 2] as u32;
+                    sum_a -= self.pixels[idx + 3] as u32;
+                    count -= 1;
                 }
 
                 let idx = ((y * w + x) * 4) as usize;
@@ -156,26 +187,56 @@ impl RenderBuffer {
             }
         }
 
-        // Vertical pass
+        // Vertical pass with sliding window
         self.pixels.fill(0);
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum_r = 0u32;
-                let mut sum_g = 0u32;
-                let mut sum_b = 0u32;
-                let mut sum_a = 0u32;
-                let mut count = 0u32;
+        for x in 0..w {
+            // Initialize window sums for y=0
+            let mut sum_r = 0u32;
+            let mut sum_g = 0u32;
+            let mut sum_b = 0u32;
+            let mut sum_a = 0u32;
+            let mut count = 0u32;
 
-                for dy in -r..=r {
-                    let sy = y + dy;
-                    if sy >= 0 && sy < h {
-                        let idx = ((sy * w + x) * 4) as usize;
-                        sum_r += out[idx] as u32;
-                        sum_g += out[idx + 1] as u32;
-                        sum_b += out[idx + 2] as u32;
-                        sum_a += out[idx + 3] as u32;
-                        count += 1;
-                    }
+            for dy in -r..=r {
+                let sy = dy;
+                if sy >= 0 && sy < h {
+                    let idx = ((sy * w + x) * 4) as usize;
+                    sum_r += out[idx] as u32;
+                    sum_g += out[idx + 1] as u32;
+                    sum_b += out[idx + 2] as u32;
+                    sum_a += out[idx + 3] as u32;
+                    count += 1;
+                }
+            }
+
+            let idx = (x * 4) as usize;
+            self.pixels[idx] = (sum_r / count) as u8;
+            self.pixels[idx + 1] = (sum_g / count) as u8;
+            self.pixels[idx + 2] = (sum_b / count) as u8;
+            self.pixels[idx + 3] = (sum_a / count) as u8;
+
+            // Slide window: for each subsequent y, add bottom edge, remove top edge
+            for y in 1..h {
+                // Add new pixel entering window (bottom)
+                let add_y = y + r;
+                if add_y < h {
+                    let idx = ((add_y * w + x) * 4) as usize;
+                    sum_r += out[idx] as u32;
+                    sum_g += out[idx + 1] as u32;
+                    sum_b += out[idx + 2] as u32;
+                    sum_a += out[idx + 3] as u32;
+                    count += 1;
+                }
+
+                // Remove pixel leaving window (top)
+                let remove_y = y - r - 1;
+                if remove_y >= 0 && remove_y < h {
+                    let idx = ((remove_y * w + x) * 4) as usize;
+                    sum_r -= out[idx] as u32;
+                    sum_g -= out[idx + 1] as u32;
+                    sum_b -= out[idx + 2] as u32;
+                    sum_a -= out[idx + 3] as u32;
+                    count -= 1;
                 }
 
                 let idx = ((y * w + x) * 4) as usize;
@@ -214,7 +275,6 @@ mod tests {
         buf.set_pixel(5, 5, 0, 0, 0, 128);
         buf.blend_pixel(5, 5, 255, 255, 255, 128);
         let px = buf.get_pixel(5, 5);
-        // Alpha compositing: result should be blended
         assert!(px[3] > 128);
     }
 }

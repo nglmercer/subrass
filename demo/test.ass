@@ -1,19 +1,112 @@
 [Script Info]
-; Demo ASS file for subrass
-Title: Demo Subtitle
+; Comprehensive demo ASS file for subrass
+; Showcases most ASS override tags and features
+Title: subrass Demo
 ScriptType: v4.00+
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 PlayResX: 1920
 PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1
+Style: TopComment,Arial,36,&H00FFFF00,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,1,8,10,10,10,1
+Style: Credit,Arial,32,&H00CCCCCC,&H000000FF,&H00000000,&H80000000,0,1,0,0,100,100,0,0,1,1,0,2,10,10,50,1
+Style: Karaoke,Arial,56,&H00FFFFFF,&H00FFD700,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,2,10,10,50,1
+Style: Title,Arial,72,&H00FF6B6B,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,2,5,10,10,50,1
+Style: SmallText,Arial,24,&H00AAAAAA,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,0,7,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Welcome to subrass!
-Dialogue: 0,0:00:05.00,0:00:09.00,Default,,0,0,0,,This is a Rust-based ASS subtitle parser.
-Dialogue: 0,0:00:10.00,0:00:14.00,Default,,0,0,0,,{\pos(960,100)\an8}Positioned at top center
-Dialogue: 0,0:00:15.00,0:00:20.00,Default,,0,0,0,,{\fad(500,500)}Fade in and fade out
-Dialogue: 0,0:00:21.00,0:00:26.00,Default,,0,0,0,,{\c&H0000FF&\b1}Blue and bold text
+
+; === Intro ===
+Dialogue: 0,0:00:03.00,0:00:08.00,Title,,0,0,0,,{\an5\pos(960,540)}subrass DEMO
+Dialogue: 0,0:00:08.00,0:00:11.00,SmallText,,0,0,0,,{\an8\pos(960,100)}ASS Subtitle Renderer for WebAssembly
+
+; === Basic dialogue ===
+Dialogue: 0,0:00:15.00,0:00:20.00,Default,,0,0,0,,Welcome to the subrass demo!
+Dialogue: 0,0:00:21.00,0:00:26.00,Default,,0,0,0,,This showcases ASS subtitle rendering in the browser via WebAssembly.
+
+; === Color overrides ===
+Dialogue: 0,0:00:30.00,0:00:34.00,Default,,0,0,0,,{\c&HFF0000&}This text is red
+Dialogue: 0,0:00:35.00,0:00:39.00,Default,,0,0,0,,{\c&H00FF00&}This text is green
+Dialogue: 0,0:00:40.00,0:00:44.00,Default,,0,0,0,,{\c&H0000FF&}This text is blue
+Dialogue: 0,0:00:45.00,0:00:50.00,Default,,0,0,0,,{\c&HFF00FF&\b1}Bold magenta text
+
+; === Font formatting ===
+Dialogue: 0,0:00:55.00,0:01:00.00,Default,,0,0,0,,{\fnTimes New Roman\fs60}Times New Roman 60pt
+Dialogue: 0,0:01:05.00,0:01:10.00,Default,,0,0,0,,{\b1}Bold text{\b0} and {\i1}italic text{\i0}
+Dialogue: 0,0:01:12.00,0:01:17.00,Default,,0,0,0,,{\u1}Underlined{\u0} and {\s1}strikethrough{\s0} text
+
+; === Positioning ===
+Dialogue: 0,0:01:22.00,0:01:27.00,Default,,0,0,0,,{\an1\pos(200,900)}Bottom-left aligned
+Dialogue: 0,0:01:28.00,0:01:33.00,Default,,0,0,0,,{\an2\pos(960,900)}Bottom-center aligned
+Dialogue: 0,0:01:34.00,0:01:39.00,Default,,0,0,0,,{\an3\pos(1720,900)}Bottom-right aligned
+Dialogue: 0,0:01:40.00,0:01:45.00,Default,,0,0,0,,{\an8\pos(960,50)}Top-center aligned
+
+; === Fade effects ===
+Dialogue: 0,0:01:50.00,0:01:57.00,Default,,0,0,0,,{\fad(500,500)}Fade in over 500ms and fade out over 500ms
+Dialogue: 0,0:02:00.00,0:02:10.00,Default,,0,0,0,,{\fade(255,0,255,0,500,2000,500,2000)}Complex fade with alpha control
+
+; === Movement ===
+Dialogue: 0,0:02:15.00,0:02:25.00,Default,,0,0,0,,{\move(0,540,1920,540)}Sliding text from left to right
+Dialogue: 0,0:02:28.00,0:02:38.00,Default,,0,0,0,,{\move(960,1080,960,0,0,8000)}Text rising from bottom to top
+
+; === Transform ===
+Dialogue: 0,0:02:45.00,0:02:55.00,Default,,0,0,0,,{\t(0,5000,\c&HFF0000&\fs80)}Gradually turning red and growing
+Dialogue: 0,0:03:00.00,0:03:10.00,Default,,0,0,0,,{\t(0,3000,\c&HFF00FF&\b1)}{\t(3000,6000,\c&H00FFFF&\b0)}Multi-stage color transform
+
+; === Rotation ===
+Dialogue: 0,0:03:15.00,0:03:25.00,Default,,0,0,0,,{\frx10\fry20\frz350}3D rotated text (X:10 Y:20 Z:350)
+Dialogue: 0,0:03:28.00,0:03:38.00,Default,,0,0,0,,{\frz45}Rotated 45 degrees clockwise
+
+; === Border and shadow ===
+Dialogue: 0,0:03:45.00,0:03:52.00,Default,,0,0,0,,{\bord5}Thick border (5px)
+Dialogue: 0,0:03:55.00,0:04:02.00,Default,,0,0,0,,{\shad5}Large shadow (5px)
+Dialogue: 0,0:04:05.00,0:04:12.00,Default,,0,0,0,,{\bord0\shad0}No border, no shadow
+Dialogue: 0,0:04:15.00,0:04:22.00,Default,,0,0,0,,{\bord3\shad4\c&HFFD700&}Gold text with border and shadow
+
+; === Scale and spacing ===
+Dialogue: 0,0:04:30.00,0:04:38.00,Default,,0,0,0,,{\fscx200}200% horizontal scale
+Dialogue: 0,0:04:40.00,0:04:48.00,Default,,0,0,0,,{\fscy200}200% vertical scale
+Dialogue: 0,0:04:50.00,0:04:58.00,Default,,0,0,0,,{\fsp20}Wide character spacing (20px)
+Dialogue: 0,0:05:00.00,0:05:08.00,Default,,0,0,0,,{\fscx150\fscy150\fsp5}Combined scaling and spacing
+
+; === Clip ===
+Dialogue: 0,0:05:15.00,0:05:25.00,Default,,0,0,0,,{\clip(200,400,1720,680)}Text clipped to a rectangle region in the center
+Dialogue: 0,0:05:28.00,0:05:38.00,Default,,0,0,0,,{\iclip(760,440,1160,640)}Inverse clip - text visible only outside center box
+
+; === Blur ===
+Dialogue: 0,0:05:45.00,0:05:52.00,Default,,0,0,0,,{\be1}Blur effect (Gaussian)\N{\be2}Stronger blur\N{\be3}Maximum blur
+Dialogue: 0,0:05:55.00,0:06:02.00,Default,,0,0,0,,{\blur5}Blur with custom sigma (5px)
+
+; === Alignment within style ===
+Dialogue: 0,0:06:10.00,0:06:20.00,TopComment,,0,0,0,,This is styled as "TopComment" - appears at the top
+Dialogue: 0,0:06:25.00,0:06:35.00,Credit,,0,0,0,,Styled as "Credit" - italic, bottom-aligned
+Dialogue: 0,0:06:40.00,0:06:50.00,SmallText,,0,0,0,,{\an2}Small text style - great for annotations
+
+; === Multiple simultaneous dialogues ===
+Dialogue: 0,0:07:00.00,0:07:08.00,Default,,0,0,0,,{\an7\pos(100,200)}Speaker A: Hello there!
+Dialogue: 0,0:07:02.00,0:07:10.00,Default,,0,0,0,,{\an9\pos(1700,200)}Speaker B: Hi, how are you?
+Dialogue: 0,0:07:06.00,0:07:12.00,Default,,0,0,0,,{\an7\pos(100,280)}Speaker A: I'm doing great!
+
+; === Nested overrides ===
+Dialogue: 0,0:07:20.00,0:07:32.00,Default,,0,0,0,,{\an5\pos(960,540)\frz15\fscx120\fscy120\b1\c&H00FF80&}Multiple overrides: rotated, scaled, bold, colored
+
+; === Wrap style ===
+Dialogue: 0,0:07:40.00,0:07:50.00,Default,,0,0,0,,{\q1}This text uses smart wrapping (q1) to avoid breaking words in awkward places
+Dialogue: 0,0:07:55.00,0:08:05.00,Default,,0,0,0,,{\q2}This text uses end-of-line wrapping (q2)\NLine breaks only at \N
+
+; === Drawing (vector shapes) ===
+Dialogue: 0,0:08:15.00,0:08:30.00,Default,,0,0,0,,{\p1\bord2\c&HFF6B00}m 960 400 l 960 680 l 1100 680 l 1100 540 l 1240 540 l 1240 400{\p0}Vector drawing - a simple house shape
+
+; === Reset style ===
+Dialogue: 0,0:08:40.00,0:08:50.00,Default,,0,0,0,,{\fnArial\fs60\b1\c&HFF0000&}Modified text{\r}Reset to default style
+
+; === Quote markers ===
+Dialogue: 0,0:09:00.00,0:09:10.00,Default,,0,0,0,,{\an5\pos(960,540)\fs40\c&H888888&}{\i1}"The only way to do great work\Nis to love what you do."{\i0}\N— Steve Jobs
+
+; === Outro ===
+Dialogue: 0,0:09:20.00,0:09:30.00,Title,,0,0,0,,{\an5\pos(960,540)\fad(1000,1000)}Thanks for watching!
+Dialogue: 0,0:09:30.00,0:09:40.00,SmallText,,0,0,0,,{\an8\pos(960,100)\fad(2000,1000)}Built with Rust + WebAssembly

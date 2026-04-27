@@ -803,7 +803,7 @@ impl Compositor {
                     buffer.fill_rect(
                         final_gx,
                         ul_gy,
-                        glyph.advance as i32,
+                        rot_w as i32,
                         line_width,
                         color[0],
                         color[1],
@@ -814,14 +814,14 @@ impl Compositor {
 
                 // Render strikeout
                 if segment_resolved.strike_out {
-                    let line_width = 2;
+                    let line_width = 3;
                     let color = segment_resolved.color.to_rgba();
                     let color_alpha = 255 - color[3];
-                    let so_gy = (final_gy as f64 + shaped.baseline * 0.35) as i32;
+                    let so_gy = (final_gy as f64 + rot_h as f64 * 0.4) as i32;
                     buffer.fill_rect(
                         final_gx,
                         so_gy,
-                        glyph.advance as i32,
+                        rot_w as i32,
                         line_width,
                         color[0],
                         color[1],

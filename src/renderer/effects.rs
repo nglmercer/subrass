@@ -59,6 +59,7 @@ pub fn apply_outline(
         for gx in 0..glyph_width as i32 {
             let alpha = glyph_bitmap[(gy as u32 * glyph_width + gx as u32) as usize];
             if alpha > 0 {
+                let glyph_alpha_mult = alpha as f64 / 255.0;
                 for dy in -radius..=radius {
                     let dy_sq = (dy * dy) as f64;
                     for dx in -radius..=radius {
@@ -66,7 +67,7 @@ pub fn apply_outline(
                         if dist_sq <= max_dist_sq {
                             // Quadratic falloff: alpha = base * (1 - dist²/max²)
                             // Visually nearly identical to linear, but eliminates sqrt
-                            let a = (base_alpha * (1.0 - dist_sq * inv_max_dist_sq)) as u8;
+                            let a = (base_alpha * glyph_alpha_mult * (1.0 - dist_sq * inv_max_dist_sq)) as u8;
                             if a > 0 {
                                 let px = x + gx + dx;
                                 let py = y + gy + dy;

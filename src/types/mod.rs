@@ -7,7 +7,7 @@ pub mod time;
 
 pub use color::Color;
 pub use event::{Event, EventType};
-pub use override_tag::OverrideTag;
+pub use override_tag::{parse_text_segments, OverrideTag, TextSegment};
 pub use script_info::{ScriptInfo, ScriptType, YCbCrMatrix};
 pub use style::Style;
 pub use time::Time;

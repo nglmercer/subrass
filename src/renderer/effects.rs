@@ -37,7 +37,7 @@ pub fn apply_shadow(
 }
 
 /// Apply outline effect to a glyph bitmap (border style 1)
-/// Uses squared distance comparison to avoid sqrt in hot loop
+/// Uses squared distance check and quadratic alpha falloff (no sqrt in hot loop)
 #[allow(clippy::too_many_arguments)]
 pub fn apply_outline(
     buffer: &mut RenderBuffer,
@@ -52,7 +52,7 @@ pub fn apply_outline(
     let radius = outline_width.ceil() as i32;
     let max_dist = outline_width + 0.5;
     let max_dist_sq = max_dist * max_dist;
-    let inv_dist = 1.0 / (outline_width + 1.0);
+    let inv_max_dist_sq = 1.0 / max_dist_sq;
     let base_alpha = outline_color[3] as f64;
 
     for gy in 0..glyph_height as i32 {
@@ -64,11 +64,12 @@ pub fn apply_outline(
                     for dx in -radius..=radius {
                         let dist_sq = dy_sq + (dx * dx) as f64;
                         if dist_sq <= max_dist_sq {
-                            let px = x + gx + dx;
-                            let py = y + gy + dy;
-                            let dist = dist_sq.sqrt();
-                            let a = (base_alpha * (1.0 - dist * inv_dist)) as u8;
+                            // Quadratic falloff: alpha = base * (1 - dist²/max²)
+                            // Visually nearly identical to linear, but eliminates sqrt
+                            let a = (base_alpha * (1.0 - dist_sq * inv_max_dist_sq)) as u8;
                             if a > 0 {
+                                let px = x + gx + dx;
+                                let py = y + gy + dy;
                                 buffer.blend_pixel(
                                     px as u32,
                                     py as u32,

@@ -111,18 +111,18 @@ impl TextShaper {
         let scale = PxScale::from(font_size as f32);
         let scaled = font.as_scaled(scale);
         let mut width = 0.0_f64;
-        let chars: Vec<char> = text.chars().collect();
+        let mut first = true;
 
-        for (i, ch) in chars.iter().enumerate() {
-            if *ch == '\n' || *ch == '\r' {
+        for ch in text.chars() {
+            if ch == '\n' || ch == '\r' {
                 continue;
             }
-            let glyph_id = font.glyph_id(*ch);
-            width += scaled.h_advance(glyph_id) as f64;
-            // Add spacing between characters (not after last)
-            if i < chars.len() - 1 {
+            let glyph_id = font.glyph_id(ch);
+            if !first {
                 width += spacing;
             }
+            width += scaled.h_advance(glyph_id) as f64;
+            first = false;
         }
 
         width

@@ -153,35 +153,56 @@ impl DrawingParser {
     fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<(f64, ())> {
         Self::skip_whitespace(chars);
 
-        let mut num_str = String::new();
+        let mut value: f64 = 0.0;
+        let mut sign = 1.0;
+        let mut has_digits = false;
+        let mut decimal_place = 0.0;
 
+        // Sign
         if let Some(&ch) = chars.peek() {
-            if ch == '-' || ch == '+' {
-                num_str.push(ch);
+            if ch == '-' {
+                sign = -1.0;
+                chars.next();
+            } else if ch == '+' {
                 chars.next();
             }
         }
 
-        let mut has_digits = false;
+        // Integer part
         while let Some(&ch) = chars.peek() {
             if ch.is_ascii_digit() {
-                num_str.push(ch);
+                value = value * 10.0 + (ch as u32 - b'0' as u32) as f64;
                 has_digits = true;
-                chars.next();
-            } else if ch == '.' && !num_str.contains('.') {
-                num_str.push(ch);
                 chars.next();
             } else {
                 break;
             }
         }
 
-        if !has_digits || num_str == "-" || num_str == "+" {
+        // Decimal part
+        if let Some(&'.') = chars.peek() {
+            chars.next(); // consume '.'
+            while let Some(&ch) = chars.peek() {
+                if ch.is_ascii_digit() {
+                    value = value * 10.0 + (ch as u32 - b'0' as u32) as f64;
+                    decimal_place += 1.0;
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if !has_digits {
             return None;
         }
 
-        let value: f64 = num_str.parse().ok()?;
-        Some((value, ()))
+        // Apply decimal places
+        if decimal_place > 0.0 {
+            value /= 10.0f64.powf(decimal_place);
+        }
+
+        Some((sign * value, ()))
     }
 
     fn commands_to_polygons(commands: &[DrawCommand]) -> Vec<Vec<(f64, f64)>> {
@@ -262,8 +283,11 @@ impl DrawingParser {
         let min_y = (min_y as i32).max(0);
         let max_y = (max_y as i32).min(buffer.height as i32 - 1);
 
+        // Reuse intersections Vec across scanlines
+        let mut intersections = Vec::with_capacity(polygon.len());
+
         for scan_y in min_y..=max_y {
-            let mut intersections = Vec::new();
+            intersections.clear();
 
             for i in 0..polygon.len() {
                 let j = (i + 1) % polygon.len();

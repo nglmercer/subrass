@@ -99,129 +99,85 @@ impl Compositor {
         }
     }
 
-    /// Apply \t transform animations to a resolved style
-    fn apply_transforms(
-        resolved: &mut ResolvedStyle,
-        transforms: &[OverrideTag],
-        time_ms: u64,
-        start_ms: u64,
-    ) {
-        let elapsed = time_ms.saturating_sub(start_ms);
-
-        for tag in transforms {
-            if let OverrideTag::Transform {
-                t1,
-                t2,
-                accel,
-                tags,
-            } = tag
-            {
-                // Check if current time is within the animation range
-                if elapsed < *t1 || elapsed > *t2 {
-                    continue;
+    /// Apply transform tags with a given progress (0.0 to 1.0)
+    fn apply_transform_tags(resolved: &mut ResolvedStyle, tags: &[OverrideTag], progress: f64) {
+        for target in tags {
+            match target {
+                OverrideTag::Blur(b) => {
+                    let from = resolved.blur;
+                    resolved.blur = from + (b - from) * progress;
                 }
-
-                // Calculate progress
-                let duration = t2 - t1;
-                let raw_progress = if duration > 0 {
-                    (elapsed - *t1) as f64 / duration as f64
-                } else {
-                    1.0
-                };
-
-                let progress = Self::apply_accel(raw_progress, *accel);
-
-                // Apply each target tag with interpolation
-                for target in tags {
-                    match target {
-                        OverrideTag::Blur(b) => {
-                            // Interpolate from current blur to target
-                            let from = resolved.blur;
-                            resolved.blur = from + (b - from) * progress;
-                        }
-                        OverrideTag::EdgeBlur(b) => {
-                            let from = resolved.blur;
-                            resolved.blur = from + (b - from) * progress;
-                        }
-                        OverrideTag::Border(b) => {
-                            let from = resolved.outline;
-                            resolved.outline = from + (b - from) * progress;
-                        }
-                        OverrideTag::Shadow(s) => {
-                            let from = resolved.shadow;
-                            resolved.shadow = from + (s - from) * progress;
-                        }
-                        OverrideTag::PrimaryColor(c) => {
-                            resolved.color = Self::interpolate_color(resolved.color, *c, progress);
-                        }
-                        OverrideTag::SecondaryColor(c) => {
-                            resolved.secondary_color =
-                                Self::interpolate_color(resolved.secondary_color, *c, progress);
-                        }
-                        OverrideTag::OutlineColor(c) => {
-                            resolved.outline_color =
-                                Self::interpolate_color(resolved.outline_color, *c, progress);
-                        }
-                        OverrideTag::ShadowColor(c) => {
-                            resolved.shadow_color =
-                                Self::interpolate_color(resolved.shadow_color, *c, progress);
-                        }
-                        OverrideTag::PrimaryAlpha(a) => {
-                            let from = resolved.color.alpha;
-                            resolved.color.alpha =
-                                (from as f64 + (*a as f64 - from as f64) * progress) as u8;
-                        }
-                        OverrideTag::OutlineAlpha(a) => {
-                            let from = resolved.outline_color.alpha;
-                            resolved.outline_color.alpha =
-                                (from as f64 + (*a as f64 - from as f64) * progress) as u8;
-                        }
-                        OverrideTag::ShadowAlpha(a) => {
-                            let from = resolved.shadow_color.alpha;
-                            resolved.shadow_color.alpha =
-                                (from as f64 + (*a as f64 - from as f64) * progress) as u8;
-                        }
-                        OverrideTag::ScaleX(s) => {
-                            let from = resolved.scale_x;
-                            resolved.scale_x = from + (s - from) * progress;
-                        }
-                        OverrideTag::ScaleY(s) => {
-                            let from = resolved.scale_y;
-                            resolved.scale_y = from + (s - from) * progress;
-                        }
-                        OverrideTag::FontSize(s) => {
-                            let from = resolved.font_size;
-                            resolved.font_size = from + (s - from) * progress;
-                        }
-                        OverrideTag::FontSizeMultiplier(m) => {
-                            let from = 1.0;
-                            let target = *m;
-                            let mult = from + (target - from) * progress;
-                            // Apply multiplier to base font size (stored in font_size)
-                            // This is approximate; ideally we track the original size
-                            resolved.font_size *= mult;
-                        }
-                        OverrideTag::LetterSpacing(s) => {
-                            let from = resolved.spacing;
-                            resolved.spacing = from + (s - from) * progress;
-                        }
-                        OverrideTag::BorderX(b) => {
-                            let from = resolved.outline;
-                            resolved.outline = from + (b - from) * progress;
-                        }
-                        OverrideTag::BorderY(b) => {
-                            let from = resolved.outline;
-                            resolved.outline = from + (b - from) * progress;
-                        }
-                        OverrideTag::RotationZ(r) => {
-                            let from = resolved.angle;
-                            resolved.angle = from + (r - from) * progress;
-                        }
-                        _ => {
-                            // Unsupported animation target - apply directly
-                        }
-                    }
+                OverrideTag::EdgeBlur(b) => {
+                    let from = resolved.blur;
+                    resolved.blur = from + (b - from) * progress;
                 }
+                OverrideTag::Border(b) => {
+                    let from = resolved.outline;
+                    resolved.outline = from + (b - from) * progress;
+                }
+                OverrideTag::Shadow(s) => {
+                    let from = resolved.shadow;
+                    resolved.shadow = from + (s - from) * progress;
+                }
+                OverrideTag::PrimaryColor(c) => {
+                    resolved.color = Self::interpolate_color(resolved.color, *c, progress);
+                }
+                OverrideTag::SecondaryColor(c) => {
+                    resolved.secondary_color =
+                        Self::interpolate_color(resolved.secondary_color, *c, progress);
+                }
+                OverrideTag::OutlineColor(c) => {
+                    resolved.outline_color =
+                        Self::interpolate_color(resolved.outline_color, *c, progress);
+                }
+                OverrideTag::ShadowColor(c) => {
+                    resolved.shadow_color =
+                        Self::interpolate_color(resolved.shadow_color, *c, progress);
+                }
+                OverrideTag::PrimaryAlpha(a) => {
+                    let from = resolved.color.alpha;
+                    resolved.color.alpha =
+                        (from as f64 + (*a as f64 - from as f64) * progress) as u8;
+                }
+                OverrideTag::OutlineAlpha(a) => {
+                    let from = resolved.outline_color.alpha;
+                    resolved.outline_color.alpha =
+                        (from as f64 + (*a as f64 - from as f64) * progress) as u8;
+                }
+                OverrideTag::ShadowAlpha(a) => {
+                    let from = resolved.shadow_color.alpha;
+                    resolved.shadow_color.alpha =
+                        (from as f64 + (*a as f64 - from as f64) * progress) as u8;
+                }
+                OverrideTag::ScaleX(s) => {
+                    let from = resolved.scale_x;
+                    resolved.scale_x = from + (s - from) * progress;
+                }
+                OverrideTag::ScaleY(s) => {
+                    let from = resolved.scale_y;
+                    resolved.scale_y = from + (s - from) * progress;
+                }
+                OverrideTag::FontSize(s) => {
+                    let from = resolved.font_size;
+                    resolved.font_size = from + (s - from) * progress;
+                }
+                OverrideTag::LetterSpacing(s) => {
+                    let from = resolved.spacing;
+                    resolved.spacing = from + (s - from) * progress;
+                }
+                OverrideTag::BorderX(b) => {
+                    let from = resolved.outline;
+                    resolved.outline = from + (b - from) * progress;
+                }
+                OverrideTag::BorderY(b) => {
+                    let from = resolved.outline;
+                    resolved.outline = from + (b - from) * progress;
+                }
+                OverrideTag::RotationZ(r) => {
+                    let from = resolved.angle;
+                    resolved.angle = from + (r - from) * progress;
+                }
+                _ => {}
             }
         }
     }
@@ -608,13 +564,6 @@ impl Compositor {
             return;
         }
 
-        // Collect all transform tags from all segments for animation
-        let all_transforms: Vec<OverrideTag> = segments
-            .iter()
-            .flat_map(|s| s.tags.iter().cloned())
-            .filter(|t| t.is_animation())
-            .collect();
-
         // Per-segment rendering
         let mut x_offset = 0.0_f64;
         let mut line_y_offset = 0.0_f64;
@@ -645,9 +594,29 @@ impl Compositor {
                 segment_resolved.margin_v = event.margin_v;
             }
 
-            // Apply \t animations
-            if !all_transforms.is_empty() {
-                Self::apply_transforms(&mut segment_resolved, &all_transforms, time_ms, start_ms);
+            // Apply \t animations - iterate all segments' transform tags directly
+            // (avoids allocating a Vec per frame)
+            for tag in &segment.tags {
+                if let OverrideTag::Transform {
+                    t1,
+                    t2,
+                    accel,
+                    tags,
+                } = tag
+                {
+                    let elapsed = time_ms.saturating_sub(start_ms);
+                    if elapsed < *t1 || elapsed > *t2 {
+                        continue;
+                    }
+                    let duration = t2 - t1;
+                    let raw_progress = if duration > 0 {
+                        (elapsed - *t1) as f64 / duration as f64
+                    } else {
+                        1.0
+                    };
+                    let progress = Self::apply_accel(raw_progress, *accel);
+                    Self::apply_transform_tags(&mut segment_resolved, tags, progress);
+                }
             }
 
             // Shape this segment's text

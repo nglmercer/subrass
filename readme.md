@@ -1,195 +1,133 @@
-# Rust JASSUB Implementation Roadmap
+# subrass
 
-This roadmap outlines the complete recreation of JASSUB (JavaScript SSA/ASS Subtitle Renderer) in Rust, maintaining feature parity with the original JavaScript/WebAssembly implementation.
+A pure Rust ASS/SSA subtitle parser and renderer, compiled to WebAssembly. No libass dependency — everything is implemented natively in Rust.
 
-## Project Overview
+## Features
 
-JASSUB is a high-performance subtitle renderer that uses libass to render SSA/ASS subtitles in web browsers through WebAssembly and Web Workers . The Rust implementation will replicate this architecture while leveraging Rust's safety guarantees and performance characteristics.
+- **Pure Rust** — no C/C++ FFI, no libass. Full control over the rendering pipeline.
+- **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles, Events, override tags (~40 tag types)
+- **Native rendering** — glyph rasterization via `ab_glyph`, scanline fill for vector drawing, box blur, outline, shadow, clipping
+- **WebAssembly** — compiles to WASM, renders to HTML Canvas via `putImageData`
+- **Font management** — TTF/OTF loading, bold/italic matching, built-in fallback (DejaVu Sans)
 
-## Architecture Specification
+## Architecture
 
-### Core Components
-
-```mermaid
-graph TD
-    subgraph "JavaScript Layer"
-        JSMain["Main Thread API<br/>Rust-wasm bindings"]
-        JSWorker["Worker Thread<br/>Rust-wasm bindings"]
-    end
-    
-    subgraph "Rust WebAssembly"
-        RSRenderer["Subtitle Renderer<br/>libass-rs bindings"]
-        RSParser["ASS Parser<br/>native parsing"]
-        RSFontManager["Font Manager<br/>font handling"]
-        RSMemory["Memory Manager<br/>safe allocations"]
-    end
-    
-    subgraph "Browser APIs"
-        Canvas["Canvas API"]
-        Video["Video Element"]
-        Worker["Web Workers"]
-        LocalFonts["Local Font Access"]
-    end
-    
-    JSMain --> RSRenderer
-    JSWorker --> RSRenderer
-    RSRenderer --> RSParser
-    RSRenderer --> RSFontManager
-    RSRenderer --> RSMemory
-    
-    JSMain --> Canvas
-    JSMain --> Video
-    JSMain --> Worker
-    JSWorker --> LocalFonts
+```
+src/
+├── api.rs                  # WASM bindings (AssDoc, SubtitleRenderer)
+├── parser/
+│   ├── mod.rs              # ASS document parser
+│   └── override_tag.rs     # Override tag parser (~40 tags)
+├── renderer/
+│   ├── mod.rs              # Main renderer orchestrator
+│   ├── font.rs             # Font loading and management (ab_glyph)
+│   ├── glyph_cache.rs      # Glyph rasterization with LRU cache
+│   ├── shaper.rs           # Text shaping, measurement, word-wrap
+│   ├── compositor.rs       # Style resolution, positioning, rendering
+│   ├── drawing.rs          # ASS vector drawing parser (m/l/b/n/c)
+│   ├── effects.rs          # Outline, shadow, blur, clipping
+│   └── buffer.rs           # RGBA pixel buffer with alpha compositing
+└── types/
+    ├── mod.rs              # Core types (Event, Style, ScriptInfo)
+    ├── event.rs            # ASS event types
+    ├── style.rs            # ASS style types
+    ├── override_tag.rs     # Override tag enum
+    └── drawing.rs          # Drawing command types
 ```
 
-## Phase 1: Foundation and Core Rendering (Weeks 1-4)
+## Rendering Pipeline
 
-### 1.1 Project Setup
-- [ ] Initialize Rust library project with `wasm-pack` template
-- [ ] Set up build pipeline for WebAssembly compilation
-- [ ] Configure TypeScript bindings generation
-- [ ] Establish basic project structure
+1. **Parse** — ASS file is parsed into `AssDocument` with script info, styles, and events
+2. **Filter** — Active events are selected for the current timestamp
+3. **Sort** — Events are sorted by layer for correct compositing order
+4. **Resolve** — Base style is merged with per-event override tags into a `ResolvedStyle`
+5. **Shape** — Text is mapped to glyph IDs with spacing and line breaks
+6. **Rasterize** — Glyphs are rasterized to alpha bitmaps (faux bold via dilation)
+7. **Effects** — Outline, shadow, blur, and clipping are applied
+8. **Composite** — Glyphs are alpha-blended onto the RGBA buffer
+9. **Display** — Buffer is transferred to canvas via `putImageData`
 
-### 1.2 Core Data Structures
-- [ ] Implement ASS event and style structures 
-- [ ] Create font management structures
-- [ ] Define rendering result types
-- [ ] Implement memory-safe buffer management
+## Supported Override Tags
 
-### 1.3 Basic libass Integration
-- [ ] Research and integrate `libass-rs` or create FFI bindings
-- [ ] Implement basic renderer initialization 
-- [ ] Create track loading functionality 
-- [ ] Implement basic rendering pipeline
+| Category | Tags |
+|---|---|
+| Position | `\pos`, `\move`, `\org` |
+| Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` |
+| Font | `\fn`, `\fs`, `\b`, `\i`, `\u`, `\s` |
+| Transform | `\frx`, `\fry`, `\frz`, `\fscx`, `\fscy` |
+| Border/Shadow | `\bord`, `\shad`, `\be`, `\blur` |
+| Clipping | `\clip`, `\iclip` |
+| Drawing | `\p`, `\p1` vector paths |
+| Fade | `\fad`, `\fade` |
+| Wrapping | `\q`, `\N`, `\n` |
 
-### 1.4 WebAssembly Interface
-- [ ] Create WASM bindings for core functions
-- [ ] Implement memory management across JS/WASM boundary
-- [ ] Set up error handling and logging
-- [ ] Create basic JavaScript API wrapper
+**Parsed but not yet rendered:** `\t` (animated overrides), `\frx`/`\fry` (3D rotation), karaoke (`\k`, `\K`, `\kf`, `\ko`)
 
-## Phase 2: Advanced Rendering Features (Weeks 5-8)
+## Build
 
-### 2.1 Rendering Modes
-- [ ] Implement async rendering with `createImageBitmap` 
-- [ ] Add offscreen canvas support 
-- [ ] Implement blend mode selection (JS vs WASM) 
-- [ ] Add hybrid rendering modes
+```bash
+# Install wasm-pack
+cargo install wasm-pack
 
-### 2.2 Performance Optimizations
-- [ ] Implement SIMD detection and utilization 
-- [ ] Add animation dropping functionality 
-- [ ] Implement blur effect optimization 
-- [ ] Create efficient memory reuse system 
+# Build for WebAssembly
+wasm-pack build --target web
 
-### 2.3 Canvas and Video Integration
-- [ ] Implement canvas resizing and management 
-- [ ] Add video synchronization logic
-- [ ] Implement frame timing control
-- [ ] Add color space handling
+# Output will be in pkg/
+```
 
-## Phase 3: Font Management (Weeks 9-10)
+## Usage
 
-### 3.1 Font Loading System
-- [ ] Implement font loading from URLs and arrays 
-- [ ] Create available fonts registry 
-- [ ] Add fallback font system 
-- [ ] Implement local font access integration 
+```html
+<script type="module">
+  import init, { SubtitleRenderer } from './pkg/subrass.js';
 
-### 3.2 Font Processing
-- [ ] Add font format validation
-- [ ] Implement font caching strategies
-- [ ] Create font memory management
-- [ ] Add font fallback logic
+  await init();
 
-## Phase 4: Worker Thread Architecture (Weeks 11-12)
+  const response = await fetch('subtitles.ass');
+  const assContent = await response.text();
 
-### 4.1 Worker Communication
-- [ ] Implement message-based communication protocol 
-- [ ] Create worker initialization flow 
-- [ ] Add error handling and recovery
-- [ ] Implement worker lifecycle management
+  const renderer = new SubtitleRenderer(assContent);
+  renderer.setCanvas(document.getElementById('canvas'));
+  renderer.setFont('MyFont', fontBytes);
 
-### 4.2 Rendering Pipeline
-- [ ] Create render loop management 
-- [ ] Implement on-demand rendering 
-- [ ] Add frame synchronization
-- [ ] Create performance monitoring
+  // Render at 10 seconds
+  renderer.renderFrame(10000);
+</script>
+```
 
-## Phase 5: API and Integration (Weeks 13-14)
+## Demo
 
-### 5.1 JavaScript API
-- [ ] Implement main JASSUB class interface 
-- [ ] Add all configuration options 
-- [ ] Implement event handling system
-- [ ] Create comprehensive error handling
+Open `demo/index.html` in a browser. Select a video file and an ASS subtitle file to see the renderer in action.
 
-### 5.2 Method Implementation
-- [ ] Add subtitle track management methods 
-- [ ] Implement event/style manipulation 
-- [ ] Add font management methods 
-- [ ] Create cleanup and destruction methods 
+## Status
 
-## Phase 6: Testing and Optimization (Weeks 15-16)
+### Working
+- ASS/SSA parsing (Script Info, Styles, Events)
+- Override tag parsing (~40 tags)
+- Font loading and management
+- Glyph rasterization with faux bold
+- Basic positioning (numpad alignment 1–9)
+- `\pos`, `\move`, `\org`
+- Outline, Shadow effects
+- Fade (`\fad`, `\1a`–`\4a`)
+- `\clip` / `\iclip`
+- Drawing mode (`\p1` vector paths)
+- Box blur (`\be`, `\blur`)
+- Bold/Italic/Underline/Strikeout
+- WebAssembly bindings
+- Canvas rendering
 
-### 6.1 Comprehensive Testing
-- [ ] Create unit tests for all Rust components
-- [ ] Add integration tests for WebAssembly interface
-- [ ] Implement browser compatibility testing
-- [ ] Create performance benchmarks
+### Not Yet Implemented
+- `\t` (animated override tags)
+- 3D rotation (`\frx`, `\fry`)
+- Karaoke (`\k`, `\K`, `\kf`, `\ko`)
+- HarfBuzz/OpenType complex shaping
+- Web Worker architecture
+- `[Fonts]` section embedding
+- `[Graphics]` section
+- SSA v4.00 (non-plus) style format
+- SIMD optimizations
 
-### 6.2 Final Optimization
-- [ ] Profile and optimize memory usage
-- [ ] Fine-tune rendering performance
-- [ ] Optimize WebAssembly binary size
-- [ ] Add final error handling improvements
+## License
 
-## Technical Specifications
-
-### Memory Management
-- Use Rust's ownership system for safe memory management
-- Implement custom allocators for WebAssembly heap
-- Create buffer reuse system similar to `ReusableBuffer` 
-- Manage memory limits for libass caches 
-
-### Performance Targets
-- Maintain parity with original performance characteristics
-- Target < 10ms render time for typical subtitle frames
-- Support 4K resolution rendering
-- Maintain 60fps rendering capability
-
-### Browser Compatibility
-- Support modern browsers with WebAssembly
-- Graceful fallback for older browsers
-- Maintain feature detection system 
-- Support both ES modules and UMD builds
-
-## Deliverables
-
-1. **Core Rust Library**: Complete WebAssembly-compiled subtitle renderer
-2. **JavaScript Bindings**: TypeScript definitions and API wrapper
-3. **Documentation**: Comprehensive API documentation and usage examples
-4. **Test Suite**: Full test coverage including browser tests
-5. **Build System**: Automated build and release pipeline
-6. **Performance Benchmarks**: Comparison with original implementation
-
-## Success Criteria
-
-- [ ] 100% API compatibility with original JASSUB
-- [ ] Performance within 10% of original implementation
-- [ ] All major browsers supported
-- [ ] Memory usage optimized for embedded devices
-- [ ] Comprehensive test coverage (>90%)
-- [ ] Full documentation and examples
-
----
-
-## Notes
-
-This roadmap assumes familiarity with the original JASSUB architecture and focuses on recreating its functionality in Rust. The implementation should prioritize safety and performance while maintaining the exact API surface for drop-in compatibility. Key technical challenges include WebAssembly memory management, browser API integration, and maintaining real-time rendering performance.
-
-Wiki pages you might want to explore:
-- [Getting Started (ThaUnknown/jassub)](/wiki/ThaUnknown/jassub#2)
-- [Architecture (ThaUnknown/jassub)](/wiki/ThaUnknown/jassub#3)
-- [Performance Optimizations (ThaUnknown/jassub)](/wiki/ThaUnknown/jassub#3.3)
+MIT

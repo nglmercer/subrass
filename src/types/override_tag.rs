@@ -121,10 +121,7 @@ impl OverrideTag {
     pub fn is_positioning(&self) -> bool {
         matches!(
             self,
-            Self::Position(..)
-                | Self::Move(..)
-                | Self::MoveWithTiming(..)
-                | Self::Origin(..)
+            Self::Position(..) | Self::Move(..) | Self::MoveWithTiming(..) | Self::Origin(..)
         )
     }
 
@@ -468,7 +465,10 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
 
 fn parse_ass_color_tag(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('&').trim_end_matches('&');
-    let s = s.strip_prefix('H').or_else(|| s.strip_prefix('h')).unwrap_or(s);
+    let s = s
+        .strip_prefix('H')
+        .or_else(|| s.strip_prefix('h'))
+        .unwrap_or(s);
 
     match s.len() {
         6 => {
@@ -490,7 +490,10 @@ fn parse_ass_color_tag(s: &str) -> Option<Color> {
 
 fn parse_ass_alpha(s: &str) -> Option<u8> {
     let s = s.trim().trim_start_matches('&').trim_end_matches('&');
-    let s = s.strip_prefix('H').or_else(|| s.strip_prefix('h')).unwrap_or(s);
+    let s = s
+        .strip_prefix('H')
+        .or_else(|| s.strip_prefix('h'))
+        .unwrap_or(s);
 
     match s.len() {
         2 => u8::from_str_radix(s, 16).ok(),

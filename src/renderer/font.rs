@@ -1,5 +1,5 @@
+use ab_glyph::FontArc;
 use std::collections::HashMap;
-use ab_glyph::{FontArc};
 
 /// Font manager - loads, caches, and provides fonts for rendering
 pub struct FontManager {
@@ -25,7 +25,13 @@ impl FontManager {
     }
 
     /// Load a font from bytes
-    pub fn load_font(&mut self, name: &str, data: &[u8], is_bold: bool, is_italic: bool) -> Result<usize, String> {
+    pub fn load_font(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        is_bold: bool,
+        is_italic: bool,
+    ) -> Result<usize, String> {
         let font = FontArc::try_from_vec(data.to_vec())
             .map_err(|e| format!("Failed to parse font '{}': {}", name, e))?;
 
@@ -52,8 +58,10 @@ impl FontManager {
     pub fn load_font_auto(&mut self, name: &str, data: &[u8]) -> Result<usize, String> {
         let lower = name.to_lowercase();
         let is_bold = lower.contains("bold") || lower.contains("-bold") || lower.contains("_bold");
-        let is_italic = lower.contains("italic") || lower.contains("oblique")
-            || lower.contains("-italic") || lower.contains("_italic");
+        let is_italic = lower.contains("italic")
+            || lower.contains("oblique")
+            || lower.contains("-italic")
+            || lower.contains("_italic");
 
         // Strip style indicators from name for lookup
         let base_name = lower

@@ -76,8 +76,14 @@ mod tests {
 
     #[test]
     fn test_section_from_header() {
-        assert_eq!(Section::from_header("[Script Info]"), Some(Section::ScriptInfo));
-        assert_eq!(Section::from_header("[V4+ Styles]"), Some(Section::V4PlusStyles));
+        assert_eq!(
+            Section::from_header("[Script Info]"),
+            Some(Section::ScriptInfo)
+        );
+        assert_eq!(
+            Section::from_header("[V4+ Styles]"),
+            Some(Section::V4PlusStyles)
+        );
         assert_eq!(Section::from_header("[Events]"), Some(Section::Events));
         assert_eq!(Section::from_header("[Fonts]"), Some(Section::Fonts));
         assert_eq!(Section::from_header("[invalid]"), None);

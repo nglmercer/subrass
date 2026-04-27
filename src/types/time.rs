@@ -91,18 +91,18 @@ impl FromStr for Time {
 
             let sec_parts: Vec<&str> = parts[2].split('.').collect();
             if sec_parts.len() == 2 {
-                let seconds: u32 = sec_parts[0]
-                    .parse()
-                    .map_err(|_| TimeError::InvalidComponent(format!("seconds: {}", sec_parts[0])))?;
-                let centiseconds: u32 = sec_parts[1]
-                    .parse()
-                    .map_err(|_| TimeError::InvalidComponent(format!("centiseconds: {}", sec_parts[1])))?;
+                let seconds: u32 = sec_parts[0].parse().map_err(|_| {
+                    TimeError::InvalidComponent(format!("seconds: {}", sec_parts[0]))
+                })?;
+                let centiseconds: u32 = sec_parts[1].parse().map_err(|_| {
+                    TimeError::InvalidComponent(format!("centiseconds: {}", sec_parts[1]))
+                })?;
 
                 return Ok(Self::new(hours, minutes, seconds, centiseconds));
             } else if sec_parts.len() == 1 {
-                let seconds: u32 = sec_parts[0]
-                    .parse()
-                    .map_err(|_| TimeError::InvalidComponent(format!("seconds: {}", sec_parts[0])))?;
+                let seconds: u32 = sec_parts[0].parse().map_err(|_| {
+                    TimeError::InvalidComponent(format!("seconds: {}", sec_parts[0]))
+                })?;
                 return Ok(Self::new(hours, minutes, seconds, 0));
             }
         }

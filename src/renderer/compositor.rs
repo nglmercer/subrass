@@ -1,10 +1,10 @@
-use crate::types::{Event, EventType, OverrideTag, Style};
-use crate::types::color::Color;
 use super::buffer::RenderBuffer;
-use super::glyph_cache::GlyphCache;
-use super::font::FontManager;
-use super::shaper::TextShaper;
 use super::effects;
+use super::font::FontManager;
+use super::glyph_cache::GlyphCache;
+use super::shaper::TextShaper;
+use crate::types::color::Color;
+use crate::types::{Event, EventType, OverrideTag, Style};
 
 /// Resolved style with all overrides applied
 #[derive(Debug, Clone)]
@@ -156,14 +156,22 @@ impl Compositor {
                 OverrideTag::Position(x, y) => resolved.position = Some((*x, *y)),
                 OverrideTag::Move(x1, y1, x2, y2) => {
                     resolved.move_data = Some(MoveData {
-                        x1: *x1, y1: *y1, x2: *x2, y2: *y2,
-                        t1: 0, t2: 0,
+                        x1: *x1,
+                        y1: *y1,
+                        x2: *x2,
+                        y2: *y2,
+                        t1: 0,
+                        t2: 0,
                     });
                 }
                 OverrideTag::MoveWithTiming(x1, y1, x2, y2, t1, t2) => {
                     resolved.move_data = Some(MoveData {
-                        x1: *x1, y1: *y1, x2: *x2, y2: *y2,
-                        t1: *t1, t2: *t2,
+                        x1: *x1,
+                        y1: *y1,
+                        x2: *x2,
+                        y2: *y2,
+                        t1: *t1,
+                        t2: *t2,
                     });
                 }
                 OverrideTag::Origin(x, y) => resolved.origin = Some((*x, *y)),
@@ -245,7 +253,7 @@ impl Compositor {
         // X position (LEFT EDGE of text)
         // Glyphs are rendered from glyph.x = 0 at the left edge
         let x = match alignment {
-            1 | 4 | 7 => margin_l,                              // Left: start at left margin
+            1 | 4 | 7 => margin_l, // Left: start at left margin
             2 | 5 | 8 => (video_width as f64 - text_width) / 2.0, // Center: center the text
             3 | 6 | 9 => video_width as f64 - margin_r - text_width, // Right: end at right margin
             _ => (video_width as f64 - text_width) / 2.0,
@@ -257,9 +265,9 @@ impl Compositor {
         // For bottom alignment: text bottom at video_height - margin_v, baseline at (video_height - margin_v) - descent
         // Note: descent is negative, so (video_height - margin_v) - descent = (video_height - margin_v) + |descent|
         let y = match alignment {
-            7 | 8 | 9 => margin_v + baseline,                          // Top: baseline at margin + ascent
-            4 | 5 | 6 => video_height as f64 / 2.0,                    // Middle: baseline at center
-            1 | 2 | 3 => (video_height as f64 - margin_v) - descent,   // Bottom: baseline above margin by |descent|
+            7..=9 => margin_v + baseline, // Top: baseline at margin + ascent
+            4..=6 => video_height as f64 / 2.0, // Middle: baseline at center
+            1..=3 => (video_height as f64 - margin_v) - descent, // Bottom: baseline above margin by |descent|
             _ => (video_height as f64 - margin_v) - descent,
         };
 
@@ -296,8 +304,11 @@ impl Compositor {
         // Apply simple fade
         if resolved.fade_in > 0 || resolved.fade_out > 0 {
             let fade_alpha = effects::calculate_fade_alpha(
-                time_ms, start_ms, end_ms,
-                resolved.fade_in, resolved.fade_out,
+                time_ms,
+                start_ms,
+                end_ms,
+                resolved.fade_in,
+                resolved.fade_out,
             );
             alpha_mult = fade_alpha as f64 / 255.0;
         }
@@ -324,19 +335,18 @@ impl Compositor {
             return;
         }
 
-        // Get clean text (without override tags)
-        let clean_text = self.extract_clean_text(&event.text);
+        // Get clean text (without override tags) and drawing mode state
+        let (clean_text, text_drawing_mode) = self.extract_clean_text(&event.text);
+
+        // Use text-level drawing mode if not set at style level
+        let is_drawing = resolved.drawing_mode > 0 || text_drawing_mode;
 
         if clean_text.is_empty() {
             return;
         }
 
         // Find font
-        let font = font_manager.find_font(
-            &resolved.font_name,
-            resolved.bold,
-            resolved.italic,
-        );
+        let font = font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
 
         // Shape text
         let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
@@ -359,7 +369,7 @@ impl Compositor {
 
         // Calculate position (returns baseline position)
         let (mut pos_x, mut pos_y) = Self::calculate_position(
-            &resolved,
+            resolved,
             shaped.width,
             shaped.height,
             shaped.baseline,
@@ -415,8 +425,8 @@ impl Compositor {
         // Calculate alpha
         let alpha = (alpha_mult * 255.0) as u8;
 
-        // Handle drawing mode (\\p1) - render vector paths instead of text
-        if resolved.drawing_mode > 0 {
+        // Handle drawing mode (\p1) - render vector paths instead of text
+        if is_drawing {
             let scale_x = video_width as f64 / play_res_x as f64;
             let scale_y = video_height as f64 / play_res_y as f64;
             let avg_scale = (scale_x + scale_y) / 2.0;
@@ -448,7 +458,11 @@ impl Compositor {
 
             for glyph in &shaped.glyphs {
                 let cached = self.glyph_cache.get_or_rasterize(
-                    font, glyph.glyph_id, font_size, glyph.bold, glyph.italic,
+                    font,
+                    glyph.glyph_id,
+                    font_size,
+                    glyph.bold,
+                    glyph.italic,
                 );
 
                 if cached.width > 0 && cached.height > 0 {
@@ -484,7 +498,11 @@ impl Compositor {
 
             for glyph in &shaped.glyphs {
                 let cached = self.glyph_cache.get_or_rasterize(
-                    font, glyph.glyph_id, font_size, glyph.bold, glyph.italic,
+                    font,
+                    glyph.glyph_id,
+                    font_size,
+                    glyph.bold,
+                    glyph.italic,
                 );
 
                 if cached.width > 0 && cached.height > 0 {
@@ -514,7 +532,11 @@ impl Compositor {
         // Render main text
         for glyph in &shaped.glyphs {
             let cached = self.glyph_cache.get_or_rasterize(
-                font, glyph.glyph_id, font_size, glyph.bold, glyph.italic,
+                font,
+                glyph.glyph_id,
+                font_size,
+                glyph.bold,
+                glyph.italic,
             );
 
             if cached.width > 0 && cached.height > 0 {
@@ -532,7 +554,9 @@ impl Compositor {
                         let coverage = cached.bitmap[(py * cached.width + px) as usize];
                         if coverage > 0 {
                             // Combine coverage, color alpha, and fade alpha
-                            let a = ((coverage as u32 * color_alpha as u32 / 255) as u32 * alpha as u32 / 255) as u8;
+                            let a = ((coverage as u32 * color_alpha as u32 / 255)
+                                * alpha as u32
+                                / 255) as u8;
                             buffer.blend_pixel(
                                 (gx + px as i32) as u32,
                                 (gy + py as i32) as u32,
@@ -624,9 +648,11 @@ impl Compositor {
     }
 
     /// Extract clean text from event text (remove override tags)
-    fn extract_clean_text(&self, text: &str) -> String {
+    /// Returns (clean_text, is_drawing_mode)
+    fn extract_clean_text(&self, text: &str) -> (String, bool) {
         let mut result = String::new();
         let mut in_tag = false;
+        let mut drawing_mode = false;
         let mut chars = text.chars().peekable();
 
         while let Some(ch) = chars.next() {
@@ -634,24 +660,55 @@ impl Compositor {
                 '{' => in_tag = true,
                 '}' => in_tag = false,
                 '\\' => {
-                    // Check for \N, \n (line break) and \h (hard space) - works both inside and outside tags
                     if let Some(&next) = chars.peek() {
-                        if next == 'N' || next == 'n' {
-                            chars.next();
-                            result.push('\n');
-                        } else if next == 'h' {
-                            chars.next();
-                            result.push('\u{00A0}'); // Hard space
+                        match next {
+                            'N' | 'n' => {
+                                chars.next();
+                                if !drawing_mode {
+                                    result.push('\n');
+                                } else {
+                                    result.push('\\');
+                                    result.push(next);
+                                }
+                            }
+                            'h' => {
+                                chars.next();
+                                if !drawing_mode {
+                                    result.push('\u{00A0}');
+                                } else {
+                                    result.push('\\');
+                                    result.push(next);
+                                }
+                            }
+                            'p' => {
+                                // Handle \p0 and \p1 (drawing mode)
+                                chars.next(); // consume 'p'
+                                if let Some(&level) = chars.peek() {
+                                    if level == '1' {
+                                        chars.next();
+                                        drawing_mode = true;
+                                    } else if level == '0' {
+                                        chars.next();
+                                        drawing_mode = false;
+                                    }
+                                }
+                            }
+                            _ if in_tag => {
+                                // Skip other tags when inside {}
+                            }
+                            _ => {
+                                // Outside tags, keep backslash sequences as-is
+                                result.push('\\');
+                            }
                         }
-                        // Other backslash sequences inside tags are skipped
                     }
                 }
-                _ if !in_tag => result.push(ch),
+                _ if !in_tag || drawing_mode => result.push(ch),
                 _ => {}
             }
         }
 
-        result
+        (result, drawing_mode)
     }
 
     /// Clear the glyph cache

@@ -128,7 +128,13 @@ impl TextShaper {
     }
 
     /// Split text into lines based on max width
-    pub fn wrap_text(text: &str, font: &FontArc, font_size: f64, max_width: f64, spacing: f64) -> Vec<String> {
+    pub fn wrap_text(
+        text: &str,
+        font: &FontArc,
+        font_size: f64,
+        max_width: f64,
+        spacing: f64,
+    ) -> Vec<String> {
         if max_width <= 0.0 {
             return vec![text.to_string()];
         }

@@ -72,10 +72,7 @@ impl Event {
 
         let fields: Vec<&str> = content.splitn(10, ',').collect();
         if fields.len() < 10 {
-            return Err(format!(
-                "Expected 10 fields in event, got {}",
-                fields.len()
-            ));
+            return Err(format!("Expected 10 fields in event, got {}", fields.len()));
         }
 
         let parse_i32 = |s: &str| -> i32 { s.trim().parse().unwrap_or(0) };
@@ -148,7 +145,8 @@ impl Event {
     }
 }
 
-pub const DEFAULT_EVENT_FORMAT: &str = "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
+pub const DEFAULT_EVENT_FORMAT: &str =
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
 
 #[cfg(test)]
 mod tests {
@@ -156,8 +154,7 @@ mod tests {
 
     #[test]
     fn test_parse_dialogue() {
-        let line =
-            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,John,0,0,0,,Hello World!";
+        let line = "Dialogue: 0,0:00:01.00,0:00:04.00,Default,John,0,0,0,,Hello World!";
         let event = Event::parse_from_line(line).unwrap();
 
         assert_eq!(event.event_type, EventType::Dialogue);
@@ -171,8 +168,7 @@ mod tests {
 
     #[test]
     fn test_parse_comment() {
-        let line =
-            "Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment";
+        let line = "Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment";
         let event = Event::parse_from_line(line).unwrap();
 
         assert_eq!(event.event_type, EventType::Comment);
@@ -181,8 +177,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_override_tags() {
-        let line =
-            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\pos(100,200)}Hello";
+        let line = "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\pos(100,200)}Hello";
         let event = Event::parse_from_line(line).unwrap();
 
         assert!(!event.parsed_tags.is_empty());
@@ -190,8 +185,7 @@ mod tests {
 
     #[test]
     fn test_duration_millis() {
-        let line =
-            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello";
+        let line = "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello";
         let event = Event::parse_from_line(line).unwrap();
 
         assert_eq!(event.duration_millis(), 3000);
@@ -199,8 +193,7 @@ mod tests {
 
     #[test]
     fn test_is_active_at() {
-        let line =
-            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello";
+        let line = "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello";
         let event = Event::parse_from_line(line).unwrap();
 
         assert!(!event.is_active_at(500));

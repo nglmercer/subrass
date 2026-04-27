@@ -2,10 +2,7 @@ use crate::types::Event;
 
 use super::errors::ParseError;
 
-pub fn parse_events(
-    lines: &[&str],
-    start_line: usize,
-) -> Result<Vec<Event>, ParseError> {
+pub fn parse_events(lines: &[&str], start_line: usize) -> Result<Vec<Event>, ParseError> {
     let mut events = Vec::new();
 
     for (i, line) in lines.iter().enumerate() {
@@ -33,10 +30,7 @@ pub fn parse_events(
 }
 
 pub fn get_events_at_time(events: &[Event], time_ms: u64) -> Vec<&Event> {
-    events
-        .iter()
-        .filter(|e| e.is_active_at(time_ms))
-        .collect()
+    events.iter().filter(|e| e.is_active_at(time_ms)).collect()
 }
 
 pub fn get_dialogue_events(events: &[Event]) -> Vec<&Event> {
@@ -47,12 +41,12 @@ pub fn get_comment_events(events: &[Event]) -> Vec<&Event> {
     events.iter().filter(|e| e.is_comment()).collect()
 }
 
-pub fn sort_events_by_layer(events: &mut Vec<Event>) {
-    events.sort_by(|a, b| a.layer.cmp(&b.layer));
+pub fn sort_events_by_layer(events: &mut [Event]) {
+    events.sort_by_key(|a| a.layer);
 }
 
-pub fn sort_events_by_time(events: &mut Vec<Event>) {
-    events.sort_by(|a, b| a.start.cmp(&b.start));
+pub fn sort_events_by_time(events: &mut [Event]) {
+    events.sort_by_key(|a| a.start);
 }
 
 #[cfg(test)]
@@ -76,9 +70,7 @@ mod tests {
 
     #[test]
     fn test_parse_events_with_override_tags() {
-        let lines = vec![
-            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\pos(100,200)}Hello",
-        ];
+        let lines = vec!["Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\pos(100,200)}Hello"];
 
         let events = parse_events(&lines, 0).unwrap();
         assert_eq!(events.len(), 1);

@@ -61,10 +61,7 @@ mod tests {
 
     #[test]
     fn test_parse_script_info_with_boolean() {
-        let lines = vec![
-            "ScaledBorderAndShadow: yes",
-            "WrapStyle: 0",
-        ];
+        let lines = vec!["ScaledBorderAndShadow: yes", "WrapStyle: 0"];
 
         let info = parse_script_info(&lines, 0).unwrap();
         assert!(info.scaled_border_and_shadow);

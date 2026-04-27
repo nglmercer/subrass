@@ -65,9 +65,15 @@ impl RenderBuffer {
         let out_a = src_a + dst_a * (1.0 - src_a);
 
         if out_a > 0.0 {
-            self.pixels[idx] = ((r as f32 * src_a + self.pixels[idx] as f32 * dst_a * (1.0 - src_a)) / out_a) as u8;
-            self.pixels[idx + 1] = ((g as f32 * src_a + self.pixels[idx + 1] as f32 * dst_a * (1.0 - src_a)) / out_a) as u8;
-            self.pixels[idx + 2] = ((b as f32 * src_a + self.pixels[idx + 2] as f32 * dst_a * (1.0 - src_a)) / out_a) as u8;
+            self.pixels[idx] = ((r as f32 * src_a
+                + self.pixels[idx] as f32 * dst_a * (1.0 - src_a))
+                / out_a) as u8;
+            self.pixels[idx + 1] = ((g as f32 * src_a
+                + self.pixels[idx + 1] as f32 * dst_a * (1.0 - src_a))
+                / out_a) as u8;
+            self.pixels[idx + 2] = ((b as f32 * src_a
+                + self.pixels[idx + 2] as f32 * dst_a * (1.0 - src_a))
+                / out_a) as u8;
             self.pixels[idx + 3] = (out_a * 255.0) as u8;
         }
     }

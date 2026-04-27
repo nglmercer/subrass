@@ -66,10 +66,7 @@ impl Color {
     }
 
     pub fn with_alpha(&self, alpha: u8) -> Self {
-        Self {
-            alpha,
-            ..*self
-        }
+        Self { alpha, ..*self }
     }
 
     pub fn opaque() -> Self {

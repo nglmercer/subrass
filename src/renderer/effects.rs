@@ -59,7 +59,8 @@ pub fn apply_outline(
                         if dist <= outline_width + 0.5 {
                             let px = x + gx + dx;
                             let py = y + gy + dy;
-                            let a = (outline_color[3] as f64 * (1.0 - dist / (outline_width + 1.0))) as u8;
+                            let a = (outline_color[3] as f64 * (1.0 - dist / (outline_width + 1.0)))
+                                as u8;
                             if a > 0 {
                                 buffer.blend_pixel(
                                     px as u32,
@@ -111,10 +112,7 @@ pub fn apply_opaque_box(
 }
 
 /// Apply clipping rectangle
-pub fn apply_clip(
-    buffer: &mut RenderBuffer,
-    clip_rect: (i32, i32, i32, i32),
-) {
+pub fn apply_clip(buffer: &mut RenderBuffer, clip_rect: (i32, i32, i32, i32)) {
     let (x1, y1, x2, y2) = clip_rect;
     let w = buffer.width as i32;
     let h = buffer.height as i32;
@@ -134,10 +132,7 @@ pub fn apply_clip(
 }
 
 /// Apply inverse clipping (hide inside clip region)
-pub fn apply_inverse_clip(
-    buffer: &mut RenderBuffer,
-    clip_rect: (i32, i32, i32, i32),
-) {
+pub fn apply_inverse_clip(buffer: &mut RenderBuffer, clip_rect: (i32, i32, i32, i32)) {
     let (x1, y1, x2, y2) = clip_rect;
     let w = buffer.width as i32;
     let h = buffer.height as i32;

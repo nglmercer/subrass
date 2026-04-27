@@ -3,17 +3,14 @@ use std::collections::HashMap;
 
 /// Script type version
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ScriptType {
-    V400, // SSA v4.00
-    V400Plus, // ASS v4.00+
+    V400,         // SSA v4.00
+    #[default]
+    V400Plus,     // ASS v4.00+
     V400PlusPlus, // ASS2 v4.00++ (rare)
 }
 
-impl Default for ScriptType {
-    fn default() -> Self {
-        Self::V400Plus
-    }
-}
 
 impl std::fmt::Display for ScriptType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,7 +37,9 @@ impl std::str::FromStr for ScriptType {
 
 /// YCbCr matrix type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum YCbCrMatrix {
+    #[default]
     None,
     TV601,
     TV709,
@@ -48,11 +47,6 @@ pub enum YCbCrMatrix {
     PC709,
 }
 
-impl Default for YCbCrMatrix {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl std::fmt::Display for YCbCrMatrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -184,8 +178,7 @@ impl ScriptInfo {
             "update date" => self.update_date = Some(value.to_string()),
             "comment" => self.comment = Some(value.to_string()),
             _ => {
-                self.extra_fields
-                    .insert(key.to_string(), value.to_string());
+                self.extra_fields.insert(key.to_string(), value.to_string());
             }
         }
     }
@@ -198,7 +191,10 @@ mod tests {
     #[test]
     fn test_script_type_parsing() {
         assert_eq!("v4.00".parse::<ScriptType>().unwrap(), ScriptType::V400);
-        assert_eq!("v4.00+".parse::<ScriptType>().unwrap(), ScriptType::V400Plus);
+        assert_eq!(
+            "v4.00+".parse::<ScriptType>().unwrap(),
+            ScriptType::V400Plus
+        );
         assert_eq!(
             "v4.00++".parse::<ScriptType>().unwrap(),
             ScriptType::V400PlusPlus

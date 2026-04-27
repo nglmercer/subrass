@@ -69,12 +69,8 @@ impl Style {
         }
 
         let parse_bool = |s: &str| -> bool { s.trim() == "-1" };
-        let parse_i32 = |s: &str| -> i32 {
-            s.trim().parse().unwrap_or(0)
-        };
-        let parse_f64 = |s: &str| -> f64 {
-            s.trim().parse().unwrap_or(0.0)
-        };
+        let parse_i32 = |s: &str| -> i32 { s.trim().parse().unwrap_or(0) };
+        let parse_f64 = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
 
         Ok(Self {
             name: fields[0].trim().to_string(),

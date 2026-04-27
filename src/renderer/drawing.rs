@@ -3,9 +3,22 @@ use crate::renderer::buffer::RenderBuffer;
 /// Drawing command types
 #[derive(Debug, Clone)]
 enum DrawCommand {
-    MoveTo { x: f64, y: f64 },
-    LineTo { x: f64, y: f64 },
-    CurveTo { x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64 },
+    MoveTo {
+        x: f64,
+        y: f64,
+    },
+    LineTo {
+        x: f64,
+        y: f64,
+    },
+    CurveTo {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        x: f64,
+        y: f64,
+    },
     Close,
 }
 
@@ -42,81 +55,171 @@ impl DrawingParser {
     /// Parse drawing commands from text
     fn parse(text: &str) -> Vec<DrawCommand> {
         let mut commands = Vec::new();
-        let mut chars = text.trim().chars().peekable();
-        let mut current_x = 0.0_f64;
-        let mut current_y = 0.0_f64;
         let mut start_x = 0.0_f64;
         let mut start_y = 0.0_f64;
 
-        while let Some(&ch) = chars.peek() {
+        // Tokenize: split by command letters
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            let ch = chars[i];
+
             match ch {
                 'm' | 'M' => {
-                    chars.next();
-                    let coords = Self::parse_coords(&mut chars);
-                    if coords.len() >= 2 {
-                        current_x = coords[0];
-                        current_y = coords[1];
-                        start_x = current_x;
-                        start_y = current_y;
-                        commands.push(DrawCommand::MoveTo { x: current_x, y: current_y });
-                    }
-                    // Parse additional lineto commands after moveto
-                    while coords.len() >= 4 {
-                        current_x = coords[2];
-                        current_y = coords[3];
-                        commands.push(DrawCommand::LineTo { x: current_x, y: current_y });
-                        // This is wrong - need to re-parse properly
-                        break;
+                    i += 1;
+                    // Parse coordinate pairs after m/M
+                    while i < chars.len() {
+                        // Skip whitespace and commas
+                        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                            i += 1;
+                        }
+                        // Check if next char is a digit or sign (coordinate)
+                        if i < chars.len()
+                            && (chars[i].is_ascii_digit() || chars[i] == '-' || chars[i] == '.')
+                        {
+                            if let Some((coords, new_i)) = Self::parse_coordinate_pair(&chars, i) {
+                                current_x = coords.0;
+                                current_y = coords.1;
+                                start_x = current_x;
+                                start_y = current_y;
+                                commands.push(DrawCommand::MoveTo {
+                                    x: current_x,
+                                    y: current_y,
+                                });
+                                i = new_i;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                 }
                 'l' | 'L' => {
-                    chars.next();
-                    let coords = Self::parse_coords(&mut chars);
-                    if coords.len() >= 2 {
-                        current_x = coords[0];
-                        current_y = coords[1];
-                        commands.push(DrawCommand::LineTo { x: current_x, y: current_y });
+                    i += 1;
+                    // Parse coordinate pairs after l/L
+                    while i < chars.len() {
+                        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                            i += 1;
+                        }
+                        if i < chars.len()
+                            && (chars[i].is_ascii_digit() || chars[i] == '-' || chars[i] == '.')
+                        {
+                            if let Some((coords, new_i)) = Self::parse_coordinate_pair(&chars, i) {
+                                current_x = coords.0;
+                                current_y = coords.1;
+                                commands.push(DrawCommand::LineTo {
+                                    x: current_x,
+                                    y: current_y,
+                                });
+                                i = new_i;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                 }
                 'b' | 'B' => {
-                    chars.next();
-                    let coords = Self::parse_coords(&mut chars);
-                    if coords.len() >= 6 {
-                        let x1 = coords[0];
-                        let y1 = coords[1];
-                        let x2 = coords[2];
-                        let y2 = coords[3];
-                        current_x = coords[4];
-                        current_y = coords[5];
-                        commands.push(DrawCommand::CurveTo { x1, y1, x2, y2, x: current_x, y: current_y });
+                    i += 1;
+                    // Parse 3 coordinate pairs (6 values) after b/B
+                    while i < chars.len() {
+                        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                            i += 1;
+                        }
+                        if i < chars.len()
+                            && (chars[i].is_ascii_digit() || chars[i] == '-' || chars[i] == '.')
+                        {
+                            if let Some((coords1, new_i)) = Self::parse_coordinate_pair(&chars, i) {
+                                i = new_i;
+                                while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                                    i += 1;
+                                }
+                                if let Some((coords2, new_i)) =
+                                    Self::parse_coordinate_pair(&chars, i)
+                                {
+                                    i = new_i;
+                                    while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                                        i += 1;
+                                    }
+                                    if let Some((coords3, new_i)) =
+                                        Self::parse_coordinate_pair(&chars, i)
+                                    {
+                                        current_x = coords3.0;
+                                        current_y = coords3.1;
+                                        commands.push(DrawCommand::CurveTo {
+                                            x1: coords1.0,
+                                            y1: coords1.1,
+                                            x2: coords2.0,
+                                            y2: coords2.1,
+                                            x: coords3.0,
+                                            y: coords3.1,
+                                        });
+                                        i = new_i;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                 }
                 'n' | 'N' => {
-                    chars.next();
-                    let coords = Self::parse_coords(&mut chars);
-                    if coords.len() >= 6 {
-                        // n = shorthand cubic bezier (ctrl1 = previous point, ctrl2 = first coord)
-                        let x1 = current_x;
-                        let y1 = current_y;
-                        let x2 = coords[0];
-                        let y2 = coords[1];
-                        current_x = coords[2];
-                        current_y = coords[3];
-                        commands.push(DrawCommand::CurveTo { x1, y1, x2, y2, x: current_x, y: current_y });
+                    i += 1;
+                    // n = shorthand bezier (ctrl1 = current point)
+                    while i < chars.len() {
+                        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                            i += 1;
+                        }
+                        if i < chars.len()
+                            && (chars[i].is_ascii_digit() || chars[i] == '-' || chars[i] == '.')
+                        {
+                            if let Some((coords1, new_i)) = Self::parse_coordinate_pair(&chars, i) {
+                                i = new_i;
+                                while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+                                    i += 1;
+                                }
+                                if let Some((coords2, new_i)) =
+                                    Self::parse_coordinate_pair(&chars, i)
+                                {
+                                    current_x = coords2.0;
+                                    current_y = coords2.1;
+                                    commands.push(DrawCommand::CurveTo {
+                                        x1: current_x,
+                                        y1: current_y, // Previous point
+                                        x2: coords1.0,
+                                        y2: coords1.1,
+                                        x: coords2.0,
+                                        y: coords2.1,
+                                    });
+                                    i = new_i;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                 }
                 'c' | 'C' => {
-                    chars.next();
-                    // c = close path
+                    i += 1;
                     commands.push(DrawCommand::Close);
                     current_x = start_x;
                     current_y = start_y;
                 }
-                ' ' | ',' => {
-                    chars.next(); // skip whitespace
-                }
                 _ => {
-                    chars.next(); // skip unknown chars
+                    i += 1;
                 }
             }
         }
@@ -124,36 +227,50 @@ impl DrawingParser {
         commands
     }
 
-    /// Parse coordinate values from text
-    fn parse_coords(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<f64> {
-        let mut coords = Vec::new();
+    /// Parse a coordinate pair (x, y) from chars starting at position
+    fn parse_coordinate_pair(chars: &[char], start: usize) -> Option<((f64, f64), usize)> {
+        let (x, i) = Self::parse_number(chars, start)?;
+        let (y, i) = Self::parse_number(chars, i)?;
+        Some(((x, y), i))
+    }
+
+    /// Parse a number from chars starting at position
+    fn parse_number(chars: &[char], start: usize) -> Option<(f64, usize)> {
+        let mut i = start;
         let mut num_str = String::new();
 
-        while let Some(&ch) = chars.peek() {
-            match ch {
-                '0'..='9' | '.' | '-' | '+' => {
-                    num_str.push(ch);
-                    chars.next();
-                }
-                _ if !num_str.is_empty() => {
-                    if let Ok(val) = num_str.parse::<f64>() {
-                        coords.push(val);
-                    }
-                    num_str.clear();
-                }
-                _ => {
-                    chars.next();
-                }
+        // Skip leading whitespace
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+
+        // Optional sign
+        if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
+            num_str.push(chars[i]);
+            i += 1;
+        }
+
+        // Digits and optional decimal point
+        let mut has_digits = false;
+        while i < chars.len() {
+            if chars[i].is_ascii_digit() {
+                num_str.push(chars[i]);
+                has_digits = true;
+                i += 1;
+            } else if chars[i] == '.' {
+                num_str.push(chars[i]);
+                i += 1;
+            } else {
+                break;
             }
         }
 
-        if !num_str.is_empty() {
-            if let Ok(val) = num_str.parse::<f64>() {
-                coords.push(val);
-            }
+        if !has_digits || num_str == "-" || num_str == "+" {
+            return None;
         }
 
-        coords
+        let value: f64 = num_str.parse().ok()?;
+        Some((value, i))
     }
 
     /// Convert commands to polygon segments (for simple polygon fill)
@@ -176,7 +293,14 @@ impl DrawingParser {
                         current_polygon.push((*x, *y));
                     }
                 }
-                DrawCommand::CurveTo { x1, y1, x2, y2, x, y } => {
+                DrawCommand::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x,
+                    y,
+                } => {
                     if has_move && !current_polygon.is_empty() {
                         // Approximate bezier with line segments
                         let last = *current_polygon.last().unwrap();
@@ -185,11 +309,13 @@ impl DrawingParser {
                             let t = i as f64 / steps as f64;
                             let t2 = t * t;
                             let t3 = t2 * t;
-                        let mt = 1.0 - t;
-                        let mt2 = mt * mt;
-                        let mt3 = mt2 * mt;
-                            let px = mt3 * last.0 + 3.0 * mt2 * t * x1 + 3.0 * mt * t2 * x2 + t3 * x;
-                            let py = mt3 * last.1 + 3.0 * mt2 * t * y1 + 3.0 * mt * t2 * y2 + t3 * y;
+                            let mt = 1.0 - t;
+                            let mt2 = mt * mt;
+                            let mt3 = mt2 * mt;
+                            let px =
+                                mt3 * last.0 + 3.0 * mt2 * t * x1 + 3.0 * mt * t2 * x2 + t3 * x;
+                            let py =
+                                mt3 * last.1 + 3.0 * mt2 * t * y1 + 3.0 * mt * t2 * y2 + t3 * y;
                             current_polygon.push((px, py));
                         }
                     }

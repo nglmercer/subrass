@@ -191,20 +191,21 @@ impl SubtitleRenderer {
     /// Create a new renderer from ASS content
     #[wasm_bindgen(constructor)]
     pub fn new(ass_content: &str) -> Result<SubtitleRenderer, JsError> {
-        let inner = InnerRenderer::new(ass_content)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let inner = InnerRenderer::new(ass_content).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
     }
 
     /// Load a font from bytes (Uint8Array)
     pub fn load_font(&mut self, name: &str, data: &[u8]) -> Result<usize, JsError> {
-        self.inner.load_font(name, data)
+        self.inner
+            .load_font(name, data)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Set the canvas element to render to
     pub fn set_canvas(&mut self, canvas: HtmlCanvasElement) -> Result<(), JsError> {
-        self.inner.set_canvas(canvas)
+        self.inner
+            .set_canvas(canvas)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -220,7 +221,8 @@ impl SubtitleRenderer {
 
     /// Render a single frame at the given time (in milliseconds)
     pub fn render_frame(&mut self, time_ms: f64) -> Result<(), JsError> {
-        self.inner.render_frame(time_ms as u64)
+        self.inner
+            .render_frame(time_ms as u64)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 

@@ -2,10 +2,7 @@ use crate::types::Style;
 
 use super::errors::ParseError;
 
-pub fn parse_styles(
-    lines: &[&str],
-    start_line: usize,
-) -> Result<Vec<Style>, ParseError> {
+pub fn parse_styles(lines: &[&str], start_line: usize) -> Result<Vec<Style>, ParseError> {
     let mut styles = Vec::new();
     let mut format_line: Option<String> = None;
 
@@ -43,8 +40,7 @@ fn parse_style_line(
     //         Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle,
     //         Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 
-    let style = Style::parse_from_line(data)
-        .map_err(|e| ParseError::line_error(line_num, e))?;
+    let style = Style::parse_from_line(data).map_err(|e| ParseError::line_error(line_num, e))?;
 
     Ok(style)
 }

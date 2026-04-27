@@ -9,11 +9,11 @@ pub mod shaper;
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
-use crate::parser::AssDocument;
-use crate::types::Event;
 use self::buffer::RenderBuffer;
 use self::compositor::Compositor;
 use self::font::FontManager;
+use crate::parser::AssDocument;
+use crate::types::Event;
 
 /// Main subtitle renderer
 pub struct SubtitleRenderer {
@@ -30,14 +30,15 @@ pub struct SubtitleRenderer {
 impl SubtitleRenderer {
     /// Create a new renderer from ASS content
     pub fn new(ass_content: &str) -> Result<Self, String> {
-        let doc = AssDocument::parse(ass_content)
-            .map_err(|e| format!("Failed to parse ASS: {}", e))?;
+        let doc =
+            AssDocument::parse(ass_content).map_err(|e| format!("Failed to parse ASS: {}", e))?;
 
         let mut font_manager = FontManager::new();
 
         // Load built-in fallback font
         let fallback_data = font::get_fallback_font();
-        font_manager.load_font("DejaVu Sans", fallback_data, false, false)
+        font_manager
+            .load_font("DejaVu Sans", fallback_data, false, false)
             .map_err(|e| format!("Failed to load fallback font: {}", e))?;
 
         let play_res_x = doc.script_info.play_res_x;
@@ -92,23 +93,26 @@ impl SubtitleRenderer {
         self.buffer.clear();
 
         // Get active events
-        let active_events: Vec<Event> = self.doc.events.iter()
+        let active_events: Vec<Event> = self
+            .doc
+            .events
+            .iter()
             .filter(|e| e.is_active_at(time_ms))
             .cloned()
             .collect();
 
         // Sort by layer
         let mut sorted_events = active_events;
-        sorted_events.sort_by(|a, b| a.layer.cmp(&b.layer));
+        sorted_events.sort_by_key(|a| a.layer);
 
         // Render each event
         let default_style = crate::types::Style::new("Default");
 
         for event in &sorted_events {
-            let style = self.doc.find_style(&event.style)
-                .unwrap_or_else(|| {
-                    self.doc.get_default_style().unwrap_or(&default_style)
-                });
+            let style = self
+                .doc
+                .find_style(&event.style)
+                .unwrap_or_else(|| self.doc.get_default_style().unwrap_or(&default_style));
 
             let resolved = Compositor::resolve_style(style, event);
 
@@ -159,7 +163,10 @@ impl SubtitleRenderer {
 
     /// Get the document's play resolution
     pub fn get_play_resolution(&self) -> (u32, u32) {
-        (self.doc.script_info.play_res_x, self.doc.script_info.play_res_y)
+        (
+            self.doc.script_info.play_res_x,
+            self.doc.script_info.play_res_y,
+        )
     }
 
     /// Get the document reference

@@ -1,5 +1,5 @@
+use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use std::collections::HashMap;
-use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 
 /// Cached rasterized glyph
 #[derive(Debug, Clone)]
@@ -81,7 +81,8 @@ impl GlyphCache {
         let scaled = font.as_scaled(scale);
 
         // Get glyph outline - need to convert GlyphId to Glyph
-        let glyph = glyph_id.with_scale_and_position(PxScale::from(font_size as f32), point(0.0, 0.0));
+        let glyph =
+            glyph_id.with_scale_and_position(PxScale::from(font_size as f32), point(0.0, 0.0));
         let outlined = scaled.outline_glyph(glyph);
 
         match outlined {
@@ -126,7 +127,11 @@ impl GlyphCache {
                                     for dx in 0i32..=1 {
                                         let nx = x + dx;
                                         let ny = y + dy;
-                                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                                        if nx >= 0
+                                            && nx < width as i32
+                                            && ny >= 0
+                                            && ny < height as i32
+                                        {
                                             let nidx = (ny as u32 * width + nx as u32) as usize;
                                             bold_bitmap[nidx] = bold_bitmap[nidx].max(bitmap[idx]);
                                         }

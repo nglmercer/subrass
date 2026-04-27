@@ -415,6 +415,30 @@ impl Compositor {
         // Calculate alpha
         let alpha = (alpha_mult * 255.0) as u8;
 
+        // Handle drawing mode (\\p1) - render vector paths instead of text
+        if resolved.drawing_mode > 0 {
+            let scale_x = video_width as f64 / play_res_x as f64;
+            let scale_y = video_height as f64 / play_res_y as f64;
+            let avg_scale = (scale_x + scale_y) / 2.0;
+            let color = resolved.color.to_rgba();
+            let color_alpha = 255 - color[3];
+
+            super::drawing::DrawingParser::render_drawing(
+                buffer,
+                &clean_text,
+                pos_x,
+                pos_y,
+                avg_scale,
+                [
+                    color[0],
+                    color[1],
+                    color[2],
+                    (color_alpha as f64 * alpha_mult) as u8,
+                ],
+            );
+            return;
+        }
+
         // Apply outline (border style 1)
         if resolved.border_style == 1 && resolved.outline > 0.0 {
             let outline_scale = resolved.outline * (scale_x + scale_y) / 2.0;

@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod compositor;
+pub mod drawing;
 pub mod effects;
 pub mod font;
 pub mod glyph_cache;

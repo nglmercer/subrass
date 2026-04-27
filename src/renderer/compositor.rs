@@ -242,12 +242,13 @@ impl Compositor {
         let margin_r = resolved.margin_r as f64 * scale_x;
         let margin_v = resolved.margin_v as f64 * scale_y;
 
-        // X position (center of text)
+        // X position (LEFT EDGE of text)
+        // Glyphs are rendered from glyph.x = 0 at the left edge
         let x = match alignment {
-            1 | 4 | 7 => margin_l + text_width / 2.0,  // Left
-            2 | 5 | 8 => video_width as f64 / 2.0,     // Center
-            3 | 6 | 9 => video_width as f64 - margin_r - text_width / 2.0, // Right
-            _ => video_width as f64 / 2.0,
+            1 | 4 | 7 => margin_l,                              // Left: start at left margin
+            2 | 5 | 8 => (video_width as f64 - text_width) / 2.0, // Center: center the text
+            3 | 6 | 9 => video_width as f64 - margin_r - text_width, // Right: end at right margin
+            _ => (video_width as f64 - text_width) / 2.0,
         };
 
         // Y position (BASELINE of text)

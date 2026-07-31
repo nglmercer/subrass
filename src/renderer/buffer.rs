@@ -116,8 +116,6 @@ impl RenderBuffer {
     }
 
     /// Get raw pixel slice for ImageData creation
-
-    /// Get raw pixel slice for ImageData creation
     pub fn as_bytes(&self) -> &[u8] {
         &self.pixels
     }

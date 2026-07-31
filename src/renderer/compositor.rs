@@ -110,10 +110,10 @@ fn wrap_event_text(
     let mut prefix = String::new();
     let mut word = String::new();
 
-    let mut preceded_by_space = true; // start-of-text acts like a space boundary
+    let mut preceded_by_space = false; // first word is not preceded by a space
 
     let flush =
-        |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>, pbys: bool| {
+        |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>, pbys: &mut bool| {
             if word.is_empty() {
                 return;
             }
@@ -122,16 +122,18 @@ fn wrap_event_text(
                 prefix: std::mem::take(prefix),
                 text: std::mem::take(word),
                 width,
-                preceded_by_space: pbys,
+                preceded_by_space: *pbys,
             });
+            // The space (if any) has been consumed by this word; reset so
+            // subsequent words are not falsely marked as space-separated.
+            *pbys = false;
         };
 
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '{' => {
-                flush(&mut prefix, &mut word, &mut words, preceded_by_space);
-                preceded_by_space = false; // tag group is not a space
+                flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
                 prefix.push('{');
                 for gc in chars.by_ref() {
                     prefix.push(gc);
@@ -143,7 +145,7 @@ fn wrap_event_text(
             '\\' => match chars.peek() {
                 Some('N') | Some('n') => {
                     chars.next();
-                    flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
                     preceded_by_space = true;
                     run_starts.push(words.len());
                 }
@@ -159,17 +161,15 @@ fn wrap_event_text(
                 None => word.push('\\'),
             },
             ' ' | '\t' => {
-                flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+                flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
                 preceded_by_space = true;
             }
             _ => {
                 word.push(c);
-                // non-space character consumed — next word won't be preceded by space
-                // (unless a space flush happens first)
             }
         }
     }
-    flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
     // Trailing tag groups with no word attach as a zero-width word
     if !prefix.is_empty() {
         words.push(WrapWord {
@@ -846,9 +846,9 @@ impl Compositor {
                 _ => base_x + shaped_full.width / 2.0,
             };
             let ay = match resolved.alignment {
-                7 | 8 | 9 => base_y,
-                4 | 5 | 6 => base_y + shaped_full.height / 2.0,
-                1 | 2 | 3 => base_y + shaped_full.height,
+                7..=9 => base_y,
+                4..=6 => base_y + shaped_full.height / 2.0,
+                1..=3 => base_y + shaped_full.height,
                 _ => base_y + shaped_full.height / 2.0,
             };
             (ax, ay)
@@ -1391,6 +1391,27 @@ mod tests {
         let font = fallback_font();
         let out = wrap_event_text("aaaaaaaa", 0, 5.0, &font, 48.0, 0.0);
         assert_eq!(out, "aaaaaaaa");
+    }
+
+    #[test]
+    fn test_wrap_karaoke_no_phantom_spaces() {
+        let font = fallback_font();
+        // Karaoke text split by tag groups: {\k80}Hel{\k60}lo {\k100}world!
+        // "Hel" and "lo" are adjacent (no space) — must NOT get a space inserted.
+        let text = "{\\k80}Hel{\\k60}lo {\\k100}world!";
+        // Use a huge max_width so no wrapping occurs — we only test space preservation.
+        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        assert_eq!(out, "{\\k80}Hel{\\k60}lo {\\k100}world!");
+    }
+
+    #[test]
+    fn test_wrap_karaoke_with_real_spaces() {
+        let font = fallback_font();
+        // "line " has a trailing space before the next tag group.
+        let text = "{\\k80}Out{\\k70}line {\\k80}dis{\\k60}ap{\\k70}pears";
+        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        // The space between "line" and "dis" must be preserved; no space between "Out"|"line".
+        assert_eq!(out, "{\\k80}Out{\\k70}line {\\k80}dis{\\k60}ap{\\k70}pears");
     }
 
     #[test]

@@ -85,13 +85,13 @@ scope.onmessage = async (e) => {
         const bytes = renderer.get_frame_data();
         const w = size[0] || frameW;
         const h = size[1] || frameH;
-        dbg("render", {
+/*         dbg("render", {
           timeMs: msg.timeMs,
           seq: msg.seq,
           w,
           h,
           bytesLen: bytes.byteLength,
-        });
+        }); */
         scope.postMessage(
           {
             type: "frame",

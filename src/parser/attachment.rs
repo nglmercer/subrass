@@ -132,7 +132,7 @@ mod tests {
     fn test_parse_multiple_attachments() {
         let d1 = encode_attachment_data(b"one");
         let d2 = encode_attachment_data(b"two");
-        let section = vec![
+        let section = [
             "fontname: a.ttf".to_string(),
             d1,
             "fontname: b.png".to_string(),
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_parse_ignores_data_before_fontname() {
-        let section = vec!["garbage-before-any-name".to_string()];
+        let section = ["garbage-before-any-name".to_string()];
         let refs: Vec<&str> = section.iter().map(|s| s.as_str()).collect();
         assert!(parse_attachments(&refs, AttachmentKind::Font).is_empty());
     }

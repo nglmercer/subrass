@@ -14,25 +14,32 @@ A pure Rust ASS/SSA subtitle parser and renderer, compiled to WebAssembly. No li
 
 ```
 src/
+├── lib.rs                  # Crate root, WASM start hook, version()
 ├── api.rs                  # WASM bindings (AssDoc, SubtitleRenderer)
+├── utils.rs                # Panic hook, 3D transform math helpers
 ├── parser/
-│   ├── mod.rs              # ASS document parser
-│   └── override_tag.rs     # Override tag parser (~40 tags)
+│   ├── mod.rs              # ASS document parser (section dispatch)
+│   ├── errors.rs           # Parse error types, section headers
+│   ├── script_info.rs      # [Script Info] parser
+│   ├── style.rs            # [V4+ Styles] parser
+│   └── event.rs            # [Events] parser
 ├── renderer/
 │   ├── mod.rs              # Main renderer orchestrator
 │   ├── font.rs             # Font loading and management (ab_glyph)
-│   ├── glyph_cache.rs      # Glyph rasterization with LRU cache
+│   ├── glyph_cache.rs      # Glyph rasterization cache
 │   ├── shaper.rs           # Text shaping, measurement, word-wrap
 │   ├── compositor.rs       # Style resolution, positioning, rendering
-│   ├── drawing.rs          # ASS vector drawing parser (m/l/b/n/c)
+│   ├── drawing.rs          # ASS vector drawing parser (m/l/b/n/c) + types
 │   ├── effects.rs          # Outline, shadow, blur, clipping
 │   └── buffer.rs           # RGBA pixel buffer with alpha compositing
 └── types/
-    ├── mod.rs              # Core types (Event, Style, ScriptInfo)
+    ├── mod.rs              # Core type re-exports
     ├── event.rs            # ASS event types
     ├── style.rs            # ASS style types
-    ├── override_tag.rs     # Override tag enum
-    └── drawing.rs          # Drawing command types
+    ├── script_info.rs      # Script info types
+    ├── override_tag.rs     # Override tag enum + parser (~40 tags)
+    ├── color.rs            # ASS color (&HAABBGGRR&) type
+    └── time.rs             # ASS timestamp type
 ```
 
 ## Rendering Pipeline
@@ -58,10 +65,10 @@ src/
 | Border/Shadow | `\bord`, `\shad`, `\be`, `\blur` |
 | Clipping | `\clip`, `\iclip` |
 | Drawing | `\p`, `\p1` vector paths |
-| Fade | `\fad`, `\fade` |
-| Wrapping | `\q`, `\N`, `\n` |
+| Fade | `\fad` |
+| Wrapping | `\N`, `\n` |
 
-**Parsed but not yet rendered:** `\t` (animated overrides), `\frx`/`\fry` (3D rotation), karaoke (`\k`, `\K`, `\kf`, `\ko`)
+**Parsed but not yet rendered:** karaoke (`\k`, `\K`, `\kf`, `\ko`)
 
 ## Build
 
@@ -77,6 +84,8 @@ wasm-pack build --target web
 
 ## Usage
 
+Exported methods keep their Rust snake_case names (no `js_name` remapping).
+
 ```html
 <script type="module">
   import init, { SubtitleRenderer } from './pkg/subrass.js';
@@ -87,17 +96,29 @@ wasm-pack build --target web
   const assContent = await response.text();
 
   const renderer = new SubtitleRenderer(assContent);
-  renderer.setCanvas(document.getElementById('canvas'));
-  renderer.setFont('MyFont', fontBytes);
+  renderer.set_canvas(document.getElementById('canvas'));
+  renderer.load_font('MyFont', fontBytes);   // Uint8Array of a TTF/OTF
+  renderer.set_video_size(1920, 1080);       // optional, scales output
 
-  // Render at 10 seconds
-  renderer.renderFrame(10000);
+  // Render at 10 seconds (time is in milliseconds)
+  renderer.render_frame(10000);
 </script>
 ```
 
 ## Demo
 
-Open `demo/index.html` in a browser. Select a video file and an ASS subtitle file to see the renderer in action.
+The demo loads the built WASM module from `pkg/` and must be served over HTTP (ES module imports and `fetch` don't work from `file://`):
+
+```bash
+# 1. Build the WASM package (output in pkg/)
+./build.sh                  # or: wasm-pack build --target web
+
+# 2. Serve the repo root
+bun server.ts               # bundled dev server → http://localhost:3001
+# …or any static server, e.g.: python -m http.server 8080
+```
+
+Then open the served `demo/` page and select a video file and an ASS subtitle file. If you load only subtitles, the demo plays them on a virtual timeline.
 
 ## Status
 
@@ -110,6 +131,8 @@ Open `demo/index.html` in a browser. Select a video file and an ASS subtitle fil
 - `\pos`, `\move`, `\org`
 - Outline, Shadow effects
 - Fade (`\fad`, `\1a`–`\4a`)
+- Animated overrides (`\t` with accel)
+- Rotation (`\frz` 2D, `\frx`/`\fry` projective 3D)
 - `\clip` / `\iclip`
 - Drawing mode (`\p1` vector paths)
 - Box blur (`\be`, `\blur`)
@@ -118,14 +141,13 @@ Open `demo/index.html` in a browser. Select a video file and an ASS subtitle fil
 - Canvas rendering
 
 ### Not Yet Implemented
-- `\t` (animated override tags)
-- 3D rotation (`\frx`, `\fry`)
-- Karaoke (`\k`, `\K`, `\kf`, `\ko`)
+- `\fade` (complex fade) and `\q` (wrap-style override) — not parsed
+- Karaoke rendering (`\k`, `\K`, `\kf`, `\ko` are parsed but ignored)
 - HarfBuzz/OpenType complex shaping
 - Web Worker architecture
 - `[Fonts]` section embedding
 - `[Graphics]` section
-- SSA v4.00 (non-plus) style format
+- SSA v4.00 (non-plus) style format (section is accepted but fields are mapped as V4+)
 - SIMD optimizations
 
 ## License

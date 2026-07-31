@@ -77,6 +77,10 @@ struct WrapWord {
     prefix: String,
     text: String,
     width: f64,
+    /// True when this word was separated from the previous word by a space
+    /// in the original text. Used to avoid inserting phantom spaces between
+    /// words that were only split by override-tag boundaries (e.g. karaoke).
+    preceded_by_space: bool,
 }
 
 /// Insert '\n' at word boundaries per the ASS wrap style:
@@ -106,23 +110,28 @@ fn wrap_event_text(
     let mut prefix = String::new();
     let mut word = String::new();
 
-    let flush = |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>| {
-        if word.is_empty() {
-            return;
-        }
-        let width = TextShaper::measure_text(word, font, font_size, spacing);
-        words.push(WrapWord {
-            prefix: std::mem::take(prefix),
-            text: std::mem::take(word),
-            width,
-        });
-    };
+    let mut preceded_by_space = true; // start-of-text acts like a space boundary
+
+    let flush =
+        |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>, pbys: bool| {
+            if word.is_empty() {
+                return;
+            }
+            let width = TextShaper::measure_text(word, font, font_size, spacing);
+            words.push(WrapWord {
+                prefix: std::mem::take(prefix),
+                text: std::mem::take(word),
+                width,
+                preceded_by_space: pbys,
+            });
+        };
 
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '{' => {
-                flush(&mut prefix, &mut word, &mut words);
+                flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+                preceded_by_space = false; // tag group is not a space
                 prefix.push('{');
                 for gc in chars.by_ref() {
                     prefix.push(gc);
@@ -134,7 +143,8 @@ fn wrap_event_text(
             '\\' => match chars.peek() {
                 Some('N') | Some('n') => {
                     chars.next();
-                    flush(&mut prefix, &mut word, &mut words);
+                    flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+                    preceded_by_space = true;
                     run_starts.push(words.len());
                 }
                 Some('h') => {
@@ -149,18 +159,24 @@ fn wrap_event_text(
                 None => word.push('\\'),
             },
             ' ' | '\t' => {
-                flush(&mut prefix, &mut word, &mut words);
+                flush(&mut prefix, &mut word, &mut words, preceded_by_space);
+                preceded_by_space = true;
             }
-            _ => word.push(c),
+            _ => {
+                word.push(c);
+                // non-space character consumed — next word won't be preceded by space
+                // (unless a space flush happens first)
+            }
         }
     }
-    flush(&mut prefix, &mut word, &mut words);
+    flush(&mut prefix, &mut word, &mut words, preceded_by_space);
     // Trailing tag groups with no word attach as a zero-width word
     if !prefix.is_empty() {
         words.push(WrapWord {
             prefix,
             text: String::new(),
             width: 0.0,
+            preceded_by_space: false,
         });
     }
 
@@ -245,7 +261,7 @@ fn render_wrapped_run(
         let mut prev_had_text = false;
         for (j, &idx) in line.iter().enumerate() {
             let w = &words[idx];
-            if j > 0 && prev_had_text && !w.text.is_empty() {
+            if j > 0 && prev_had_text && !w.text.is_empty() && w.preceded_by_space {
                 out.push(' ');
             }
             out.push_str(&w.prefix);

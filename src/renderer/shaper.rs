@@ -65,7 +65,13 @@ impl TextShaper {
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
                 // Line break: advance y, reset x
-                max_x = max_x.max(x);
+        max_x = max_x.max(x);
+
+        // Remove trailing spacing — width should reflect the visual extent
+        // of the glyphs, not include an extra spacing unit after the last one.
+        if !text.is_empty() {
+            max_x -= spacing;
+        }
                 y += line_height;
                 x = 0.0;
                 continue;

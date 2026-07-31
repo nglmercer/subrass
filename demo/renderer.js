@@ -14,9 +14,6 @@ export function createRenderer(content, c) {
   return renderer;
 }
 
-export function getRenderer() {
-  return renderer;
-}
 
 export function setVideoSize(w, h) {
   if (renderer && w && h) {

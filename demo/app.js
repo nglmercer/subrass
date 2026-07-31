@@ -1,3 +1,5 @@
+// Demo driver. Rendering runs in a Web Worker by default; if workers are
+// unavailable it falls back to rendering on the main thread.
 import init from "../pkg/subrass.js";
 import {
     setCanvas,
@@ -6,7 +8,6 @@ import {
     renderFrame,
     getSummary,
     loadFont,
-    getRenderer,
 } from "./renderer.js";
 import {
     initPlayer,
@@ -29,16 +30,99 @@ const stopBtn = $("stopBtn");
 const seekBar = $("seekBar");
 const error = $("error");
 
+// ---------------------------------------------------------------------------
+// Render backends
+// ---------------------------------------------------------------------------
+
+// Main-thread backend (fallback)
+const directBackend = {
+    kind: "main-thread",
+    init: () => init(),
+    setCanvas: (c) => setCanvas(c),
+    loadAss: async (content) => {
+        createRenderer(content, canvas);
+        return getSummary();
+    },
+    setVideoSize: (w, h) => setVideoSize(w, h),
+    loadFont: (name, data) => loadFont(name, data),
+    renderFrame: (timeMs) => renderFrame(timeMs),
+};
+
+// Worker backend: the worker owns the renderer and posts RGBA frames back
+function createWorkerBackend() {
+    const worker = new Worker(new URL("./worker.js", import.meta.url), {
+        type: "module",
+    });
+    let readyResolve;
+    const ready = new Promise((resolve) => (readyResolve = resolve));
+    let loadedResolve = null;
+
+    worker.onmessage = (e) => {
+        const msg = e.data;
+        switch (msg.type) {
+            case "ready":
+                readyResolve();
+                break;
+            case "loaded":
+                if (loadedResolve) loadedResolve(msg.summary);
+                break;
+            case "frame": {
+                if (canvas.width !== msg.w || canvas.height !== msg.h) {
+                    canvas.width = msg.w;
+                    canvas.height = msg.h;
+                }
+                const pixels = new Uint8ClampedArray(msg.buffer);
+                ctx.putImageData(new ImageData(pixels, msg.w, msg.h), 0, 0);
+                break;
+            }
+            case "error":
+                showError("Worker error: " + msg.message);
+                break;
+        }
+    };
+    worker.onerror = (e) => showError("Worker failed: " + e.message);
+    worker.postMessage({ type: "init" });
+
+    return {
+        kind: "worker",
+        init: () => ready,
+        setCanvas: () => {},
+        loadAss: (content) =>
+            new Promise((resolve) => {
+                loadedResolve = resolve;
+                worker.postMessage({ type: "load", content });
+            }),
+        setVideoSize: (w, h) => worker.postMessage({ type: "resize", w, h }),
+        loadFont: (name, data) =>
+            worker.postMessage({ type: "font", name, data: data.buffer }, [data.buffer]),
+        renderFrame: (timeMs) => worker.postMessage({ type: "render", timeMs }),
+    };
+}
+
+let backend;
+try {
+    backend = createWorkerBackend();
+} catch (e) {
+    console.warn("Falling back to main-thread rendering:", e);
+    backend = directBackend;
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+
+let loaded = false;
+
 async function main() {
-    await init();
-    setCanvas(canvas);
+    await backend.init();
+    backend.setCanvas(canvas);
 
     initPlayer(video, {
         onFrame(timeMs) {
             if (endedCheck(timeMs)) return;
             syncCanvasSize();
             if (!isVideoMode()) clearCanvas();
-            renderFrame(timeMs);
+            backend.renderFrame(timeMs);
             updateUI(timeMs);
         },
     });
@@ -64,13 +148,13 @@ async function main() {
 
     $("fontInput").addEventListener("change", async (e) => {
         const files = e.target.files;
-        if (!files.length || !getRenderer()) return;
+        if (!files.length || !loaded) return;
         const fontList = $("fontList");
         fontList.innerHTML = "Built-in: DejaVu Sans<br>";
         for (const file of files) {
             try {
                 const data = new Uint8Array(await file.arrayBuffer());
-                loadFont(file.name.replace(/\.[^.]+$/, ""), data);
+                backend.loadFont(file.name.replace(/\.[^.]+$/, ""), data);
                 fontList.innerHTML += file.name + "<br>";
             } catch (err) {
                 console.error("Failed to load font:", file.name, err);
@@ -88,7 +172,7 @@ async function main() {
         playPauseBtn.textContent = "Play";
         syncCanvasSize();
         if (!isVideoMode()) clearCanvas();
-        renderFrame(0);
+        backend.renderFrame(0);
         updateUI(0);
     });
 
@@ -96,14 +180,14 @@ async function main() {
         seekPlayer(seekBar.value);
         syncCanvasSize();
         if (!isVideoMode()) clearCanvas();
-        renderFrame(getCurrentTimeMs());
+        backend.renderFrame(getCurrentTimeMs());
         updateUI(getCurrentTimeMs());
     });
 
     video.addEventListener("loadedmetadata", () => {
         syncCanvasSize();
-        setVideoSize(video.videoWidth, video.videoHeight);
-        renderFrame(getCurrentTimeMs());
+        backend.setVideoSize(video.videoWidth, video.videoHeight);
+        backend.renderFrame(getCurrentTimeMs());
     });
 
     video.addEventListener("timeupdate", () => {
@@ -124,12 +208,13 @@ async function main() {
     window.addEventListener("resize", () => {
         syncCanvasSize();
         if (isVideoMode()) {
-            setVideoSize(video.videoWidth, video.videoHeight);
+            backend.setVideoSize(video.videoWidth, video.videoHeight);
         }
-        renderFrame(getCurrentTimeMs());
+        backend.renderFrame(getCurrentTimeMs());
     });
 
     enableControls();
+    console.log("Render backend:", backend.kind);
 
     try {
         const resp = await fetch("test.ass");
@@ -149,7 +234,7 @@ function endedCheck(timeMs) {
         if (!isVideoMode()) {
             syncCanvasSize();
             clearCanvas();
-            renderFrame(0);
+            backend.renderFrame(0);
             updateUI(0);
         }
         return true;
@@ -171,7 +256,7 @@ function syncCanvasSize() {
     if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
-        setVideoSize(w, h);
+        backend.setVideoSize(w, h);
     }
 }
 
@@ -181,14 +266,15 @@ function clearCanvas() {
 }
 
 async function loadAss(content) {
-    createRenderer(content, canvas);
+    const summary = await backend.loadAss(content);
+    loaded = true;
     syncCanvasSize();
     if (video.videoWidth) {
-        setVideoSize(video.videoWidth, video.videoHeight);
+        backend.setVideoSize(video.videoWidth, video.videoHeight);
     }
     if (!isVideoMode()) clearCanvas();
-    renderFrame(getCurrentTimeMs());
-    updateSummary();
+    backend.renderFrame(getCurrentTimeMs());
+    updateSummary(summary);
     updateUI(getCurrentTimeMs());
 }
 
@@ -200,8 +286,7 @@ function updateUI(timeMs) {
     }
 }
 
-function updateSummary() {
-    const s = getSummary();
+function updateSummary(s) {
     if (!s) return;
     $("summaryRes").textContent = `${s.resolution[0]}x${s.resolution[1]}`;
     $("summaryStyles").textContent = s.styles;

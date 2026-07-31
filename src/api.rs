@@ -258,6 +258,18 @@ impl SubtitleRenderer {
         vec![w, h]
     }
 
+    /// Get the last rendered frame as RGBA bytes (Uint8Array).
+    /// Works without a canvas, for rendering in a Web Worker.
+    pub fn get_frame_data(&self) -> Vec<u8> {
+        self.inner.frame_data().to_vec()
+    }
+
+    /// Get the render buffer dimensions [width, height]
+    pub fn get_frame_size(&self) -> Vec<u32> {
+        let (w, h) = self.inner.frame_size();
+        vec![w, h]
+    }
+
     /// Get event count
     pub fn get_event_count(&self) -> usize {
         self.inner.document().get_event_count()

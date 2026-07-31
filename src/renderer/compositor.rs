@@ -106,7 +106,7 @@ fn wrap_event_text(
     let mut prefix = String::new();
     let mut word = String::new();
 
-    let mut flush = |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>| {
+    let flush = |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>| {
         if word.is_empty() {
             return;
         }

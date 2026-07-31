@@ -153,10 +153,24 @@ impl SubtitleRenderer {
             );
         }
 
-        // Transfer buffer to canvas
-        self.transfer_to_canvas()?;
+        // Transfer buffer to canvas when one is set. Without a canvas the
+        // frame stays in the buffer for retrieval via frame_data() (used
+        // by the Web Worker path).
+        if self.canvas.is_some() {
+            self.transfer_to_canvas()?;
+        }
 
         Ok(())
+    }
+
+    /// Raw RGBA bytes of the last rendered frame
+    pub fn frame_data(&self) -> &[u8] {
+        self.buffer.as_bytes()
+    }
+
+    /// Dimensions of the render buffer
+    pub fn frame_size(&self) -> (u32, u32) {
+        (self.video_width, self.video_height)
     }
 
     /// Transfer the render buffer to the canvas

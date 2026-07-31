@@ -5,7 +5,7 @@ A pure Rust ASS/SSA subtitle parser and renderer, compiled to WebAssembly. No li
 ## Features
 
 - **Pure Rust** — no C/C++ FFI, no libass. Full control over the rendering pipeline.
-- **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles, Events, override tags (~40 tag types)
+- **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles (SSA), Events, override tags (~40 tag types)
 - **Native rendering** — glyph rasterization via `ab_glyph`, scanline fill for vector drawing, box blur, outline, shadow, clipping
 - **WebAssembly** — compiles to WASM, renders to HTML Canvas via `putImageData`
 - **Font management** — TTF/OTF loading, bold/italic matching, built-in fallback (DejaVu Sans)
@@ -121,6 +121,8 @@ bun server.ts               # bundled dev server → http://localhost:3001
 
 Then open the served `demo/` page and select a video file and an ASS subtitle file. If you load only subtitles, the demo plays them on a virtual timeline.
 
+A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all major features: karaoke (hard swap, sweep, outline), V4+ and V4 (SSA) styles, transforms, movement, clipping, vector drawing, multi-layer compositing, and fade effects.
+
 ## Status
 
 ### Working
@@ -134,8 +136,8 @@ Then open the served `demo/` page and select a video file and an ASS subtitle fi
 - Fade (`\fad`, `\fade`, `\1a`–`\4a`)
 - Animated overrides (`\t` with accel, timing args optional)
 - Rotation (`\frz` 2D, `\frx`/`\fry` projective 3D)
-- Karaoke (`\k` hard swap, `\K`/`\kf` per-glyph sweep, `\ko` outline)
-- SSA v4.00 `[V4 Styles]` (format-aware column mapping, alignment conversion, `AlphaLevel`)
+- Karaoke (`\k` hard swap, `\K`/`\kf` per-glyph sweep, `\ko` outline, combined with borders/blur/italic)
+- SSA v4.00 `[V4 Styles]` (format-aware column mapping, alignment conversion, `AlphaLevel`, TertiaryColour)
 - `\clip` / `\iclip`
 - Drawing mode (`\p1` vector paths)
 - Box blur (`\be`, `\blur`)

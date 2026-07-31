@@ -696,16 +696,16 @@ impl Compositor {
             // Adjust position so the anchor point lands at (px, py).
             let scaled_x = px * scale_x;
             let scaled_y = py * scale_y;
-            return Self::anchor_to_origin(
+            let (x, top) = Self::anchor_to_origin(
                 resolved.alignment,
                 scaled_x,
                 scaled_y,
                 text_width,
                 text_height,
             );
+            return (x, top + baseline);
         }
 
-        let descent = baseline - text_height;
         let alignment = resolved.alignment;
         let margin_l = resolved.margin_l as f64 * scale_x;
         let margin_r = resolved.margin_r as f64 * scale_x;
@@ -718,14 +718,14 @@ impl Compositor {
             _ => (video_width as f64 - text_width) / 2.0,
         };
 
-        let y = match alignment {
-            7..=9 => margin_v + baseline,
-            4..=6 => video_height as f64 / 2.0,
-            1..=3 => (video_height as f64 - margin_v) - descent,
-            _ => (video_height as f64 - margin_v) - descent,
+        let top = match alignment {
+            7..=9 => margin_v,
+            4..=6 => video_height as f64 / 2.0 - text_height / 2.0,
+            1..=3 => video_height as f64 - margin_v - text_height,
+            _ => video_height as f64 / 2.0 - text_height / 2.0,
         };
 
-        (x, y)
+        (x, top + baseline)
     }
 
     /// Composite a single event into the buffer using per-segment rendering.
@@ -957,13 +957,15 @@ impl Compositor {
 
             let anchor_x = (move_data.x1 + (move_data.x2 - move_data.x1) * t) * scale_x;
             let anchor_y = (move_data.y1 + (move_data.y2 - move_data.y1) * t) * scale_y;
-            (base_x, base_y) = Self::anchor_to_origin(
+            let (origin_x, origin_top) = Self::anchor_to_origin(
                 resolved.alignment,
                 anchor_x,
                 anchor_y,
                 shaped_full.width,
                 shaped_full.height,
             );
+            base_x = origin_x;
+            base_y = origin_top + shaped_full.baseline;
         }
 
         // Rotation origin for 3D effects. The default origin follows a move;
@@ -971,6 +973,7 @@ impl Compositor {
         let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
             (ox * scale_x, oy * scale_y)
         } else {
+            let text_top = base_y - shaped_full.baseline;
             let ax = match resolved.alignment {
                 1 | 4 | 7 => base_x,
                 2 | 5 | 8 => base_x + shaped_full.width / 2.0,
@@ -978,10 +981,10 @@ impl Compositor {
                 _ => base_x + shaped_full.width / 2.0,
             };
             let ay = match resolved.alignment {
-                7..=9 => base_y,
-                4..=6 => base_y + shaped_full.height / 2.0,
-                1..=3 => base_y + shaped_full.height,
-                _ => base_y + shaped_full.height / 2.0,
+                7..=9 => text_top,
+                4..=6 => text_top + shaped_full.height / 2.0,
+                1..=3 => text_top + shaped_full.height,
+                _ => text_top + shaped_full.height / 2.0,
             };
             (ax, ay)
         };
@@ -992,7 +995,7 @@ impl Compositor {
             effects::apply_opaque_box(
                 buffer,
                 base_x as i32,
-                base_y as i32,
+                (base_y - shaped_full.baseline) as i32,
                 shaped_full.width.ceil() as i32,
                 shaped_full.height.ceil() as i32,
                 (resolved.margin_l as f64 * scale_x).round() as i32,
@@ -1366,35 +1369,41 @@ impl Compositor {
                         }
                     }
                 }
+            }
 
-                // Render underline
-                if segment_resolved.underline {
-                    let line_width = 2;
-                    let color = segment_resolved.color.to_rgba();
-                    let color_alpha = 255 - color[3];
-                    let ul_gy = (final_gy as f64 + shaped.baseline * 0.9) as i32;
-                    buffer.fill_rect(
-                        final_gx,
-                        ul_gy,
-                        rot_w as i32,
-                        line_width,
-                        color[0],
-                        color[1],
-                        color[2],
-                        (color_alpha as f64 * alpha_mult) as u8,
-                    );
+            // Decorations belong to the whole text segment, not individual
+            // glyph bitmaps. Drawing them from the segment baseline avoids
+            // gaps between glyphs and keeps them stable across font bearings.
+            if segment_resolved.underline || segment_resolved.strike_out {
+                let color = segment_resolved.color.to_rgba();
+                let color_alpha = 255 - color[3];
+                let line_width = if segment_resolved.underline {
+                    (2.0 * scale_y).round().max(1.0) as i32
+                } else {
+                    (3.0 * scale_y).round().max(1.0) as i32
+                };
+                let mut line_offsets = Vec::new();
+                for glyph in &shaped.glyphs {
+                    if !line_offsets
+                        .iter()
+                        .any(|offset: &f64| (*offset - glyph.y).abs() < f64::EPSILON)
+                    {
+                        line_offsets.push(glyph.y);
+                    }
                 }
-
-                // Render strikeout
-                if segment_resolved.strike_out {
-                    let line_width = 3;
-                    let color = segment_resolved.color.to_rgba();
-                    let color_alpha = 255 - color[3];
-                    let so_gy = (final_gy as f64 + rot_h as f64 * 0.4) as i32;
+                for line_offset in line_offsets {
+                    let decoration_y = if segment_resolved.underline {
+                        base_y
+                            + line_y_offset
+                            + line_offset
+                            + (shaped.height - shaped.baseline) * 0.5
+                    } else {
+                        base_y + line_y_offset + line_offset - shaped.baseline * 0.35
+                    };
                     buffer.fill_rect(
-                        final_gx,
-                        so_gy,
-                        rot_w as i32,
+                        (base_x + x_offset) as i32,
+                        decoration_y as i32,
+                        shaped.width.ceil() as i32,
                         line_width,
                         color[0],
                         color[1],
@@ -1558,7 +1567,7 @@ mod tests {
         let resolved = Compositor::resolve_style(&style, &event);
         let (x, y) =
             Compositor::calculate_position(&resolved, 40.0, 20.0, 15.0, 200, 100, 200, 100);
-        assert_eq!((x, y), (80.0, 70.0));
+        assert_eq!((x, y), (80.0, 85.0));
     }
 
     #[test]

@@ -224,8 +224,8 @@ Dialogue: 1,0:03:58.00,0:04:05.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H888888
 ; SECTION 17: RESET & STYLE INHERITANCE (4:05 - 4:15)
 ; ═══════════════════════════════════════════════════════════════
 
-Dialogue: 0,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,300)\fnArial\fs64\b1\c&HFF0000&}Modified{\r} → Reset to base style
-Dialogue: 1,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,380)\c&HFF0000&}Red{\r} {\i1}italic{\r} {\b1}bold{\r} — each \r resets
+Dialogue: 0,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,300)\fnArial\fs64\b1\c&H0000FF&}Modified{\r} → Reset to base style
+Dialogue: 1,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,380)\c&H0000FF&}Red{\r} {\i1}italic{\r} {\b1}bold{\r} — each \r resets
 
 Dialogue: 0,0:04:11.00,0:04:15.00,Credit,,0,0,0,,{\an5\pos(960,300)}Using Credit style (italic)
 Dialogue: 1,0:04:11.00,0:04:15.00,TopComment,,0,0,0,,{\an5\pos(960,360)}Using TopComment style (yellow)
@@ -258,9 +258,9 @@ Dialogue: 1,0:04:38.00,0:04:45.00,Default,,0,0,0,,{\an5\pos(960,500)\fs40}And {\
 ; SECTION 20: LAYER COMPOSITING (4:45 - 4:55)
 ; ═══════════════════════════════════════════════════════════════
 
-Dialogue: 0,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,400)\c&HFF0000&\fs60}Layer 0 (bottom)
+Dialogue: 0,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,400)\c&H0000FF&\fs60}Layer 0 (bottom)
 Dialogue: 1,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,420)\c&H00FF00&\fs50}Layer 1 (middle)
-Dialogue: 2,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,440)\c&H0000FF&\fs40}Layer 2 (top)
+Dialogue: 2,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,440)\c&HFF0000&\fs40}Layer 2 (top)
 
 Dialogue: 0,0:04:51.00,0:04:55.00,SmallText,,0,0,0,,{\an5\pos(960,500)\c&H888888&}Higher layer number = rendered on top
 

@@ -41,6 +41,29 @@ impl SubtitleRenderer {
             .load_font("DejaVu Sans", fallback_data, false, false)
             .map_err(|e| format!("Failed to load fallback font: {}", e))?;
 
+        // Best-effort load of fonts embedded in the [Fonts] section
+        for attachment in doc
+            .attachments
+            .iter()
+            .filter(|a| a.kind == crate::types::AttachmentKind::Font)
+        {
+            let stem = attachment
+                .filename
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(&attachment.filename);
+            if let Err(e) = font_manager.load_font_auto(stem, &attachment.data) {
+                let msg = format!(
+                    "Failed to load embedded font {}: {}",
+                    attachment.filename, e
+                );
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&msg.into());
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("{}", msg);
+            }
+        }
+
         let play_res_x = doc.script_info.play_res_x;
         let play_res_y = doc.script_info.play_res_y;
 
@@ -179,5 +202,16 @@ impl SubtitleRenderer {
     /// Clear the glyph cache
     pub fn clear_cache(&mut self) {
         self.compositor.clear_cache();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_embedded_garbage_font_does_not_break_renderer() {
+        let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Fonts]\nfontname: Bad.ttf\n15*$\n";
+        assert!(SubtitleRenderer::new(ass).is_ok());
     }
 }

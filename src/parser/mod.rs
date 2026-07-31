@@ -1,9 +1,10 @@
+pub mod attachment;
 pub mod errors;
 pub mod event;
 pub mod script_info;
 pub mod style;
 
-use crate::types::{Event, ScriptInfo, Style};
+use crate::types::{Attachment, AttachmentKind, Event, ScriptInfo, Style};
 use errors::{ParseError, Section};
 
 /// Complete ASS document
@@ -12,6 +13,7 @@ pub struct AssDocument {
     pub script_info: ScriptInfo,
     pub styles: Vec<Style>,
     pub events: Vec<Event>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl AssDocument {
@@ -20,6 +22,7 @@ impl AssDocument {
             script_info: ScriptInfo::new(),
             styles: Vec::new(),
             events: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -136,8 +139,15 @@ fn process_section(
         Section::Events => {
             doc.events = event::parse_events(lines, start_line)?;
         }
-        _ => {
-            // Fonts, Graphics - not implemented yet
+        Section::Fonts => {
+            doc.attachments
+                .extend(attachment::parse_attachments(lines, AttachmentKind::Font));
+        }
+        Section::Graphics => {
+            doc.attachments.extend(attachment::parse_attachments(
+                lines,
+                AttachmentKind::Graphic,
+            ));
         }
     }
     Ok(())
@@ -205,6 +215,24 @@ Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
         assert_eq!(doc.styles[0].alignment, 8);
         assert_eq!(doc.styles[0].font_size, 32.0);
         assert_eq!(doc.events.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_embedded_fonts_and_graphics() {
+        // "ABC" encodes to "15*$" in the SSA uuencode variant
+        let ass = "[Script Info]\nScriptType: v4.00+\n\n[Fonts]\nfontname: Test.ttf\n15*$\n\n[Graphics]\nfontname: logo.bmp\n15*$\n";
+        let doc = AssDocument::parse(ass).unwrap();
+
+        assert_eq!(doc.attachments.len(), 2);
+        assert_eq!(doc.attachments[0].filename, "Test.ttf");
+        assert_eq!(doc.attachments[0].kind, crate::types::AttachmentKind::Font);
+        assert_eq!(doc.attachments[0].data, b"ABC");
+        assert_eq!(doc.attachments[1].filename, "logo.bmp");
+        assert_eq!(
+            doc.attachments[1].kind,
+            crate::types::AttachmentKind::Graphic
+        );
+        assert_eq!(doc.attachments[1].data, b"ABC");
     }
 
     #[test]

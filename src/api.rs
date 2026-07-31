@@ -115,6 +115,32 @@ impl AssDoc {
             JsValue::NULL
         }
     }
+
+    /// Get the number of embedded attachments ([Fonts] + [Graphics])
+    pub fn get_attachment_count(&self) -> usize {
+        self.inner.attachments.len()
+    }
+
+    /// Get the filename of the attachment at index
+    pub fn get_attachment_name(&self, index: usize) -> Option<String> {
+        self.inner
+            .attachments
+            .get(index)
+            .map(|a| a.filename.clone())
+    }
+
+    /// Get the kind of the attachment at index ("font" or "graphic")
+    pub fn get_attachment_kind(&self, index: usize) -> Option<String> {
+        self.inner.attachments.get(index).map(|a| match a.kind {
+            crate::types::AttachmentKind::Font => "font".to_string(),
+            crate::types::AttachmentKind::Graphic => "graphic".to_string(),
+        })
+    }
+
+    /// Get the decoded binary data of the attachment at index (Uint8Array)
+    pub fn get_attachment_data(&self, index: usize) -> Option<Vec<u8>> {
+        self.inner.attachments.get(index).map(|a| a.data.clone())
+    }
 }
 
 /// Parse an ASS file and return a document

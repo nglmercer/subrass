@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod color;
 pub mod event;
 pub mod override_tag;
@@ -5,6 +6,7 @@ pub mod script_info;
 pub mod style;
 pub mod time;
 
+pub use attachment::{Attachment, AttachmentKind};
 pub use color::Color;
 pub use event::{Event, EventType};
 pub use override_tag::{parse_text_segments, OverrideTag, TextSegment};

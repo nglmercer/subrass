@@ -175,8 +175,10 @@ impl RenderBuffer {
 
                 // Solve for z3: 0 = m31*px*(d+z3)/d + m32*py*(d+z3)/d + m33*z3
                 let denom = m[6] * px / perspective + m[7] * py / perspective + m[8];
-                if denom.abs() < 1e-6 { continue; }
-                
+                if denom.abs() < 1e-6 {
+                    continue;
+                }
+
                 let z3 = -(m[6] * px + m[7] * py) / denom;
                 let scale_inv = (perspective + z3) / perspective;
                 let x3 = px * scale_inv;

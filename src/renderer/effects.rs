@@ -67,7 +67,9 @@ pub fn apply_outline(
                         if dist_sq <= max_dist_sq {
                             // Quadratic falloff: alpha = base * (1 - dist²/max²)
                             // Visually nearly identical to linear, but eliminates sqrt
-                            let a = (base_alpha * glyph_alpha_mult * (1.0 - dist_sq * inv_max_dist_sq)) as u8;
+                            let a =
+                                (base_alpha * glyph_alpha_mult * (1.0 - dist_sq * inv_max_dist_sq))
+                                    as u8;
                             if a > 0 {
                                 let px = x + gx + dx;
                                 let py = y + gy + dy;

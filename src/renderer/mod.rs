@@ -228,4 +228,19 @@ mod tests {
         let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Fonts]\nfontname: Bad.ttf\n15*$\n";
         assert!(SubtitleRenderer::new(ass).is_ok());
     }
+
+    #[test]
+    fn test_render_sample_feature_sections() {
+        let mut renderer = SubtitleRenderer::new(include_str!("../../demo/sample.ass")).unwrap();
+        renderer.set_video_size(320, 180);
+
+        for time_ms in [
+            11_000, 26_000, 41_000, 53_000, 66_000, 81_000, 96_000, 111_000, 126_000, 131_000,
+            151_000, 166_000, 181_000, 196_000, 211_000, 226_000, 241_000, 256_000, 271_000,
+            286_000, 301_000,
+        ] {
+            renderer.render_frame(time_ms).unwrap();
+            assert_eq!(renderer.frame_size(), (320, 180));
+        }
+    }
 }

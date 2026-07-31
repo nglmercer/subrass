@@ -1538,6 +1538,30 @@ mod tests {
     }
 
     #[test]
+    fn test_event_style_uses_only_initial_override_group() {
+        let style = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\fs72}Big{\\fs24}small",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&style, &event);
+        assert_eq!(resolved.font_size, 72.0);
+    }
+
+    #[test]
+    fn test_positioned_anchor_is_converted_to_text_origin() {
+        let style = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\an5\\pos(100,80)}Text",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&style, &event);
+        let (x, y) =
+            Compositor::calculate_position(&resolved, 40.0, 20.0, 15.0, 200, 100, 200, 100);
+        assert_eq!((x, y), (80.0, 70.0));
+    }
+
+    #[test]
     fn test_wrap_greedy_top_wider() {
         let font = fallback_font();
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);

@@ -132,12 +132,12 @@ impl RenderBuffer {
     ) -> (Vec<u8>, u32, u32) {
         let scale_x = scale_x.max(0.0);
         let scale_y = scale_y.max(0.0);
+        if scale_x == 0.0 || scale_y == 0.0 || width == 0 || height == 0 {
+            return (Vec::new(), 0, 0);
+        }
         let new_width = ((width as f64 * scale_x).round() as u32).max(1);
         let new_height = ((height as f64 * scale_y).round() as u32).max(1);
 
-        if width == 0 || height == 0 {
-            return (Vec::new(), 0, 0);
-        }
         if (scale_x - 1.0).abs() < f64::EPSILON && (scale_y - 1.0).abs() < f64::EPSILON {
             return (bitmap.to_vec(), width, height);
         }
@@ -443,5 +443,27 @@ mod tests {
         buf.blend_pixel(5, 5, 255, 255, 255, 128);
         let px = buf.get_pixel(5, 5);
         assert!(px[3] > 128);
+    }
+
+    #[test]
+    fn test_blend_buffer_preserves_existing_pixels() {
+        let mut destination = RenderBuffer::new(2, 1);
+        destination.set_pixel(0, 0, 255, 0, 0, 255);
+
+        let mut source = RenderBuffer::new(2, 1);
+        source.set_pixel(1, 0, 0, 255, 0, 255);
+        destination.blend_buffer(&source);
+
+        assert_eq!(destination.get_pixel(0, 0), [255, 0, 0, 255]);
+        assert_eq!(destination.get_pixel(1, 0), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn test_resize_coverage_bitmap() {
+        let bitmap = vec![255u8, 0, 0, 255];
+        let (scaled, width, height) = RenderBuffer::resize_coverage_bitmap(&bitmap, 2, 2, 2.0, 1.5);
+        assert_eq!((width, height), (4, 3));
+        assert_eq!(scaled.len(), 12);
+        assert!(scaled.iter().any(|value| *value > 0));
     }
 }

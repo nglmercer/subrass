@@ -180,9 +180,55 @@ impl TextShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::font;
+
+    fn fallback_font() -> FontArc {
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        manager.find_font("DejaVu Sans", false, false).clone()
+    }
 
     #[test]
     fn test_text_shaper_new() {
         let _ = TextShaper;
+    }
+
+    #[test]
+    fn test_text_shaper_applies_non_uniform_scale() {
+        let font = fallback_font();
+        let normal = TextShaper::shape(
+            "AB",
+            &font,
+            48.0,
+            1.0,
+            1.0,
+            false,
+            false,
+            0.0,
+            Color::white(),
+            Color::black(),
+            Color::black(),
+            0.0,
+        );
+        let scaled = TextShaper::shape(
+            "AB",
+            &font,
+            48.0,
+            2.0,
+            0.5,
+            false,
+            false,
+            0.0,
+            Color::white(),
+            Color::black(),
+            Color::black(),
+            0.0,
+        );
+
+        assert!((scaled.width - normal.width * 2.0).abs() < 0.01);
+        assert!((scaled.height - normal.height * 0.5).abs() < 0.01);
+        assert!((scaled.glyphs[1].x - normal.glyphs[1].x * 2.0).abs() < 0.01);
     }
 }

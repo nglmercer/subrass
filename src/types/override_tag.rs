@@ -812,6 +812,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_reset_tag() {
+        let tags = OverrideTag::parse_from_text("{\\r}");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::Reset));
+    }
+
+    #[test]
     fn test_parse_transform_without_timing() {
         let tags = OverrideTag::parse_from_text("{\\t(\\blur20)}");
         assert_eq!(tags.len(), 1);

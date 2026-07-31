@@ -83,12 +83,21 @@ scope.onmessage = async (e) => {
         renderer.render_frame(msg.timeMs);
         const size = renderer.get_frame_size();
         const bytes = renderer.get_frame_data();
+        const w = size[0] || frameW;
+        const h = size[1] || frameH;
+        dbg("render", {
+          timeMs: msg.timeMs,
+          seq: msg.seq,
+          w,
+          h,
+          bytesLen: bytes.byteLength,
+        });
         scope.postMessage(
           {
             type: "frame",
             seq: msg.seq,
-            w: size[0] || frameW,
-            h: size[1] || frameH,
+            w,
+            h,
             buffer: bytes.buffer,
           },
           [bytes.buffer],

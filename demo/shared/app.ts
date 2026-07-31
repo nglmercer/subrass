@@ -59,14 +59,13 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   await backend.init();
   dbg("backend.init() done", {
     ms: +(performance.now() - initStarted).toFixed(1),
-    // AssDoc lives on the main thread and needs the same module's init().
-    // WorkerBackend only inits WASM inside the worker — main-thread AssDoc
-    // still sees wasm === undefined unless something calls init() here too.
-    // (Debug-only: we intentionally do NOT call init() here so the bug stays visible.)
+    // AssDoc lives on the main thread and needs the module's init() to have
+    // run on this thread. WorkerBackend.init() now calls init() for both the
+    // worker and the main thread, so AssDoc has its bindings ready.
     note:
       backend.kind === "web-worker"
-        ? "worker backend: main-thread pkg/subrass.js is likely still uninitialized (wasm undefined)"
-        : "main-thread backend: DirectBackend.init() should have called init() on this module",
+        ? "worker backend: main-thread pkg/subrass.js initialized in WorkerBackend.init()"
+        : "main-thread backend: DirectBackend.init() called init() on this module",
   });
 
   backend.setFrameTarget(canvas);

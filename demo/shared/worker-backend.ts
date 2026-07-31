@@ -10,6 +10,7 @@
 // Render requests carry a sequence number and stale frames (seq older
 // than the last painted one) are dropped, so the canvas never shows an
 // older frame that happened to arrive late.
+import init from "../../pkg/subrass.js";
 import type { RenderBackend, SubtitleSummary } from "./types.ts";
 
 const DEBUG = true;
@@ -46,8 +47,8 @@ export class WorkerBackend implements RenderBackend {
       workerUrl: workerUrl.href,
       importMetaUrl: import.meta.url,
       note:
-        "init message only loads WASM inside the worker. Main-thread AssDoc " +
-        "in app.ts still needs its own init() on the main-thread module instance.",
+        "Worker WASM inits inside the worker; main-thread WASM inits in init() " +
+        "so AssDoc (used on the main thread in app.ts) has its bindings ready.",
     });
     this.worker = new Worker(workerUrl, { type: "module" });
     this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.onMessage(e.data);
@@ -68,8 +69,11 @@ export class WorkerBackend implements RenderBackend {
   async init(): Promise<void> {
     dbg("init() waiting for worker ready…");
     const t0 = performance.now();
-    await this.readyPromise;
+    const [_ready, exports] = await Promise.all([this.readyPromise, init()]);
     dbg("init() worker ready", { ms: +(performance.now() - t0).toFixed(1) });
+    dbg("init() main-thread wasm ready", {
+      hasMalloc: typeof (exports as { __wbindgen_malloc?: unknown })?.__wbindgen_malloc,
+    });
   }
 
   setFrameTarget(canvas: HTMLCanvasElement): void {
@@ -99,6 +103,7 @@ export class WorkerBackend implements RenderBackend {
   }
 
   renderFrame(timeMs: number): void {
+    dbg("renderFrame → worker", { timeMs, seq: this.nextSeq });
     this.worker.postMessage({ type: "render", timeMs, seq: this.nextSeq++ });
   }
 

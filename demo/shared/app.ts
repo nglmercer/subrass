@@ -11,12 +11,24 @@ const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const END_SLACK_MS = 3000;
 
+const DEBUG = true;
+function dbg(...args: unknown[]): void {
+  if (DEBUG) console.log("[subrass:demo:app]", ...args);
+}
+
 export interface DemoOptions {
   /** Subtitle file fetched on startup. Defaults to the bundled sample. */
   sampleUrl?: string;
 }
 
 export async function startDemo(backend: RenderBackend, options: DemoOptions = {}): Promise<void> {
+  dbg("startDemo begin", {
+    backendKind: backend.kind,
+    sampleUrl: options.sampleUrl ?? "/sample.ass",
+    href: typeof location !== "undefined" ? location.href : "(no location)",
+    importMetaUrl: import.meta.url,
+  });
+
   const video = byId<HTMLVideoElement>("video");
   const canvas = byId<HTMLCanvasElement>("subtitleCanvas");
   const ctx = canvas.getContext("2d")!;
@@ -42,15 +54,48 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     },
   });
 
+  dbg("calling backend.init() — this must initialize WASM for the renderer");
+  const initStarted = performance.now();
   await backend.init();
+  dbg("backend.init() done", {
+    ms: +(performance.now() - initStarted).toFixed(1),
+    // AssDoc lives on the main thread and needs the same module's init().
+    // WorkerBackend only inits WASM inside the worker — main-thread AssDoc
+    // still sees wasm === undefined unless something calls init() here too.
+    // (Debug-only: we intentionally do NOT call init() here so the bug stays visible.)
+    note:
+      backend.kind === "web-worker"
+        ? "worker backend: main-thread pkg/subrass.js is likely still uninitialized (wasm undefined)"
+        : "main-thread backend: DirectBackend.init() should have called init() on this module",
+  });
+
   backend.setFrameTarget(canvas);
+  dbg("setFrameTarget done", { canvasW: canvas.width, canvasH: canvas.height });
 
   // --- Subtitle loading -----------------------------------------------------
 
   async function loadAss(content: string): Promise<void> {
+    dbg("loadAss begin", {
+      contentBytes: content.length,
+      contentHead: content.slice(0, 40).replace(/\n/g, "\\n"),
+    });
     doc?.free();
-    doc = new AssDoc(content);
+    try {
+      dbg("constructing AssDoc on main thread (requires wasm bindings)");
+      doc = new AssDoc(content);
+      dbg("AssDoc constructed ok");
+    } catch (err) {
+      dbg("AssDoc constructor FAILED — classic symptom: wasm is undefined", {
+        error: err,
+        message: (err as Error)?.message,
+        hint:
+          "pkg/subrass.js keeps a module-level `wasm` set only by init()/initSync(). " +
+          "If backend.init() only ran inside a Worker, the main thread never set it.",
+      });
+      throw err;
+    }
     summary = await backend.loadAss(content);
+    dbg("backend.loadAss done", { summary });
     loaded = true;
 
     const events = doc!.get_dialogue_events() as AssEvent[];
@@ -188,12 +233,21 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   refreshHud();
 
   try {
-    const resp = await fetch(options.sampleUrl ?? "/sample.ass");
+    const sampleUrl = options.sampleUrl ?? "/sample.ass";
+    dbg("fetching sample", sampleUrl);
+    const resp = await fetch(sampleUrl);
+    dbg("sample fetch", { ok: resp.ok, status: resp.status, url: resp.url });
     if (resp.ok) {
       byId("assName").textContent = "sample.ass";
       await loadAss(await resp.text());
+      dbg("sample loadAss finished successfully");
+    } else {
+      dbg("sample not loaded (non-OK response)");
     }
   } catch (err) {
+    dbg("sample auto-load failed", err);
     console.warn("Could not auto-load the sample subtitles:", err);
   }
+
+  dbg("startDemo complete", { loaded, hasDoc: !!doc, hasSummary: !!summary });
 }

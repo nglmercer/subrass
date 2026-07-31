@@ -12,6 +12,11 @@
 // older frame that happened to arrive late.
 import type { RenderBackend, SubtitleSummary } from "./types.ts";
 
+const DEBUG = true;
+function dbg(...args: unknown[]): void {
+  if (DEBUG) console.log("[subrass:demo:worker-backend]", ...args);
+}
+
 export type WorkerMessage =
   | { type: "ready" }
   | { type: "loaded"; summary: SubtitleSummary }
@@ -37,28 +42,44 @@ export class WorkerBackend implements RenderBackend {
 
   constructor(workerUrl: URL, options: WorkerBackendOptions = {}) {
     this.onError = options.onError ?? (() => {});
+    dbg("constructor", {
+      workerUrl: workerUrl.href,
+      importMetaUrl: import.meta.url,
+      note:
+        "init message only loads WASM inside the worker. Main-thread AssDoc " +
+        "in app.ts still needs its own init() on the main-thread module instance.",
+    });
     this.worker = new Worker(workerUrl, { type: "module" });
     this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.onMessage(e.data);
-    this.worker.onerror = (e) => this.onError(`Worker failed: ${e.message}`);
+    this.worker.onerror = (e) => {
+      dbg("worker onerror", e.message, e);
+      this.onError(`Worker failed: ${e.message}`);
+    };
 
     this.readyPromise = new Promise<void>((resolve) => {
       this.readyResolve = resolve;
     });
+    dbg("postMessage init → worker");
     this.worker.postMessage({ type: "init" });
   }
 
   private readyResolve!: () => void;
 
   async init(): Promise<void> {
-    return this.readyPromise;
+    dbg("init() waiting for worker ready…");
+    const t0 = performance.now();
+    await this.readyPromise;
+    dbg("init() worker ready", { ms: +(performance.now() - t0).toFixed(1) });
   }
 
   setFrameTarget(canvas: HTMLCanvasElement): void {
+    dbg("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
   }
 
   loadAss(content: string): Promise<SubtitleSummary> {
+    dbg("loadAss → worker", { contentBytes: content.length, pending: this.loadResolvers.length });
     return new Promise((resolve) => {
       this.loadResolvers.push(resolve);
       this.worker.postMessage({ type: "load", content });
@@ -88,9 +109,11 @@ export class WorkerBackend implements RenderBackend {
   private onMessage(msg: WorkerMessage): void {
     switch (msg.type) {
       case "ready":
+        dbg("← worker ready (WASM inited in worker only)");
         this.readyResolve();
         break;
       case "loaded": {
+        dbg("← worker loaded", msg.summary);
         const resolve = this.loadResolvers.shift();
         resolve?.(msg.summary);
         break;
@@ -99,6 +122,7 @@ export class WorkerBackend implements RenderBackend {
         this.paintFrame(msg);
         break;
       case "error":
+        dbg("← worker error", msg.message);
         this.onError(msg.message);
         break;
     }

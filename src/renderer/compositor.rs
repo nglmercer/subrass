@@ -429,10 +429,32 @@ impl Compositor {
                 OverrideTag::ShadowColor(c) => {
                     resolved.shadow_color =
                         Self::interpolate_color(resolved.shadow_color, *c, progress);
+                    resolved.back_color = resolved.shadow_color;
+                }
+                OverrideTag::Alpha(a) => {
+                    let a = *a;
+                    resolved.color.alpha = (resolved.color.alpha as f64
+                        + (a as f64 - resolved.color.alpha as f64) * progress)
+                        as u8;
+                    resolved.secondary_color.alpha = (resolved.secondary_color.alpha as f64
+                        + (a as f64 - resolved.secondary_color.alpha as f64) * progress)
+                        as u8;
+                    resolved.outline_color.alpha = (resolved.outline_color.alpha as f64
+                        + (a as f64 - resolved.outline_color.alpha as f64) * progress)
+                        as u8;
+                    resolved.shadow_color.alpha = (resolved.shadow_color.alpha as f64
+                        + (a as f64 - resolved.shadow_color.alpha as f64) * progress)
+                        as u8;
+                    resolved.back_color.alpha = resolved.shadow_color.alpha;
                 }
                 OverrideTag::PrimaryAlpha(a) => {
                     let from = resolved.color.alpha;
                     resolved.color.alpha =
+                        (from as f64 + (*a as f64 - from as f64) * progress) as u8;
+                }
+                OverrideTag::SecondaryAlpha(a) => {
+                    let from = resolved.secondary_color.alpha;
+                    resolved.secondary_color.alpha =
                         (from as f64 + (*a as f64 - from as f64) * progress) as u8;
                 }
                 OverrideTag::OutlineAlpha(a) => {
@@ -444,6 +466,7 @@ impl Compositor {
                     let from = resolved.shadow_color.alpha;
                     resolved.shadow_color.alpha =
                         (from as f64 + (*a as f64 - from as f64) * progress) as u8;
+                    resolved.back_color.alpha = resolved.shadow_color.alpha;
                 }
                 OverrideTag::ScaleX(s) => {
                     let from = resolved.scale_x;
@@ -551,18 +574,32 @@ impl Compositor {
             OverrideTag::PrimaryColor(c) => resolved.color = *c,
             OverrideTag::SecondaryColor(c) => resolved.secondary_color = *c,
             OverrideTag::OutlineColor(c) => resolved.outline_color = *c,
-            OverrideTag::ShadowColor(c) => resolved.shadow_color = *c,
+            OverrideTag::ShadowColor(c) => {
+                // ASS calls this the BackColour channel. It is used both
+                // for shadows and for the opaque box (BorderStyle 3).
+                resolved.shadow_color = *c;
+                resolved.back_color = *c;
+            }
             OverrideTag::Alpha(a) => {
+                // \alpha applies to all four ASS colour channels.
                 resolved.color = resolved.color.with_alpha(*a);
+                resolved.secondary_color = resolved.secondary_color.with_alpha(*a);
+                resolved.outline_color = resolved.outline_color.with_alpha(*a);
+                resolved.shadow_color = resolved.shadow_color.with_alpha(*a);
+                resolved.back_color = resolved.back_color.with_alpha(*a);
             }
             OverrideTag::PrimaryAlpha(a) => {
                 resolved.color = resolved.color.with_alpha(*a);
+            }
+            OverrideTag::SecondaryAlpha(a) => {
+                resolved.secondary_color = resolved.secondary_color.with_alpha(*a);
             }
             OverrideTag::OutlineAlpha(a) => {
                 resolved.outline_color = resolved.outline_color.with_alpha(*a);
             }
             OverrideTag::ShadowAlpha(a) => {
                 resolved.shadow_color = resolved.shadow_color.with_alpha(*a);
+                resolved.back_color = resolved.back_color.with_alpha(*a);
             }
             OverrideTag::Position(x, y) => resolved.position = Some((*x, *y)),
             OverrideTag::Move(x1, y1, x2, y2) => {
@@ -1146,25 +1183,24 @@ impl Compositor {
             let mut sweep_boundary: Option<f64> = None;
             if let Some(syl_idx) = seg_syllable[seg_idx] {
                 let syl = &karaoke_syllables[syl_idx];
-                let sung = elapsed_ms >= syl.start_ms;
+                let started = elapsed_ms >= syl.start_ms;
+                let finished = elapsed_ms >= syl.start_ms.saturating_add(syl.dur_ms);
                 match syl.kind {
                     KaraokeKind::Hard => {
-                        if !sung {
+                        if !finished {
                             segment_resolved.color = segment_resolved.secondary_color;
                         }
                     }
                     KaraokeKind::Outline => {
-                        if sung {
+                        if finished {
                             // Hide the outline once the syllable has been sung
                             segment_resolved.outline_color.alpha = 255;
                         }
                     }
                     KaraokeKind::Sweep => {
-                        let frac = if !sung {
+                        let frac = if !started {
                             0.0
-                        } else if syl.dur_ms == 0
-                            || elapsed_ms >= syl.start_ms.saturating_add(syl.dur_ms)
-                        {
+                        } else if syl.dur_ms == 0 || finished {
                             1.0
                         } else {
                             (elapsed_ms - syl.start_ms) as f64 / syl.dur_ms as f64
@@ -1571,6 +1607,36 @@ mod tests {
     }
 
     #[test]
+    fn test_ass_alpha_updates_all_colour_channels() {
+        let style = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\alpha&H80&\\2a&H20&}Text",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&style, &event);
+
+        assert_eq!(resolved.color.alpha, 128);
+        assert_eq!(resolved.secondary_color.alpha, 32);
+        assert_eq!(resolved.outline_color.alpha, 128);
+        assert_eq!(resolved.shadow_color.alpha, 128);
+        assert_eq!(resolved.back_color.alpha, 128);
+    }
+
+    #[test]
+    fn test_back_colour_override_is_used_for_shadow_and_box() {
+        let style = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\4c&HFF00FF&}Text",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&style, &event);
+
+        assert_eq!(resolved.shadow_color, resolved.back_color);
+        assert_eq!(resolved.shadow_color.red, 255);
+        assert_eq!(resolved.shadow_color.blue, 255);
+    }
+
+    #[test]
     fn test_wrap_greedy_top_wider() {
         let font = fallback_font();
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
@@ -1720,5 +1786,46 @@ mod tests {
         );
 
         assert_ne!(early.as_bytes(), late.as_bytes());
+    }
+
+    #[test]
+    fn test_first_karaoke_syllable_starts_with_secondary_colour() {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\k100}A")
+                .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+
+        let mut before = RenderBuffer::new(320, 100);
+        comp.composite_event(
+            &mut before,
+            &event,
+            &resolved,
+            &fm,
+            0,
+            320,
+            100,
+            320,
+            100,
+            0,
+        );
+        assert!(before
+            .as_bytes()
+            .chunks_exact(4)
+            .any(|pixel| pixel[1] > 200 && pixel[0] < 50 && pixel[2] < 50 && pixel[3] > 0));
+
+        let mut after = RenderBuffer::new(320, 100);
+        comp.composite_event(
+            &mut after, &event, &resolved, &fm, 1_000, 320, 100, 320, 100, 0,
+        );
+        assert!(after
+            .as_bytes()
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200 && pixel[3] > 0));
     }
 }

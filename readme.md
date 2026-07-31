@@ -71,6 +71,8 @@ src/
 
 `\q` and script-level `WrapStyle` control automatic word-wrapping; explicit `\N`/`\n` breaks are also supported.
 
+Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is inverted (`00` opaque, `FF` transparent). `\2c` is the karaoke secondary color and is visible while a karaoke syllable is not yet complete; `\4c` controls the shadow/back-color channel.
+
 ## Build
 
 ```bash

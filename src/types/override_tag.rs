@@ -22,6 +22,7 @@ pub enum OverrideTag {
     FontSizeMultiplier(f64),
     LetterSpacing(f64),
     Kerning(bool),
+    Reset,
 
     // Colors and alpha
     PrimaryColor(Color),
@@ -372,6 +373,7 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::LetterSpacing(val))
         }
+        "r" => Some(OverrideTag::Reset),
         "c" | "1c" => {
             let color_str = params?;
             let color = parse_ass_color_tag(color_str)?;

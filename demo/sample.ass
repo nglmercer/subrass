@@ -45,7 +45,7 @@ Dialogue: 0,0:00:07.50,0:00:10.00,TopComment,,0,0,0,,{\fad(400,400)}Comprehensiv
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:00:10.00,0:00:16.00,Karaoke,,0,0,0,,{\an5\pos(960,400)\k80}Hel{\k60}lo {\k100}world!
-Dialogue: 1,0:00:10.00,0:00:16.00,SmallText,,0,0,0,,{\an5\pos(960,470)\c&H666666&}Hard swap \\k — instant color change per syllable
+Dialogue: 1,0:00:10.00,0:00:16.00,SmallText,,0,0,0,,{\an5\pos(960,470)\c&H666666&}Hard swap \k — instant color change per syllable
 
 Dialogue: 0,0:00:17.00,0:00:25.00,Karaoke,,0,0,0,,{\an5\pos(960,400)\k40}Each{\k0} {\k50}syll{\k30}able {\k60}lights {\k80}up!
 Dialogue: 1,0:00:17.00,0:00:25.00,SmallText,,0,0,0,,{\an5\pos(960,470)\c&H666666&}Zero-duration syllables work too
@@ -55,17 +55,17 @@ Dialogue: 1,0:00:17.00,0:00:25.00,SmallText,,0,0,0,,{\an5\pos(960,470)\c&H666666
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:00:25.00,0:00:32.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\K120}Swe{\K80}ep {\K100}an{\K60}ima{\K90}tion
-Dialogue: 1,0:00:25.00,0:00:32.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Sweep \\K — smooth left-to-right fill
+Dialogue: 1,0:00:25.00,0:00:32.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Sweep \K — smooth left-to-right fill
 
 Dialogue: 0,0:00:33.00,0:00:40.00,Karaoke2,,0,0,0,,{\an5\pos(960,380)\kf60}Smooth {\kf100}color {\kf80}tran{\kf60}si{\kf70}tions
-Dialogue: 1,0:00:33.00,0:00:40.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}\\kf — same as \\K (both supported)
+Dialogue: 1,0:00:33.00,0:00:40.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}\kf — same as \K (both supported)
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 4: KARAOKE - Outline \ko (0:40 - 0:52)
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:00:40.00,0:00:46.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\ko90}Out{\ko70}line {\ko80}dis{\ko60}ap{\ko70}pears
-Dialogue: 1,0:00:40.00,0:00:46.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Outline \\ko — border vanishes after syllable
+Dialogue: 1,0:00:40.00,0:00:46.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Outline \ko — border vanishes after syllable
 
 Dialogue: 0,0:00:46.00,0:00:52.00,Karaoke2,,0,0,0,,{\an5\pos(960,380)\ko50}Bor{\ko40}der {\ko60}fades {\ko50}on {\ko70}sing
 Dialogue: 1,0:00:46.00,0:00:52.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Combined with secondary color highlight
@@ -75,10 +75,10 @@ Dialogue: 1,0:00:46.00,0:00:52.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:00:52.00,0:00:58.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\bord4\shad3\K100}Bold {\K80}border {\K90}kara{\K70}oke
-Dialogue: 1,0:00:52.00,0:00:58.00,SmallText,,0,0,0,,{\an5\pos(960,460)\c&H666666&}Karaoke + \\bord + \\shad combined
+Dialogue: 1,0:00:52.00,0:00:58.00,SmallText,,0,0,0,,{\an5\pos(960,460)\c&H666666&}Karaoke + \bord + \shad combined
 
 Dialogue: 0,0:00:58.00,0:01:05.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\fs64\i1\ko60}It{\ko50}al{\ko40}ic {\ko60}out{\ko50}line {\ko60}ka{\ko50}ra{\ko40}oke
-Dialogue: 1,0:00:58.00,0:01:05.00,SmallText,,0,0,0,,{\an5\pos(960,460)\c&H666666&}Karaoke + \\i + \\fs + \\ko combined
+Dialogue: 1,0:00:58.00,0:01:05.00,SmallText,,0,0,0,,{\an5\pos(960,460)\c&H666666&}Karaoke + \i + \fs + \ko combined
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 6: COLORS & ALPHA (1:05 - 1:20)
@@ -169,10 +169,10 @@ Dialogue: 2,0:02:40.00,0:02:45.00,Default,,0,0,0,,{\an5\pos(960,420)\blur5}Gauss
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:02:45.00,0:02:52.00,Default,,0,0,0,,{\an5\pos(960,400)\clip(400,200,1520,700)}Text clipped to center rectangle region
-Dialogue: 1,0:02:45.00,0:02:52.00,SmallText,,0,0,0,,{\an5\pos(960,750)\c&H888888&}\\clip(400,200,1520,700)
+Dialogue: 1,0:02:45.00,0:02:52.00,SmallText,,0,0,0,,{\an5\pos(960,750)\c&H888888&}\clip(400,200,1520,700)
 
 Dialogue: 0,0:02:53.00,0:03:00.00,Default,,0,0,0,,{\an5\pos(960,400)\iclip(760,340,1160,540)}Inverse clip — visible only outside the center box
-Dialogue: 1,0:02:53.00,0:03:00.00,SmallText,,0,0,0,,{\an5\pos(960,750)\c&H888888&}\\iclip(760,340,1160,540)
+Dialogue: 1,0:02:53.00,0:03:00.00,SmallText,,0,0,0,,{\an5\pos(960,750)\c&H888888&}\iclip(760,340,1160,540)
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 13: FADE EFFECTS (3:00 - 3:15)
@@ -182,19 +182,19 @@ Dialogue: 0,0:03:00.00,0:03:06.00,Default,,0,0,0,,{\an5\pos(960,300)\fad(800,400
 Dialogue: 1,0:03:00.00,0:03:06.00,Default,,0,0,0,,{\an5\pos(960,370)\fad(400,800)}Fade in 400ms, out 800ms
 
 Dialogue: 0,0:03:07.00,0:03:15.00,Default,,0,0,0,,{\an5\pos(960,300)\fade(255,0,128,0,0,1000,4000,6000)}Complex fade: in→hold→out
-Dialogue: 1,0:03:07.00,0:03:15.00,SmallText,,0,0,0,,{\an5\pos(960,370)\c&H888888&}\\fade(255,0,128,0,0,1000,4000,6000)
+Dialogue: 1,0:03:07.00,0:03:15.00,SmallText,,0,0,0,,{\an5\pos(960,370)\c&H888888&}\fade(255,0,128,0,0,1000,4000,6000)
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 14: VECTOR DRAWING (3:15 - 3:35)
 ; ═══════════════════════════════════════════════════════════════
 
-Dialogue: 0,0:03:15.00,0:03:22.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p1\bord2\c&HFF6B00}m 840 300 l 960 200 l 1080 300 l 1080 500 l 840 500{\p0}House shape (\\p1)
+Dialogue: 0,0:03:15.00,0:03:22.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p1\bord2\c&HFF6B00&}m 840 300 l 960 200 l 1080 300 l 1080 500 l 840 500{\p0}House shape (\p1)
 Dialogue: 1,0:03:15.00,0:03:22.00,SmallText,,0,0,0,,{\an5\pos(960,600)\c&H888888&}Vector drawing mode
 
 Dialogue: 0,0:03:23.00,0:03:30.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p1\bord3\c&H00BFFF&}m 800 350 b 800 250 900 200 960 250 b 1020 200 1120 250 1120 350 b 1120 500 960 550 960 550 b 960 550 800 500 800 350{\p0}Heart shape (bezier)
 Dialogue: 1,0:03:23.00,0:03:30.00,SmallText,,0,0,0,,{\an5\pos(960,620)\c&H888888&}Cubic bezier curves
 
-Dialogue: 0,0:03:31.00,0:03:38.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p2\bord2\c&HFF00FF&}m 850 300 l 850 500 l 1070 500 l 1070 300 l 960 200{\p2}Higher precision (\\p2)
+Dialogue: 0,0:03:31.00,0:03:38.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p2\bord2\c&HFF00FF&}m 850 300 l 850 500 l 1070 500 l 1070 300 l 960 200{\p0}Higher precision (\p2)
 Dialogue: 1,0:03:31.00,0:03:38.00,SmallText,,0,0,0,,{\an5\pos(960,600)\c&H888888&}Drawing scale 2x
 
 ; ═══════════════════════════════════════════════════════════════
@@ -215,17 +215,17 @@ Dialogue: 0,0:03:42.00,0:03:48.00,TopComment,,0,0,0,,{\c&HFFFF00&}← Layer 0   
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:03:50.00,0:03:57.00,Default,,0,0,0,,{\an5\pos(960,350)\frz15\fscx130\fscy130\b1\i1\c&H00FF80&\bord3\shad2}Everything at once!
-Dialogue: 1,0:03:50.00,0:03:57.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H888888&}\\frz + \\fscx + \\fscy + \\b + \\i + \\c + \\bord + \\shad
+Dialogue: 1,0:03:50.00,0:03:57.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H888888&}\frz + \fscx + \fscy + \b + \i + \c + \bord + \shad
 
 Dialogue: 0,0:03:58.00,0:04:05.00,Default,,0,0,0,,{\an5\pos(960,350)\t(0,3500,\frz360\fscx200)}{\t(3500,7000,\frz720\fscx100)}Spinning + scaling combo
-Dialogue: 1,0:03:58.00,0:04:05.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H888888&}Nested \\t transforms
+Dialogue: 1,0:03:58.00,0:04:05.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H888888&}Nested \t transforms
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 17: RESET & STYLE INHERITANCE (4:05 - 4:15)
 ; ═══════════════════════════════════════════════════════════════
 
 Dialogue: 0,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,300)\fnArial\fs64\b1\c&HFF0000&}Modified{\r} → Reset to base style
-Dialogue: 1,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,380)\c&HFF0000&}Red{\r} {\i1}italic{\r} {\b1}bold{\r} — each \\r resets
+Dialogue: 1,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,380)\c&HFF0000&}Red{\r} {\i1}italic{\r} {\b1}bold{\r} — each \r resets
 
 Dialogue: 0,0:04:11.00,0:04:15.00,Credit,,0,0,0,,{\an5\pos(960,300)}Using Credit style (italic)
 Dialogue: 1,0:04:11.00,0:04:15.00,TopComment,,0,0,0,,{\an5\pos(960,360)}Using TopComment style (yellow)

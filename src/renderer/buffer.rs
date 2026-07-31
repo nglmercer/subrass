@@ -97,6 +97,76 @@ impl RenderBuffer {
         self.pixels[idx + 3] = (a as u32 + self.pixels[idx + 3] as u32 * inv / 255) as u8;
     }
 
+    /// Composite another straight-alpha RGBA buffer over this one.
+    pub fn blend_buffer(&mut self, source: &RenderBuffer) {
+        if self.width != source.width || self.height != source.height {
+            return;
+        }
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = ((y * self.width + x) * 4) as usize;
+                let alpha = source.pixels[idx + 3];
+                if alpha == 0 {
+                    continue;
+                }
+                self.blend_pixel(
+                    x,
+                    y,
+                    source.pixels[idx],
+                    source.pixels[idx + 1],
+                    source.pixels[idx + 2],
+                    alpha,
+                );
+            }
+        }
+    }
+
+    /// Resize a glyph coverage bitmap using bilinear sampling.
+    pub fn resize_coverage_bitmap(
+        bitmap: &[u8],
+        width: u32,
+        height: u32,
+        scale_x: f64,
+        scale_y: f64,
+    ) -> (Vec<u8>, u32, u32) {
+        let scale_x = scale_x.max(0.0);
+        let scale_y = scale_y.max(0.0);
+        let new_width = ((width as f64 * scale_x).round() as u32).max(1);
+        let new_height = ((height as f64 * scale_y).round() as u32).max(1);
+
+        if width == 0 || height == 0 {
+            return (Vec::new(), 0, 0);
+        }
+        if (scale_x - 1.0).abs() < f64::EPSILON && (scale_y - 1.0).abs() < f64::EPSILON {
+            return (bitmap.to_vec(), width, height);
+        }
+
+        let mut resized = vec![0u8; (new_width * new_height) as usize];
+        for y in 0..new_height {
+            let source_y = ((y as f64 + 0.5) / scale_y - 0.5).clamp(0.0, height as f64 - 1.0);
+            let y0 = source_y.floor() as u32;
+            let y1 = (y0 + 1).min(height - 1);
+            let fy = source_y - y0 as f64;
+
+            for x in 0..new_width {
+                let source_x = ((x as f64 + 0.5) / scale_x - 0.5).clamp(0.0, width as f64 - 1.0);
+                let x0 = source_x.floor() as u32;
+                let x1 = (x0 + 1).min(width - 1);
+                let fx = source_x - x0 as f64;
+
+                let sample =
+                    |sx: u32, sy: u32| -> f64 { bitmap[(sy * width + sx) as usize] as f64 };
+                let top = sample(x0, y0) * (1.0 - fx) + sample(x1, y0) * fx;
+                let bottom = sample(x0, y1) * (1.0 - fx) + sample(x1, y1) * fx;
+                resized[(y * new_width + x) as usize] =
+                    (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+
+        (resized, new_width, new_height)
+    }
+
     /// Fill a rectangle with color
     #[allow(clippy::too_many_arguments)]
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8, a: u8) {

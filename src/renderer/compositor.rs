@@ -8,10 +8,12 @@ use crate::types::override_tag::{parse_text_segments, TextSegment};
 use crate::types::{Event, EventType, OverrideTag, Style};
 use crate::utils::Matrix3x3;
 use ab_glyph::FontArc;
+use std::borrow::Cow;
 
 /// Resolved style with all overrides applied
 #[derive(Debug, Clone)]
 pub struct ResolvedStyle {
+    pub base_style: Style,
     pub font_name: String,
     pub font_size: f64,
     pub color: Color,
@@ -487,6 +489,7 @@ impl Compositor {
     /// Resolve an event's style with all override tags applied (no animation)
     fn resolve_base_style(base_style: &Style, tags: &[OverrideTag]) -> ResolvedStyle {
         let mut resolved = ResolvedStyle {
+            base_style: base_style.clone(),
             font_name: base_style.font_name.clone(),
             font_size: base_style.font_size,
             color: base_style.primary_color,
@@ -625,7 +628,15 @@ impl Compositor {
 
     /// Resolve an event's style with all override tags applied (legacy method)
     pub fn resolve_style(base_style: &Style, event: &Event) -> ResolvedStyle {
-        let mut resolved = Self::resolve_base_style(base_style, &event.parsed_tags);
+        // Override groups after the first visible text segment are
+        // segment-local. Only the initial groups establish event-wide
+        // positioning and style defaults.
+        let initial_segments = parse_text_segments(&event.text);
+        let initial_tags = initial_segments
+            .first()
+            .map(|segment| segment.tags.as_slice())
+            .unwrap_or(&[]);
+        let mut resolved = Self::resolve_base_style(base_style, initial_tags);
 
         // Apply event-level margin overrides
         if event.margin_l != 0 {
@@ -639,6 +650,29 @@ impl Compositor {
         }
 
         resolved
+    }
+
+    /// Convert an alignment anchor into the top-left text origin.
+    fn anchor_to_origin(
+        alignment: i32,
+        anchor_x: f64,
+        anchor_y: f64,
+        width: f64,
+        height: f64,
+    ) -> (f64, f64) {
+        let x = match alignment {
+            1 | 4 | 7 => anchor_x,
+            2 | 5 | 8 => anchor_x - width / 2.0,
+            3 | 6 | 9 => anchor_x - width,
+            _ => anchor_x - width / 2.0,
+        };
+        let y = match alignment {
+            7..=9 => anchor_y,
+            4..=6 => anchor_y - height / 2.0,
+            1..=3 => anchor_y - height,
+            _ => anchor_y - height / 2.0,
+        };
+        (x, y)
     }
 
     /// Calculate event position based on alignment, margins, and resolution
@@ -662,25 +696,13 @@ impl Compositor {
             // Adjust position so the anchor point lands at (px, py).
             let scaled_x = px * scale_x;
             let scaled_y = py * scale_y;
-            let alignment = resolved.alignment;
-
-            // X offset based on horizontal alignment
-            let x = match alignment {
-                1 | 4 | 7 => scaled_x,                    // Left: left edge at px
-                2 | 5 | 8 => scaled_x - text_width / 2.0, // Center: center at px
-                3 | 6 | 9 => scaled_x - text_width,       // Right: right edge at px
-                _ => scaled_x - text_width / 2.0,
-            };
-
-            // Y offset based on vertical alignment (using baseline)
-            let y = match alignment {
-                7..=9 => scaled_y,                     // Top: top at py
-                4..=6 => scaled_y - text_height / 2.0, // Middle: center at py
-                1..=3 => scaled_y - text_height,       // Bottom: bottom at py
-                _ => scaled_y - text_height / 2.0,
-            };
-
-            return (x, y);
+            return Self::anchor_to_origin(
+                resolved.alignment,
+                scaled_x,
+                scaled_y,
+                text_width,
+                text_height,
+            );
         }
 
         let descent = baseline - text_height;
@@ -706,9 +728,65 @@ impl Compositor {
         (x, y)
     }
 
-    /// Composite a single event into the buffer using per-segment rendering
+    /// Composite a single event into the buffer using per-segment rendering.
+    /// Effects that clear or blur pixels are isolated to this event first.
     #[allow(clippy::too_many_arguments)]
     pub fn composite_event(
+        &mut self,
+        buffer: &mut RenderBuffer,
+        event: &Event,
+        resolved: &ResolvedStyle,
+        font_manager: &FontManager,
+        time_ms: u64,
+        play_res_x: u32,
+        play_res_y: u32,
+        video_width: u32,
+        video_height: u32,
+        script_wrap_style: i32,
+    ) {
+        if event.event_type == EventType::Comment {
+            return;
+        }
+
+        let start_ms = event.start.to_millis();
+        let end_ms = event.end.to_millis();
+        if time_ms < start_ms || time_ms >= end_ms {
+            return;
+        }
+
+        if resolved.clip.is_some() || resolved.inverse_clip.is_some() || resolved.blur > 0.0 {
+            let mut event_buffer = RenderBuffer::new(video_width, video_height);
+            self.composite_event_inner(
+                &mut event_buffer,
+                event,
+                resolved,
+                font_manager,
+                time_ms,
+                play_res_x,
+                play_res_y,
+                video_width,
+                video_height,
+                script_wrap_style,
+            );
+            buffer.blend_buffer(&event_buffer);
+        } else {
+            self.composite_event_inner(
+                buffer,
+                event,
+                resolved,
+                font_manager,
+                time_ms,
+                play_res_x,
+                play_res_y,
+                video_width,
+                video_height,
+                script_wrap_style,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn composite_event_inner(
         &mut self,
         buffer: &mut RenderBuffer,
         event: &Event,
@@ -816,7 +894,9 @@ impl Compositor {
             .first()
             .map(|s| {
                 resolved.drawing_mode > 0
-                    || s.tags.iter().any(|t| matches!(t, OverrideTag::Drawing(1)))
+                    || s.tags
+                        .iter()
+                        .any(|t| matches!(t, OverrideTag::Drawing(d) if *d > 0))
             })
             .unwrap_or(false);
 
@@ -848,27 +928,6 @@ impl Compositor {
             video_height,
         );
 
-        // Rotation origin for 3D effects
-        let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
-            (ox * scale_x, oy * scale_y)
-        } else {
-            // Default origin is the alignment point.
-            // Deriving it from base_x, base_y and text dimensions.
-            let ax = match resolved.alignment {
-                1 | 4 | 7 => base_x,
-                2 | 5 | 8 => base_x + shaped_full.width / 2.0,
-                3 | 6 | 9 => base_x + shaped_full.width,
-                _ => base_x + shaped_full.width / 2.0,
-            };
-            let ay = match resolved.alignment {
-                7..=9 => base_y,
-                4..=6 => base_y + shaped_full.height / 2.0,
-                1..=3 => base_y + shaped_full.height,
-                _ => base_y + shaped_full.height / 2.0,
-            };
-            (ax, ay)
-        };
-
         // Apply move animation
         if let Some(ref move_data) = resolved.move_data {
             let elapsed = time_ms - start_ms;
@@ -896,15 +955,77 @@ impl Compositor {
                 }
             };
 
-            base_x = move_data.x1 + (move_data.x2 - move_data.x1) * t;
-            base_y = move_data.y1 + (move_data.y2 - move_data.y1) * t;
-            base_x *= scale_x;
-            base_y *= scale_y;
+            let anchor_x = (move_data.x1 + (move_data.x2 - move_data.x1) * t) * scale_x;
+            let anchor_y = (move_data.y1 + (move_data.y2 - move_data.y1) * t) * scale_y;
+            (base_x, base_y) = Self::anchor_to_origin(
+                resolved.alignment,
+                anchor_x,
+                anchor_y,
+                shaped_full.width,
+                shaped_full.height,
+            );
+        }
+
+        // Rotation origin for 3D effects. The default origin follows a move;
+        // an explicit \org remains fixed in script coordinates.
+        let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
+            (ox * scale_x, oy * scale_y)
+        } else {
+            let ax = match resolved.alignment {
+                1 | 4 | 7 => base_x,
+                2 | 5 | 8 => base_x + shaped_full.width / 2.0,
+                3 | 6 | 9 => base_x + shaped_full.width,
+                _ => base_x + shaped_full.width / 2.0,
+            };
+            let ay = match resolved.alignment {
+                7..=9 => base_y,
+                4..=6 => base_y + shaped_full.height / 2.0,
+                1..=3 => base_y + shaped_full.height,
+                _ => base_y + shaped_full.height / 2.0,
+            };
+            (ax, ay)
+        };
+
+        // Border style 3 is an opaque box behind the event text.
+        if resolved.border_style == 3 {
+            let box_color = resolved.back_color.to_rgba();
+            effects::apply_opaque_box(
+                buffer,
+                base_x as i32,
+                base_y as i32,
+                shaped_full.width.ceil() as i32,
+                shaped_full.height.ceil() as i32,
+                (resolved.margin_l as f64 * scale_x).round() as i32,
+                (resolved.margin_r as f64 * scale_x).round() as i32,
+                (resolved.margin_v as f64 * scale_y).round() as i32,
+                [
+                    box_color[0],
+                    box_color[1],
+                    box_color[2],
+                    ((255 - box_color[3]) as f64 * alpha_mult) as u8,
+                ],
+                play_res_x,
+                play_res_y,
+            );
         }
 
         // Drawing mode: render vector paths
         if is_drawing {
-            let avg_scale = (scale_x + scale_y) / 2.0;
+            let drawing_mode = segments
+                .first()
+                .and_then(|segment| {
+                    segment.tags.iter().find_map(|tag| match tag {
+                        OverrideTag::Drawing(mode) if *mode > 0 => Some(*mode),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(resolved.drawing_mode);
+            let drawing_scale = if drawing_mode > 0 {
+                2.0_f64.powi(drawing_mode.saturating_sub(1))
+            } else {
+                1.0
+            };
+            let avg_scale = (scale_x + scale_y) / 2.0 * drawing_scale;
             let color = resolved.color.to_rgba();
             let color_alpha = 255 - color[3];
 
@@ -944,6 +1065,28 @@ impl Compositor {
             // Apply segment-level overrides (skip Transform tags)
             for tag in &segment.tags {
                 if let OverrideTag::Transform { .. } = tag {
+                    continue;
+                }
+                if matches!(tag, OverrideTag::Reset) {
+                    let position = segment_resolved.position;
+                    let origin = segment_resolved.origin;
+                    let move_data = segment_resolved.move_data.clone();
+                    let clip = segment_resolved.clip;
+                    let inverse_clip = segment_resolved.inverse_clip;
+                    let fade_in = segment_resolved.fade_in;
+                    let fade_out = segment_resolved.fade_out;
+                    let complex_fade = segment_resolved.complex_fade.clone();
+                    let drawing_mode = segment_resolved.drawing_mode;
+                    segment_resolved = Self::resolve_base_style(&segment_resolved.base_style, &[]);
+                    segment_resolved.position = position;
+                    segment_resolved.origin = origin;
+                    segment_resolved.move_data = move_data;
+                    segment_resolved.clip = clip;
+                    segment_resolved.inverse_clip = inverse_clip;
+                    segment_resolved.fade_in = fade_in;
+                    segment_resolved.fade_out = fade_out;
+                    segment_resolved.complex_fade = complex_fade;
+                    segment_resolved.drawing_mode = drawing_mode;
                     continue;
                 }
                 Self::apply_single_tag(&mut segment_resolved, tag);
@@ -1035,10 +1178,12 @@ impl Compositor {
                 segment_resolved.italic,
             );
 
+            let segment_font_size =
+                segment_resolved.font_size * (video_height as f64 / play_res_y as f64);
             let shaped = TextShaper::shape(
                 &segment.text,
                 segment_font,
-                font_size,
+                segment_font_size,
                 segment_resolved.scale_x / 100.0,
                 segment_resolved.scale_y / 100.0,
                 segment_resolved.bold,
@@ -1053,22 +1198,31 @@ impl Compositor {
             // Pre-compute effect parameters
             let outline_active =
                 segment_resolved.border_style == 1 && segment_resolved.outline > 0.0;
-            let outline_scale = segment_resolved.outline * (scale_x + scale_y) / 2.0;
+            let outline_scale = segment_resolved.outline
+                * (scale_x * segment_resolved.scale_x / 100.0
+                    + scale_y * segment_resolved.scale_y / 100.0)
+                / 2.0;
             let outline_color_rgba = segment_resolved.outline_color.to_rgba();
             let outline_alpha = (255 - outline_color_rgba[3] as u32) as u8;
 
             let shadow_active = segment_resolved.shadow > 0.0;
-            let shadow_offset_x = segment_resolved.shadow * scale_x;
-            let shadow_offset_y = segment_resolved.shadow * scale_y;
+            let shadow_offset_x =
+                segment_resolved.shadow * scale_x * segment_resolved.scale_x / 100.0;
+            let shadow_offset_y =
+                segment_resolved.shadow * scale_y * segment_resolved.scale_y / 100.0;
             let shadow_color_rgba = segment_resolved.shadow_color.to_rgba();
             let shadow_alpha = (255 - shadow_color_rgba[3] as u32) as u8;
 
             // Single pass over glyphs: cache lookup once, render outline + shadow + fill
             for glyph in &shaped.glyphs {
+                if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
+                    continue;
+                }
+
                 let cached = self.glyph_cache.get_or_rasterize(
                     segment_font,
                     glyph.glyph_id,
-                    font_size,
+                    segment_font_size,
                     glyph.bold,
                     glyph.italic,
                 );
@@ -1077,17 +1231,31 @@ impl Compositor {
                     continue;
                 }
 
+                let scaled_bitmap = if (glyph.scale_x - 1.0).abs() < f64::EPSILON
+                    && (glyph.scale_y - 1.0).abs() < f64::EPSILON
+                {
+                    Cow::Borrowed(cached.bitmap.as_slice())
+                } else {
+                    Cow::Owned(
+                        RenderBuffer::resize_coverage_bitmap(
+                            &cached.bitmap,
+                            cached.width,
+                            cached.height,
+                            glyph.scale_x,
+                            glyph.scale_y,
+                        )
+                        .0,
+                    )
+                };
+                let glyph_width = ((cached.width as f64 * glyph.scale_x).round() as u32).max(1);
+                let glyph_height = ((cached.height as f64 * glyph.scale_y).round() as u32).max(1);
+                let bearing_x = cached.bearing_x as f64 * glyph.scale_x;
+                let bearing_y = cached.bearing_y as f64 * glyph.scale_y;
+
                 // Calculate original center of the glyph relative to origin
-                let orig_cx = base_x
-                    + x_offset
-                    + glyph.x
-                    + cached.bearing_x as f64
-                    + cached.width as f64 / 2.0;
-                let orig_cy = base_y
-                    + line_y_offset
-                    + glyph.y
-                    + cached.bearing_y as f64
-                    + cached.height as f64 / 2.0;
+                let orig_cx = base_x + x_offset + glyph.x + bearing_x + glyph_width as f64 / 2.0;
+                let orig_cy =
+                    base_y + line_y_offset + glyph.y + bearing_y + glyph_height as f64 / 2.0;
 
                 let dx = orig_cx - org_x;
                 let dy = orig_cy - org_y;
@@ -1110,9 +1278,9 @@ impl Compositor {
                 // Use projective transform for exact perspective warping
                 let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
                     RenderBuffer::projective_transform_coverage_bitmap(
-                        &cached.bitmap,
-                        cached.width,
-                        cached.height,
+                        &scaled_bitmap,
+                        glyph_width,
+                        glyph_height,
                         &matrix,
                         perspective,
                     );

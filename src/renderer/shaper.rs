@@ -50,6 +50,8 @@ impl TextShaper {
         shadow_color: Color,
         rotation: f64,
     ) -> ShapedLine {
+        let scale_x = _scale_font.max(0.0);
+        let scale_y = _scale_y.max(0.0);
         let scale = PxScale::from(font_size as f32);
         let scaled = font.as_scaled(scale);
 
@@ -58,8 +60,8 @@ impl TextShaper {
         let mut y = 0.0_f64;
 
         // Get font metrics
-        let baseline = scaled.ascent() as f64;
-        let line_height = scaled.height() as f64;
+        let baseline = scaled.ascent() as f64 * scale_y;
+        let line_height = scaled.height() as f64 * scale_y;
         let mut max_x = 0.0_f64;
 
         for ch in text.chars() {
@@ -70,7 +72,7 @@ impl TextShaper {
                 // Remove trailing spacing — width should reflect the visual extent
                 // of the glyphs, not include an extra spacing unit after the last one.
                 if !text.is_empty() {
-                    max_x -= spacing;
+                    max_x -= spacing * scale_x;
                 }
                 y += line_height;
                 x = 0.0;
@@ -86,20 +88,20 @@ impl TextShaper {
                 font_index: 0,
                 x,
                 y,
-                advance,
+                advance: advance * scale_x,
                 font_size,
                 color,
                 outline_color,
                 shadow_color,
                 bold,
                 italic,
-                scale_x: _scale_font,
-                scale_y: _scale_y,
+                scale_x,
+                scale_y,
                 rotation,
             });
 
             // Add advance + spacing to next character position
-            x += advance + spacing;
+            x += (advance + spacing) * scale_x;
         }
 
         max_x = max_x.max(x);

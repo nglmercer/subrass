@@ -69,7 +69,7 @@ src/
 | Karaoke | `\k`, `\K`/`\kf`, `\ko` |
 | Wrapping | `\N`, `\n` |
 
-**Parsed but not yet rendered:** `\q` (wrap-style override — parsed, but automatic word-wrapping is not applied)
+`\q` and script-level `WrapStyle` control automatic word-wrapping; explicit `\N`/`\n` breaks are also supported.
 
 ## Build
 
@@ -131,6 +131,7 @@ A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all maj
 - Font loading and management
 - Glyph rasterization with faux bold
 - Basic positioning (numpad alignment 1–9)
+- Automatic word-wrapping (wrap styles 0–3 and per-event `\q`)
 - `\pos`, `\move`, `\org`
 - Outline, Shadow effects
 - Fade (`\fad`, `\fade`, `\1a`–`\4a`)
@@ -146,9 +147,7 @@ A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all maj
 - Canvas rendering
 
 ### Not Yet Implemented
-- Automatic word-wrapping (wrap styles 0–3; `\q` and script-level `WrapStyle` are parsed but ignored — only explicit `\N`/`\n` breaks apply)
 - HarfBuzz/OpenType complex shaping
-- Web Worker architecture
 - `[Fonts]` section embedding
 - `[Graphics]` section
 - SIMD optimizations

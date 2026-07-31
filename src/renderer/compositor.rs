@@ -114,9 +114,12 @@ fn wrap_event_text(
 
     let flush =
         |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>, pbys: &mut bool| {
-            if word.is_empty() {
+            // Flush when there is text, or when a tag prefix must be preserved
+            // (e.g. {\b0} between "Bold" and the following space).
+            if word.is_empty() && prefix.is_empty() {
                 return;
             }
+            let has_text = !word.is_empty();
             let width = TextShaper::measure_text(word, font, font_size, spacing);
             words.push(WrapWord {
                 prefix: std::mem::take(prefix),
@@ -124,9 +127,11 @@ fn wrap_event_text(
                 width,
                 preceded_by_space: *pbys,
             });
-            // The space (if any) has been consumed by this word; reset so
-            // subsequent words are not falsely marked as space-separated.
-            *pbys = false;
+            // Only reset when there's actual text — prefix-only entries don't
+            // "consume" the space flag.
+            if has_text {
+                *pbys = false;
+            }
         };
 
     let mut chars = text.chars().peekable();
@@ -232,6 +237,12 @@ fn render_wrapped_run(
     };
     for idx in order {
         let ww = words[idx].width;
+        if ww == 0.0 && words[idx].text.is_empty() {
+            // Prefix-only entry (e.g. trailing tag group): attach to current
+            // line without consuming space budget — no space is emitted for it.
+            cur.push(idx);
+            continue;
+        }
         if cur.is_empty() {
             cur_w = ww;
             cur.push(idx);
@@ -266,7 +277,11 @@ fn render_wrapped_run(
             }
             out.push_str(&w.prefix);
             out.push_str(&w.text);
-            prev_had_text = !w.text.is_empty();
+            // Once we've emitted text, stay true — prefix-only entries must
+            // not flip this back to false or the next word loses its space.
+            if !w.text.is_empty() {
+                prev_had_text = true;
+            }
         }
     }
 }
@@ -1412,6 +1427,15 @@ mod tests {
         let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
         // The space between "line" and "dis" must be preserved; no space between "Out"|"line".
         assert_eq!(out, "{\\k80}Out{\\k70}line {\\k80}dis{\\k60}ap{\\k70}pears");
+    }
+
+    #[test]
+    fn test_wrap_inline_tag_preserves_spaces() {
+        let font = fallback_font();
+        // Inline tags like {\b0} between words must not eat the space.
+        let text = "{\\b1}Bold{\\b0} {\\i1}Italic{\\i0} {\\u1}Under{\\u0}";
+        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        assert_eq!(out, "{\\b1}Bold{\\b0} {\\i1}Italic{\\i0} {\\u1}Under{\\u0}");
     }
 
     #[test]

@@ -127,8 +127,11 @@ fn process_section(
         Section::ScriptInfo => {
             doc.script_info = script_info::parse_script_info(lines, start_line)?;
         }
-        Section::V4PlusStyles | Section::V4Styles => {
-            doc.styles = style::parse_styles(lines, start_line)?;
+        Section::V4PlusStyles => {
+            doc.styles = style::parse_styles(lines, start_line, false)?;
+        }
+        Section::V4Styles => {
+            doc.styles = style::parse_styles(lines, start_line, true)?;
         }
         Section::Events => {
             doc.events = event::parse_events(lines, start_line)?;
@@ -178,6 +181,30 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
         let doc = AssDocument::parse("").unwrap();
         assert!(doc.styles.is_empty());
         assert!(doc.events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ssa_v4_document() {
+        let ssa = r#"[Script Info]
+Title: SSA Test
+ScriptType: v4.00
+PlayResX: 640
+PlayResY: 480
+
+[V4 Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding
+Style: Default,Arial,32,&HFFFF00,&H0000FF,&H000000,&H800000,-1,0,1,2,1,6,10,10,20,0,1
+
+[Events]
+Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
+"#;
+        let doc = AssDocument::parse(ssa).unwrap();
+        assert_eq!(doc.styles.len(), 1);
+        // SSA alignment 6 (top-center) is converted to numpad 8
+        assert_eq!(doc.styles[0].alignment, 8);
+        assert_eq!(doc.styles[0].font_size, 32.0);
+        assert_eq!(doc.events.len(), 1);
     }
 
     #[test]

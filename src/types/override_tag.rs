@@ -783,6 +783,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_karaoke_tags() {
+        let tags = OverrideTag::parse_from_text("{\\k50}{\\K60}{\\kf70}{\\ko80}");
+        assert_eq!(tags.len(), 4);
+        assert!(matches!(tags[0], OverrideTag::KaraokeDuration(50)));
+        assert!(matches!(tags[1], OverrideTag::KaraokeSweep(60)));
+        assert!(matches!(tags[2], OverrideTag::KaraokeSweep(70)));
+        assert!(matches!(tags[3], OverrideTag::KaraokeOutline(80)));
+    }
+
+    #[test]
     fn test_parse_complex_fade_tag() {
         let tags = OverrideTag::parse_from_text("{\\fade(255,0,255,0,500,2000,2200)}");
         assert_eq!(tags.len(), 1);

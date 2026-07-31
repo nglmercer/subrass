@@ -4,9 +4,10 @@ use super::font::FontManager;
 use super::glyph_cache::GlyphCache;
 use super::shaper::TextShaper;
 use crate::types::color::Color;
-use crate::types::override_tag::parse_text_segments;
+use crate::types::override_tag::{parse_text_segments, TextSegment};
 use crate::types::{Event, EventType, OverrideTag, Style};
 use crate::utils::Matrix3x3;
+use ab_glyph::FontArc;
 
 /// Resolved style with all overrides applied
 #[derive(Debug, Clone)]
@@ -68,6 +69,81 @@ pub struct ComplexFade {
     pub t2: u64,
     pub t3: u64,
     pub t4: u64,
+}
+
+/// Karaoke syllable kind
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KaraokeKind {
+    /// `\k` — hard color swap when the syllable starts
+    Hard,
+    /// `\K` / `\kf` — left-to-right color sweep over the syllable
+    Sweep,
+    /// `\ko` — outline hidden once the syllable starts
+    Outline,
+}
+
+/// A karaoke syllable: timing relative to event start plus measured width
+#[derive(Debug, Clone)]
+struct KaraokeSyllable {
+    start_ms: u64,
+    dur_ms: u64,
+    kind: KaraokeKind,
+    width: f64,
+}
+
+/// Build the karaoke syllable timeline for segmented event text.
+///
+/// Returns the syllables (times in ms relative to event start, with
+/// measured widths) and, per segment, the index of the syllable it belongs
+/// to (`None` for text before the first karaoke tag). Segments after a
+/// karaoke tag keep belonging to that syllable until the next karaoke tag.
+fn build_karaoke_timeline(
+    segments: &[TextSegment],
+    font: &FontArc,
+    font_size: f64,
+    spacing: f64,
+) -> (Vec<KaraokeSyllable>, Vec<Option<usize>>) {
+    let mut syllables: Vec<KaraokeSyllable> = Vec::new();
+    let mut seg_syllable: Vec<Option<usize>> = vec![None; segments.len()];
+    let mut clock = 0u64;
+    let mut prev_tag_count = 0usize;
+
+    for (i, segment) in segments.iter().enumerate() {
+        // Segments carry the accumulated tag list, so only tags added by
+        // this segment can start a new syllable.
+        let from = prev_tag_count.min(segment.tags.len());
+        let new_tags = &segment.tags[from..];
+        prev_tag_count = segment.tags.len();
+
+        let mut started = None;
+        for tag in new_tags {
+            match tag {
+                OverrideTag::KaraokeDuration(d) => started = Some((KaraokeKind::Hard, *d)),
+                OverrideTag::KaraokeSweep(d) => started = Some((KaraokeKind::Sweep, *d)),
+                OverrideTag::KaraokeOutline(d) => started = Some((KaraokeKind::Outline, *d)),
+                _ => {}
+            }
+        }
+
+        if let Some((kind, dur_cs)) = started {
+            syllables.push(KaraokeSyllable {
+                start_ms: clock,
+                dur_ms: dur_cs.saturating_mul(10),
+                kind,
+                width: 0.0,
+            });
+            clock = clock.saturating_add(dur_cs.saturating_mul(10));
+        }
+
+        if !syllables.is_empty() {
+            let idx = syllables.len() - 1;
+            syllables[idx].width +=
+                TextShaper::measure_text(&segment.text, font, font_size, spacing);
+            seg_syllable[i] = Some(idx);
+        }
+    }
+
+    (syllables, seg_syllable)
 }
 
 /// Compositor - composites resolved subtitle events into a buffer
@@ -600,11 +676,19 @@ impl Compositor {
             return;
         }
 
+        // Karaoke syllable timeline (empty when the event has no karaoke tags)
+        let karaoke_font =
+            font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
+        let (karaoke_syllables, seg_syllable) =
+            build_karaoke_timeline(&segments, karaoke_font, font_size, resolved.spacing);
+        let mut syllable_consumed: Vec<f64> = vec![0.0; karaoke_syllables.len()];
+        let elapsed_ms = time_ms.saturating_sub(start_ms);
+
         // Per-segment rendering
         let mut x_offset = 0.0_f64;
         let mut line_y_offset = 0.0_f64;
 
-        for segment in &segments {
+        for (seg_idx, segment) in segments.iter().enumerate() {
             if segment.text.is_empty() {
                 continue;
             }
@@ -661,6 +745,40 @@ impl Compositor {
                     };
                     let progress = Self::apply_accel(raw_progress, *accel);
                     Self::apply_transform_tags(&mut segment_resolved, tags, progress);
+                }
+            }
+
+            // Apply karaoke highlighting for this segment's syllable.
+            // sweep_boundary holds the sweep edge in segment-local x
+            // coordinates when the syllable uses \K / \kf.
+            let mut sweep_boundary: Option<f64> = None;
+            if let Some(syl_idx) = seg_syllable[seg_idx] {
+                let syl = &karaoke_syllables[syl_idx];
+                let sung = elapsed_ms >= syl.start_ms;
+                match syl.kind {
+                    KaraokeKind::Hard => {
+                        if !sung {
+                            segment_resolved.color = segment_resolved.secondary_color;
+                        }
+                    }
+                    KaraokeKind::Outline => {
+                        if sung {
+                            // Hide the outline once the syllable has been sung
+                            segment_resolved.outline_color.alpha = 255;
+                        }
+                    }
+                    KaraokeKind::Sweep => {
+                        let frac = if !sung {
+                            0.0
+                        } else if syl.dur_ms == 0
+                            || elapsed_ms >= syl.start_ms.saturating_add(syl.dur_ms)
+                        {
+                            1.0
+                        } else {
+                            (elapsed_ms - syl.start_ms) as f64 / syl.dur_ms as f64
+                        };
+                        sweep_boundary = Some(frac * syl.width - syllable_consumed[syl_idx]);
+                    }
                 }
             }
 
@@ -806,8 +924,15 @@ impl Compositor {
                     );
                 }
 
-                // Render main text
-                let color = glyph.color.to_rgba();
+                // Render main text (karaoke \K/\kf sweeps color per glyph:
+                // glyphs past the sweep edge keep the highlight color)
+                let fill_color = match sweep_boundary {
+                    Some(edge) if glyph.x + glyph.advance / 2.0 > edge => {
+                        segment_resolved.secondary_color
+                    }
+                    _ => glyph.color,
+                };
+                let color = fill_color.to_rgba();
                 let color_alpha = 255 - color[3];
 
                 for py in 0..rot_h {
@@ -863,6 +988,11 @@ impl Compositor {
                         (color_alpha as f64 * alpha_mult) as u8,
                     );
                 }
+            }
+
+            // Track swept width within the syllable
+            if let Some(syl_idx) = seg_syllable[seg_idx] {
+                syllable_consumed[syl_idx] += shaped.width;
             }
 
             // Update offsets for next segment
@@ -971,5 +1101,97 @@ impl Compositor {
 impl Default for Compositor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::font;
+
+    fn fallback_font() -> FontArc {
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        fm.find_font("DejaVu Sans", false, false).clone()
+    }
+
+    #[test]
+    fn test_karaoke_timeline_hard_tags() {
+        let segments = parse_text_segments("{\\k50}A{\\k30}B");
+        let font = fallback_font();
+        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+
+        assert_eq!(syllables.len(), 2);
+        assert_eq!(syllables[0].start_ms, 0);
+        assert_eq!(syllables[0].dur_ms, 500);
+        assert_eq!(syllables[0].kind, KaraokeKind::Hard);
+        assert_eq!(syllables[1].start_ms, 500);
+        assert_eq!(syllables[1].dur_ms, 300);
+        assert_eq!(map, vec![Some(0), Some(1)]);
+        assert!(syllables[0].width > 0.0);
+        assert!(syllables[1].width > 0.0);
+    }
+
+    #[test]
+    fn test_karaoke_timeline_leading_text_ignored() {
+        let segments = parse_text_segments("pre{\\kf40}X");
+        let font = fallback_font();
+        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+
+        assert_eq!(syllables.len(), 1);
+        assert_eq!(syllables[0].kind, KaraokeKind::Sweep);
+        assert_eq!(syllables[0].dur_ms, 400);
+        assert_eq!(map, vec![None, Some(0)]);
+    }
+
+    #[test]
+    fn test_karaoke_timeline_continuation_segments() {
+        // A non-karaoke tag mid-syllable must not start a new syllable
+        let segments = parse_text_segments("{\\k50}A{\\c&H00FF00&}B");
+        let font = fallback_font();
+        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+
+        assert_eq!(syllables.len(), 1);
+        assert_eq!(map, vec![Some(0), Some(0)]);
+        let combined = TextShaper::measure_text("A", &font, 48.0, 0.0)
+            + TextShaper::measure_text("B", &font, 48.0, 0.0);
+        assert!((syllables[0].width - combined).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_karaoke_outline_kind() {
+        let segments = parse_text_segments("{\\ko20}A");
+        let font = fallback_font();
+        let (syllables, _) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+
+        assert_eq!(syllables.len(), 1);
+        assert_eq!(syllables[0].kind, KaraokeKind::Outline);
+        assert_eq!(syllables[0].dur_ms, 200);
+    }
+
+    #[test]
+    fn test_karaoke_render_changes_over_time() {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\k100}A{\\k100}B",
+        )
+        .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+
+        // At 100ms the second syllable is still highlighted (secondary
+        // color); at 1500ms both syllables have been sung (primary color).
+        let mut early = RenderBuffer::new(320, 100);
+        comp.composite_event(&mut early, &event, &resolved, &fm, 100, 320, 100, 320, 100);
+
+        let mut late = RenderBuffer::new(320, 100);
+        comp.composite_event(&mut late, &event, &resolved, &fm, 1500, 320, 100, 320, 100);
+
+        assert_ne!(early.as_bytes(), late.as_bytes());
     }
 }

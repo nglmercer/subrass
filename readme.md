@@ -66,9 +66,10 @@ src/
 | Clipping | `\clip`, `\iclip` |
 | Drawing | `\p`, `\p1` vector paths |
 | Fade | `\fad`, `\fade` |
+| Karaoke | `\k`, `\K`/`\kf`, `\ko` |
 | Wrapping | `\N`, `\n` |
 
-**Parsed but not yet rendered:** karaoke (`\k`, `\K`, `\kf`, `\ko`), `\q` (wrap-style override — parsed, but automatic word-wrapping is not applied)
+**Parsed but not yet rendered:** `\q` (wrap-style override — parsed, but automatic word-wrapping is not applied)
 
 ## Build
 
@@ -133,6 +134,8 @@ Then open the served `demo/` page and select a video file and an ASS subtitle fi
 - Fade (`\fad`, `\fade`, `\1a`–`\4a`)
 - Animated overrides (`\t` with accel, timing args optional)
 - Rotation (`\frz` 2D, `\frx`/`\fry` projective 3D)
+- Karaoke (`\k` hard swap, `\K`/`\kf` per-glyph sweep, `\ko` outline)
+- SSA v4.00 `[V4 Styles]` (format-aware column mapping, alignment conversion, `AlphaLevel`)
 - `\clip` / `\iclip`
 - Drawing mode (`\p1` vector paths)
 - Box blur (`\be`, `\blur`)
@@ -142,12 +145,10 @@ Then open the served `demo/` page and select a video file and an ASS subtitle fi
 
 ### Not Yet Implemented
 - Automatic word-wrapping (wrap styles 0–3; `\q` and script-level `WrapStyle` are parsed but ignored — only explicit `\N`/`\n` breaks apply)
-- Karaoke rendering (`\k`, `\K`, `\kf`, `\ko` are parsed but ignored)
 - HarfBuzz/OpenType complex shaping
 - Web Worker architecture
 - `[Fonts]` section embedding
 - `[Graphics]` section
-- SSA v4.00 (non-plus) style format (section is accepted but fields are mapped as V4+)
 - SIMD optimizations
 
 ## License

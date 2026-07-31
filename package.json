@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --release",
+    "dev": "bun server.ts"
+  },
   "dependencies": {},
   "devDependencies": {
     "@types/bun": "^1.3.13"

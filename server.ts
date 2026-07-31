@@ -1,45 +1,81 @@
-import index from './demo/index.html';
+// Dev server for the subrass demo.
+//
+// Serves the example pages with TypeScript transpiled on the fly (no build
+// step), plus the wasm-pack output in pkg/ and the sample subtitles:
+//
+//   wasm-pack build --target web   # once, to produce pkg/
+//   bun run server.ts              # http://localhost:3001
+//
+// Routes:
+//   /         landing page (demo/index.html)
+//   /basic    main-thread rendering example
+//   /worker   Web Worker rendering example
+//   /pkg/*    wasm-pack build output
+//   /*        everything else resolves under demo/
+
+import { normalize, resolve } from "node:path";
+
+const ROOT = import.meta.dir;
+const DEMO = resolve(ROOT, "demo");
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".ts": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".ass": "text/plain; charset=utf-8",
+  ".ssa": "text/plain; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+};
+
+const transpiler = new Bun.Transpiler({ loader: "ts" });
+
+/** Map a URL pathname to a file on disk, or null if outside the allowed roots. */
+function resolvePath(pathname: string): string | null {
+  if (pathname === "/") return resolve(DEMO, "index.html");
+  if (pathname === "/basic") return resolve(DEMO, "basic/index.html");
+  if (pathname === "/worker") return resolve(DEMO, "worker/index.html");
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const rel = normalize(decoded).replace(/^[/\\]+/, "");
+  if (rel === "" || rel.startsWith("..")) return null;
+
+  // The WASM package lives at the repo root; everything else under demo/.
+  if (rel.startsWith("pkg/") || rel.startsWith("fonts/")) return resolve(ROOT, rel);
+  return resolve(DEMO, rel);
+}
+
 const server = Bun.serve({
   port: 3001,
   async fetch(req) {
     const url = new URL(req.url);
-    let path = url.pathname;
-    const demoPath = "./demo/";
-    const processPath = process.cwd();
-    console.log(path);
-    //pkg/subrass_bg.wasm.
-    const allowed_ext = [
-      ".js",
-      ".mjs",
-      ".html",
-      ".wasm",
-      ".css",
-      ".ass"
-    ];
-    const htmlfile = Bun.file(index.index);
-    //console.log(wasmfile)
-    if (path === "/") return new Response(htmlfile);
-    if (!allowed_ext.some((ext) => path.endsWith(ext))) {
-      return new Response("Not Found", { status: 404 });
+    const file = resolvePath(url.pathname);
+    if (!file) return new Response("Not Found", { status: 404 });
+
+    const ext = file.slice(file.lastIndexOf("."));
+    const contentType = MIME[ext];
+    if (!contentType) return new Response("Not Found", { status: 404 });
+
+    const handle = Bun.file(file);
+    if (!(await handle.exists())) return new Response("Not Found", { status: 404 });
+
+    const headers = {
+      "Content-Type": contentType,
+      "Cache-Control": "no-cache",
+    };
+    if (ext === ".ts") {
+      return new Response(transpiler.transformSync(await handle.text()), { headers });
     }
-
-
-
-    // For the main application logic
-    const assets = Bun.file(`${demoPath}${path}`)
-    const exists = await assets.exists();
-    if (exists) return new Response(assets);
-    else {
-      console.log(`${processPath}${path}`);
-      const assets = Bun.file(`${processPath}${path}`)
-
-      const exists = await assets.exists();
-      if (exists) return new Response(assets);
-    }
-
-
-    return new Response("Not Found", { status: 404 });
-  }
+    return new Response(handle, { headers });
+  },
 });
 
-console.log(`Server running at http://localhost:${server.port}`);
+console.log(`subrass demo: http://localhost:${server.port}`);

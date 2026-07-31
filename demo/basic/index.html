@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>subrass — basic example (main thread)</title>
+    <link rel="stylesheet" href="/shared/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <nav><a href="/">&larr; All examples</a></nav>
+            <h1>Basic example</h1>
+            <p class="subtitle">Rendering on the main thread &middot; backend:
+                <span class="badge" id="backendBadge">…</span>
+            </p>
+        </header>
+
+        <div class="main-content">
+            <div class="player-section">
+                <div class="video-container">
+                    <video id="video" playsinline></video>
+                    <canvas id="subtitleCanvas"></canvas>
+                </div>
+
+                <div class="controls">
+                    <button id="playPauseBtn" disabled>Play</button>
+                    <button id="stopBtn" disabled>Stop</button>
+                    <span class="time-display" id="timeDisplay">0:00:00.000</span>
+                    <input type="range" id="seekBar" min="0" max="1000" value="0" disabled style="flex: 1;">
+                    <label>
+                        <input type="checkbox" id="loopCheck" checked> Loop
+                    </label>
+                </div>
+
+                <div id="error" class="error" style="display: none;"></div>
+
+                <p class="hint">The WASM renderer runs on the UI thread and draws straight into the
+                    canvas above. Load a video to overlay subtitles, or just press Play to preview
+                    the bundled sample on its own.</p>
+            </div>
+
+            <div class="sidebar">
+                <div class="panel">
+                    <h2>Load Files</h2>
+                    <div class="file-input">
+                        <label for="videoInput">Load Video</label>
+                        <input type="file" id="videoInput" accept="video/*">
+                        <span class="file-name" id="videoName">No video loaded</span>
+
+                        <label for="assInput">Load ASS/SSA File</label>
+                        <input type="file" id="assInput" accept=".ass,.ssa">
+                        <span class="file-name" id="assName">No subtitle loaded</span>
+
+                        <div class="font-upload">
+                            <label for="fontInput">Load Font (optional)</label>
+                            <input type="file" id="fontInput" accept=".ttf,.otf,.woff,.woff2" multiple>
+                            <div class="font-list" id="fontList">Built-in: DejaVu Sans</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Subtitle Info</h2>
+                    <div class="summary" id="summary">
+                        <div class="summary-item">
+                            <div class="value" id="summaryRes">-</div>
+                            <div class="label">Resolution</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="value" id="summaryStyles">-</div>
+                            <div class="label">Styles</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="value" id="summaryEvents">-</div>
+                            <div class="label">Events</div>
+                        </div>
+                        <div class="summary-item">
+                            <div class="value" id="summaryTitle">-</div>
+                            <div class="label">Title</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Active Events</h2>
+                    <div class="event-list scrollbar" id="eventList">
+                        <div class="placeholder">Loading…</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+</body>
+
+</html>

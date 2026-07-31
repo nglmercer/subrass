@@ -4,90 +4,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>subrass - ASS Subtitle Renderer</title>
-    <link rel="stylesheet" href="./style.css">
+    <title>subrass — ASS subtitle renderer for WebAssembly</title>
+    <link rel="stylesheet" href="/shared/style.css">
 </head>
 
 <body>
     <div class="container">
         <header>
             <h1>subrass</h1>
-            <p class="subtitle">ASS/SSA Subtitle Renderer for WebAssembly</p>
+            <p class="subtitle">ASS/SSA subtitle parser &amp; renderer — pure Rust, compiled to WebAssembly</p>
         </header>
 
-        <div class="main-content">
-            <div class="player-section">
-                <div class="video-container">
-                    <video id="video" playsinline></video>
-                    <canvas id="subtitleCanvas"></canvas>
-                </div>
+        <div class="example-grid">
+            <a class="example-card" href="/basic">
+                <h2>Basic</h2>
+                <p>The renderer runs on the main thread and draws straight into a canvas overlay.
+                    The simplest way to integrate subrass — a few lines of TypeScript.</p>
+                <span class="tag">main-thread</span>
+            </a>
 
-                <div class="controls">
-                    <button id="playPauseBtn" disabled>Play</button>
-                    <button id="stopBtn" disabled>Stop</button>
-                    <span class="time-display" id="timeDisplay">0:00:00.000</span>
-                    <input type="range" id="seekBar" min="0" max="1000" value="0" disabled style="flex: 1;">
-                    <label>
-                        <input type="checkbox" id="loopCheck" checked> Loop
-                    </label>
-                </div>
-
-                <div id="error" class="error" style="display: none;"></div>
-            </div>
-
-            <div class="sidebar">
-                <div class="panel">
-                    <h2>Load Files</h2>
-                    <div class="file-input">
-                        <label for="videoInput">Load Video</label>
-                        <input type="file" id="videoInput" accept="video/*">
-                        <span class="file-name" id="videoName">No video loaded</span>
-
-                        <label for="assInput">Load ASS/SSA File</label>
-                        <input type="file" id="assInput" accept=".ass,.ssa">
-                        <span class="file-name" id="assName">No subtitle loaded</span>
-
-                        <div class="font-upload">
-                            <label for="fontInput">Load Font (optional)</label>
-                            <input type="file" id="fontInput" accept=".ttf,.otf,.woff,.woff2" multiple>
-                            <div class="font-list" id="fontList">Built-in: DejaVu Sans</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <h2>Subtitle Info</h2>
-                    <div class="summary" id="summary">
-                        <div class="summary-item">
-                            <div class="value" id="summaryRes">-</div>
-                            <div class="label">Resolution</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="value" id="summaryStyles">-</div>
-                            <div class="label">Styles</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="value" id="summaryEvents">-</div>
-                            <div class="label">Events</div>
-                        </div>
-                        <div class="summary-item">
-                            <div class="value" id="summaryTitle">-</div>
-                            <div class="label">Title</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <h2>Active Events</h2>
-                    <div class="event-list scrollbar" id="eventList">
-                        <div class="placeholder">Load video and subtitles to see events</div>
-                    </div>
-                </div>
-            </div>
+            <a class="example-card" href="/worker">
+                <h2>Worker</h2>
+                <p>The renderer lives in a Web Worker. Frames arrive as transferred
+                    ArrayBuffers and the UI thread never blocks on WASM work.</p>
+                <span class="tag">web-worker</span>
+            </a>
         </div>
-    </div>
 
-    <script type="module" src="./app.js"></script>
+        <p class="footer-note">
+            Both examples auto-load a bundled sample file that exercises most ASS features
+            (karaoke, transforms, rotation, blur, vector drawings). Serve with
+            <code>bun run server.ts</code> after building the WASM package.
+        </p>
+    </div>
 </body>
 
 </html>

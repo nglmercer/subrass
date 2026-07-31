@@ -103,7 +103,7 @@ export class WorkerBackend implements RenderBackend {
   }
 
   renderFrame(timeMs: number): void {
-    dbg("renderFrame → worker", { timeMs, seq: this.nextSeq });
+    // dbg("renderFrame → worker", { timeMs, seq: this.nextSeq });
     this.worker.postMessage({ type: "render", timeMs, seq: this.nextSeq++ });
   }
 

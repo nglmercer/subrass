@@ -48,7 +48,6 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     onFrame(timeMs) {
       if (handleEnd(timeMs)) return;
       syncCanvasSize();
-      if (!player.videoMode) paintBackdrop();
       backend.renderFrame(timeMs);
       updateHud(timeMs);
     },
@@ -162,7 +161,6 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     player.stop();
     playPauseBtn.textContent = "Play";
     syncCanvasSize();
-    if (!player.videoMode) paintBackdrop();
     backend.renderFrame(0);
     updateHud(0);
   });
@@ -170,7 +168,7 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   seekBar.addEventListener("input", () => {
     player.seek(Number(seekBar.value));
     syncCanvasSize();
-    if (!player.videoMode) paintBackdrop();
+    backend.renderFrame(player.currentTimeMs());
     updateHud(player.currentTimeMs());
   });
 

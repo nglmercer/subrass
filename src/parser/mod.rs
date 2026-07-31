@@ -30,6 +30,7 @@ impl AssDocument {
         let mut section_lines: Vec<&str> = Vec::new();
         let mut line_number = 0;
         let mut section_start_line = 0;
+        let mut found_section = false;
 
         for line in input.lines() {
             line_number += 1;
@@ -44,6 +45,9 @@ impl AssDocument {
 
                 // Start new section
                 current_section = Section::from_header(trimmed);
+                if current_section.is_some() {
+                    found_section = true;
+                }
                 section_lines.clear();
                 section_start_line = line_number;
                 continue;
@@ -58,6 +62,13 @@ impl AssDocument {
         // Process last section
         if let Some(section) = current_section {
             process_section(&mut doc, section, &section_lines, section_start_line)?;
+        }
+
+        // Reject non-empty input that contains no recognizable ASS sections
+        if !found_section && input.lines().any(|l| !l.trim().is_empty()) {
+            return Err(ParseError::Unexpected(
+                "No valid ASS sections found".to_string(),
+            ));
         }
 
         Ok(doc)
@@ -167,6 +178,21 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
         let doc = AssDocument::parse("").unwrap();
         assert!(doc.styles.is_empty());
         assert!(doc.events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_invalid_content() {
+        assert!(AssDocument::parse("This is not valid ASS content").is_err());
+    }
+
+    #[test]
+    fn test_parse_unknown_section_only() {
+        assert!(AssDocument::parse("[Bogus Section]\nfoo: bar").is_err());
+    }
+
+    #[test]
+    fn test_parse_comments_only() {
+        assert!(AssDocument::parse("; just a comment\n; another").is_err());
     }
 
     #[test]

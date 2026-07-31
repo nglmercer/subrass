@@ -32,7 +32,6 @@ export function renderFrame(timeMs) {
 
 export function getSummary() {
   if (!renderer) return null;
-  console.log(renderer);
   return {
     resolution: renderer.get_play_resolution(),
     styles: renderer.get_style_count(),

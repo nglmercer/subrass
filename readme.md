@@ -65,10 +65,10 @@ src/
 | Border/Shadow | `\bord`, `\shad`, `\be`, `\blur` |
 | Clipping | `\clip`, `\iclip` |
 | Drawing | `\p`, `\p1` vector paths |
-| Fade | `\fad` |
+| Fade | `\fad`, `\fade` |
 | Wrapping | `\N`, `\n` |
 
-**Parsed but not yet rendered:** karaoke (`\k`, `\K`, `\kf`, `\ko`)
+**Parsed but not yet rendered:** karaoke (`\k`, `\K`, `\kf`, `\ko`), `\q` (wrap-style override — parsed, but automatic word-wrapping is not applied)
 
 ## Build
 
@@ -130,8 +130,8 @@ Then open the served `demo/` page and select a video file and an ASS subtitle fi
 - Basic positioning (numpad alignment 1–9)
 - `\pos`, `\move`, `\org`
 - Outline, Shadow effects
-- Fade (`\fad`, `\1a`–`\4a`)
-- Animated overrides (`\t` with accel)
+- Fade (`\fad`, `\fade`, `\1a`–`\4a`)
+- Animated overrides (`\t` with accel, timing args optional)
 - Rotation (`\frz` 2D, `\frx`/`\fry` projective 3D)
 - `\clip` / `\iclip`
 - Drawing mode (`\p1` vector paths)
@@ -141,7 +141,7 @@ Then open the served `demo/` page and select a video file and an ASS subtitle fi
 - Canvas rendering
 
 ### Not Yet Implemented
-- `\fade` (complex fade) and `\q` (wrap-style override) — not parsed
+- Automatic word-wrapping (wrap styles 0–3; `\q` and script-level `WrapStyle` are parsed but ignored — only explicit `\N`/`\n` breaks apply)
 - Karaoke rendering (`\k`, `\K`, `\kf`, `\ko` are parsed but ignored)
 - HarfBuzz/OpenType complex shaping
 - Web Worker architecture

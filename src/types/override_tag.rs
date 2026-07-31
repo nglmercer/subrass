@@ -79,6 +79,9 @@ pub enum OverrideTag {
     // Drawing
     Drawing(i32),
 
+    // Wrapping
+    WrapStyle(i32),
+
     // Karaoke
     KaraokeDuration(u64),
     KaraokeSweep(u64),
@@ -534,34 +537,51 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
                 None
             }
         }
-        "t" => {
-            // \t(t1, t2, [accel,] tags...)
+        "fade" => {
+            // \fade(a1, a2, a3, t1, t2, t3, t4)
             let params = params?;
             let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() < 3 {
-                return None;
-            }
-
-            let t1: u64 = parts[0].trim().parse().ok()?;
-            let t2: u64 = parts[1].trim().parse().ok()?;
-
-            // Determine if accel is present
-            let (accel, tags_start) = if parts.len() >= 4 {
-                // Check if third part is a number (accel)
-                if let Ok(accel) = parts[2].trim().parse::<f64>() {
-                    (accel, 3)
-                } else {
-                    (1.0, 2)
-                }
+            if parts.len() >= 7 {
+                let a1 = parts[0].trim().parse().ok()?;
+                let a2 = parts[1].trim().parse().ok()?;
+                let a3 = parts[2].trim().parse().ok()?;
+                let t1 = parts[3].trim().parse().ok()?;
+                let t2 = parts[4].trim().parse().ok()?;
+                let t3 = parts[5].trim().parse().ok()?;
+                let t4 = parts[6].trim().parse().ok()?;
+                Some(OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4))
             } else {
-                (1.0, 2)
+                None
+            }
+        }
+        "t" => {
+            // \t([t1, t2,] [accel,] tags...)
+            // Leading numeric arguments precede the first backslash; the
+            // remainder is the inner tag string (which may itself contain
+            // commas, e.g. \clip(0,0,100,100)).
+            let params = params?;
+            let tags_pos = params.find('\\').unwrap_or(params.len());
+            let (args_part, tags_str) = params.split_at(tags_pos);
+            let args: Vec<&str> = args_part
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            // Per the ASS spec: 0 args = defaults, 1 = accel, 2 = t1/t2,
+            // 3 = t1/t2/accel. t2 == 0 means "until the end of the event".
+            let (t1, t2, accel) = match args.len() {
+                0 => (0u64, 0u64, 1.0f64),
+                1 => (0u64, 0u64, args[0].parse().ok()?),
+                2 => (args[0].parse().ok()?, args[1].parse().ok()?, 1.0f64),
+                _ => (
+                    args[0].parse().ok()?,
+                    args[1].parse().ok()?,
+                    args[2].parse().ok()?,
+                ),
             };
 
-            // Join remaining parts as the tags string
-            let tags_str: String = parts[tags_start..].join(",");
-
-            // Parse the inner tags
-            let tags = parse_tag_group(&tags_str);
+            let tags = parse_tag_group(tags_str);
 
             Some(OverrideTag::Transform {
                 t1,
@@ -599,6 +619,10 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
         "p" => {
             let val = params?.parse().ok()?;
             Some(OverrideTag::Drawing(val))
+        }
+        "q" => {
+            let val = params?.parse().ok()?;
+            Some(OverrideTag::WrapStyle(val))
         }
         "k" => {
             let val = params?.parse().ok()?;
@@ -753,6 +777,78 @@ mod tests {
                 assert_eq!(*t1, 100);
                 assert_eq!(*t2, 500);
                 assert_eq!(*accel, 2.0);
+            }
+            _ => panic!("Expected Transform tag"),
+        }
+    }
+
+    #[test]
+    fn test_parse_complex_fade_tag() {
+        let tags = OverrideTag::parse_from_text("{\\fade(255,0,255,0,500,2000,2200)}");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(
+            tags[0],
+            OverrideTag::ComplexFade(255, 0, 255, 0, 500, 2000, 2200)
+        ));
+    }
+
+    #[test]
+    fn test_parse_wrap_style_tag() {
+        let tags = OverrideTag::parse_from_text("{\\q2}Text");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::WrapStyle(2)));
+    }
+
+    #[test]
+    fn test_parse_transform_without_timing() {
+        let tags = OverrideTag::parse_from_text("{\\t(\\blur20)}");
+        assert_eq!(tags.len(), 1);
+        match &tags[0] {
+            OverrideTag::Transform {
+                t1,
+                t2,
+                accel,
+                tags: inner,
+            } => {
+                assert_eq!(*t1, 0);
+                assert_eq!(*t2, 0);
+                assert_eq!(*accel, 1.0);
+                assert_eq!(inner.len(), 1);
+            }
+            _ => panic!("Expected Transform tag"),
+        }
+    }
+
+    #[test]
+    fn test_parse_transform_accel_only() {
+        let tags = OverrideTag::parse_from_text("{\\t(2.0,\\blur20)}");
+        assert_eq!(tags.len(), 1);
+        match &tags[0] {
+            OverrideTag::Transform { t1, t2, accel, .. } => {
+                assert_eq!(*t1, 0);
+                assert_eq!(*t2, 0);
+                assert_eq!(*accel, 2.0);
+            }
+            _ => panic!("Expected Transform tag"),
+        }
+    }
+
+    #[test]
+    fn test_parse_transform_nested_comma_params() {
+        let tags = OverrideTag::parse_from_text("{\\t(0,500,\\clip(0,0,100,100))}");
+        assert_eq!(tags.len(), 1);
+        match &tags[0] {
+            OverrideTag::Transform {
+                t1,
+                t2,
+                accel,
+                tags: inner,
+            } => {
+                assert_eq!(*t1, 0);
+                assert_eq!(*t2, 500);
+                assert_eq!(*accel, 1.0);
+                assert_eq!(inner.len(), 1);
+                assert!(matches!(inner[0], OverrideTag::Clip(0, 0, 100, 100)));
             }
             _ => panic!("Expected Transform tag"),
         }

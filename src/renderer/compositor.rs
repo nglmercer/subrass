@@ -644,8 +644,15 @@ impl Compositor {
                     if elapsed < *t1 {
                         continue;
                     }
-                    let duration = t2 - t1;
-                    let raw_progress = if elapsed >= *t2 {
+                    // t2 == 0 means "until the end of the event" (the spec
+                    // default when \t omits its timing arguments)
+                    let t2_eff = if *t2 == 0 {
+                        end_ms.saturating_sub(start_ms)
+                    } else {
+                        *t2
+                    };
+                    let duration = t2_eff.saturating_sub(*t1);
+                    let raw_progress = if elapsed >= t2_eff {
                         1.0
                     } else if duration > 0 {
                         (elapsed - *t1) as f64 / duration as f64
@@ -707,9 +714,17 @@ impl Compositor {
                 }
 
                 // Calculate original center of the glyph relative to origin
-                let orig_cx = base_x + x_offset + glyph.x + cached.bearing_x as f64 + cached.width as f64 / 2.0;
-                let orig_cy = base_y + line_y_offset + glyph.y + cached.bearing_y as f64 + cached.height as f64 / 2.0;
-                
+                let orig_cx = base_x
+                    + x_offset
+                    + glyph.x
+                    + cached.bearing_x as f64
+                    + cached.width as f64 / 2.0;
+                let orig_cy = base_y
+                    + line_y_offset
+                    + glyph.y
+                    + cached.bearing_y as f64
+                    + cached.height as f64 / 2.0;
+
                 let dx = orig_cx - org_x;
                 let dy = orig_cy - org_y;
 
@@ -718,11 +733,11 @@ impl Compositor {
                 let rz = segment_resolved.angle;
                 let rx = segment_resolved.rotation_x;
                 let ry = segment_resolved.rotation_y;
-                
+
                 let mat_z = Matrix3x3::rotation_z(rz.to_radians());
                 let mat_y = Matrix3x3::rotation_y(-ry.to_radians());
                 let mat_x = Matrix3x3::rotation_x(-rx.to_radians());
-                
+
                 let matrix = mat_x.multiply(&mat_y).multiply(&mat_z);
 
                 // Perspective distance (standard ASS is ~312.5-500 depending on resolution)

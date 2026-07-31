@@ -71,6 +71,190 @@ pub struct ComplexFade {
     pub t4: u64,
 }
 
+/// A word plus any raw tag groups that preceded it, with measured width
+#[derive(Debug, Clone)]
+struct WrapWord {
+    prefix: String,
+    text: String,
+    width: f64,
+}
+
+/// Insert '\n' at word boundaries per the ASS wrap style:
+/// 0/1 = greedy fill (top line widest), 2 = no automatic wrapping,
+/// 3 = greedy fill from the bottom (bottom line widest).
+///
+/// Tag groups are opaque and travel with the word that follows them;
+/// explicit `\N`/`\n` breaks split the text into independently wrapped
+/// runs. Words wider than `max_width` stay on their own line (no
+/// character-level splitting).
+fn wrap_event_text(
+    text: &str,
+    wrap_style: i32,
+    max_width: f64,
+    font: &FontArc,
+    font_size: f64,
+    spacing: f64,
+) -> String {
+    if wrap_style == 2 || max_width <= 0.0 {
+        return text.to_string();
+    }
+
+    // Tokenize into words (with pending tag prefixes) and hard breaks.
+    let mut words: Vec<WrapWord> = Vec::new();
+    // Break markers: index into `words` where a new run starts
+    let mut run_starts: Vec<usize> = vec![0];
+    let mut prefix = String::new();
+    let mut word = String::new();
+
+    let mut flush = |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>| {
+        if word.is_empty() {
+            return;
+        }
+        let width = TextShaper::measure_text(word, font, font_size, spacing);
+        words.push(WrapWord {
+            prefix: std::mem::take(prefix),
+            text: std::mem::take(word),
+            width,
+        });
+    };
+
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                flush(&mut prefix, &mut word, &mut words);
+                prefix.push('{');
+                for gc in chars.by_ref() {
+                    prefix.push(gc);
+                    if gc == '}' {
+                        break;
+                    }
+                }
+            }
+            '\\' => match chars.peek() {
+                Some('N') | Some('n') => {
+                    chars.next();
+                    flush(&mut prefix, &mut word, &mut words);
+                    run_starts.push(words.len());
+                }
+                Some('h') => {
+                    chars.next();
+                    word.push('\u{00A0}');
+                }
+                Some(&n) => {
+                    chars.next();
+                    word.push('\\');
+                    word.push(n);
+                }
+                None => word.push('\\'),
+            },
+            ' ' | '\t' => {
+                flush(&mut prefix, &mut word, &mut words);
+            }
+            _ => word.push(c),
+        }
+    }
+    flush(&mut prefix, &mut word, &mut words);
+    // Trailing tag groups with no word attach as a zero-width word
+    if !prefix.is_empty() {
+        words.push(WrapWord {
+            prefix,
+            text: String::new(),
+            width: 0.0,
+        });
+    }
+
+    let space_width = TextShaper::measure_text(" ", font, font_size, spacing);
+    let bottom_wider = wrap_style == 3;
+
+    // Wrap each explicit-line run independently, then rejoin with breaks.
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut run_begin = 0usize;
+    for start in run_starts.iter().skip(1) {
+        render_wrapped_run(
+            &words[run_begin..*start],
+            bottom_wider,
+            max_width,
+            space_width,
+            &mut out,
+        );
+        out.push('\n');
+        run_begin = *start;
+    }
+    render_wrapped_run(
+        &words[run_begin..],
+        bottom_wider,
+        max_width,
+        space_width,
+        &mut out,
+    );
+
+    out
+}
+
+/// Greedy-wrap one run of words and append the result to `out`.
+fn render_wrapped_run(
+    words: &[WrapWord],
+    bottom_wider: bool,
+    max_width: f64,
+    space_width: f64,
+    out: &mut String,
+) {
+    if words.is_empty() {
+        return;
+    }
+
+    // Group word indices into lines. Greedy fill makes the top line the
+    // widest; filling from the end (style 3) makes the bottom the widest.
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    let mut cur_w = 0.0_f64;
+    let order: Box<dyn Iterator<Item = usize>> = if bottom_wider {
+        Box::new((0..words.len()).rev())
+    } else {
+        Box::new(0..words.len())
+    };
+    for idx in order {
+        let ww = words[idx].width;
+        if cur.is_empty() {
+            cur_w = ww;
+            cur.push(idx);
+        } else if cur_w + space_width + ww <= max_width {
+            cur_w += space_width + ww;
+            cur.push(idx);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = ww;
+            cur.push(idx);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if bottom_wider {
+        lines.reverse();
+        for line in &mut lines {
+            line.reverse();
+        }
+    }
+
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut prev_had_text = false;
+        for (j, &idx) in line.iter().enumerate() {
+            let w = &words[idx];
+            if j > 0 && prev_had_text && !w.text.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&w.prefix);
+            out.push_str(&w.text);
+            prev_had_text = !w.text.is_empty();
+        }
+    }
+}
+
 /// Karaoke syllable kind
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KaraokeKind {
@@ -504,6 +688,7 @@ impl Compositor {
         play_res_y: u32,
         video_width: u32,
         video_height: u32,
+        script_wrap_style: i32,
     ) {
         if event.event_type == EventType::Comment {
             return;
@@ -553,8 +738,47 @@ impl Compositor {
 
         let alpha = (alpha_mult * 255.0) as u8;
 
+        // Find font
+        let font = font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
+        let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
+
+        let scale_x = video_width as f64 / play_res_x as f64;
+        let scale_y = video_height as f64 / play_res_y as f64;
+
+        // Automatic word wrapping (wrap styles 0-3). A per-event \q
+        // overrides the script-level WrapStyle. Drawing mode text is
+        // coordinate data and must never be wrapped.
+        let is_drawing_event = resolved.drawing_mode > 0
+            || event
+                .parsed_tags
+                .iter()
+                .any(|t| matches!(t, OverrideTag::Drawing(d) if *d > 0));
+        let wrapped_text = if is_drawing_event {
+            event.text.clone()
+        } else {
+            let wrap_style = event
+                .parsed_tags
+                .iter()
+                .rev()
+                .find_map(|tag| match tag {
+                    OverrideTag::WrapStyle(q) => Some(*q),
+                    _ => None,
+                })
+                .unwrap_or(script_wrap_style);
+            let wrap_width =
+                (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
+            wrap_event_text(
+                &event.text,
+                wrap_style,
+                wrap_width,
+                font,
+                font_size,
+                resolved.spacing,
+            )
+        };
+
         // Parse text into segments for per-override rendering
-        let segments = parse_text_segments(&event.text);
+        let segments = parse_text_segments(&wrapped_text);
 
         // Check if this is drawing mode (check first segment for \p1)
         let is_drawing = segments
@@ -565,15 +789,8 @@ impl Compositor {
             })
             .unwrap_or(false);
 
-        // Find font
-        let font = font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
-        let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
-
-        let scale_x = video_width as f64 / play_res_x as f64;
-        let scale_y = video_height as f64 / play_res_y as f64;
-
         // Calculate position (always need text measurement for alignment offsets)
-        let (clean_text, _) = self.extract_clean_text(&event.text);
+        let (clean_text, _) = self.extract_clean_text(&wrapped_text);
         let shaped_full = TextShaper::shape(
             &clean_text,
             font,
@@ -677,10 +894,8 @@ impl Compositor {
         }
 
         // Karaoke syllable timeline (empty when the event has no karaoke tags)
-        let karaoke_font =
-            font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
         let (karaoke_syllables, seg_syllable) =
-            build_karaoke_timeline(&segments, karaoke_font, font_size, resolved.spacing);
+            build_karaoke_timeline(&segments, font, font_size, resolved.spacing);
         let mut syllable_consumed: Vec<f64> = vec![0.0; karaoke_syllables.len()];
         let elapsed_ms = time_ms.saturating_sub(start_ms);
 
@@ -1117,6 +1332,52 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_style_2_disables_wrapping() {
+        let font = fallback_font();
+        let text = "aa aa aa aa";
+        assert_eq!(wrap_event_text(text, 2, 1.0, &font, 48.0, 0.0), text);
+    }
+
+    #[test]
+    fn test_wrap_greedy_top_wider() {
+        let font = fallback_font();
+        let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
+        let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
+        // Room for exactly three words per line
+        let max = word_w * 3.0 + space_w * 2.0 + 0.5;
+        let out = wrap_event_text("aa aa aa aa", 0, max, &font, 48.0, 0.0);
+        assert_eq!(out, "aa aa aa\naa");
+    }
+
+    #[test]
+    fn test_wrap_style_3_bottom_wider() {
+        let font = fallback_font();
+        let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
+        let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
+        let max = word_w * 3.0 + space_w * 2.0 + 0.5;
+        let out = wrap_event_text("aa aa aa aa", 3, max, &font, 48.0, 0.0);
+        assert_eq!(out, "aa\naa aa aa");
+    }
+
+    #[test]
+    fn test_wrap_preserves_tags_and_hard_breaks() {
+        let font = fallback_font();
+        let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
+        let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
+        let max = word_w + space_w + 0.5; // only one word fits per line
+        let out = wrap_event_text("{\\c&H00FF00&}aa aa\\Naa", 0, max, &font, 48.0, 0.0);
+        // Tag group survives, wrapping occurs, and the explicit break is kept
+        assert_eq!(out, "{\\c&H00FF00&}aa\naa\naa");
+    }
+
+    #[test]
+    fn test_wrap_no_spaces_unchanged() {
+        let font = fallback_font();
+        let out = wrap_event_text("aaaaaaaa", 0, 5.0, &font, 48.0, 0.0);
+        assert_eq!(out, "aaaaaaaa");
+    }
+
+    #[test]
     fn test_karaoke_timeline_hard_tags() {
         let segments = parse_text_segments("{\\k50}A{\\k30}B");
         let font = fallback_font();
@@ -1187,10 +1448,14 @@ mod tests {
         // At 100ms the second syllable is still highlighted (secondary
         // color); at 1500ms both syllables have been sung (primary color).
         let mut early = RenderBuffer::new(320, 100);
-        comp.composite_event(&mut early, &event, &resolved, &fm, 100, 320, 100, 320, 100);
+        comp.composite_event(
+            &mut early, &event, &resolved, &fm, 100, 320, 100, 320, 100, 0,
+        );
 
         let mut late = RenderBuffer::new(320, 100);
-        comp.composite_event(&mut late, &event, &resolved, &fm, 1500, 320, 100, 320, 100);
+        comp.composite_event(
+            &mut late, &event, &resolved, &fm, 1500, 320, 100, 320, 100, 0,
+        );
 
         assert_ne!(early.as_bytes(), late.as_bytes());
     }

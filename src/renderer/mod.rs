@@ -126,6 +126,7 @@ impl SubtitleRenderer {
                 self.doc.script_info.play_res_y,
                 self.video_width,
                 self.video_height,
+                self.doc.script_info.wrap_style as i32,
             );
         }
 

@@ -2,10 +2,15 @@ use crate::types::{Attachment, AttachmentKind};
 
 use super::errors::ParseError;
 
-/// Defensive caps for untrusted subtitle input.
+/// Defensive caps for untrusted subtitle input. All three are enforced
+/// per document (across repeated sections), not per section call.
 pub const MAX_ATTACHMENTS: usize = 256;
 /// Maximum decoded bytes per attachment (64 MiB).
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum total decoded attachment bytes per document (256 MiB).
+/// Without this, 256 max-size attachments in one section could
+/// decode to 16 GiB before any count cap trips.
+pub const MAX_TOTAL_ATTACHMENT_BYTES: usize = 256 * 1024 * 1024;
 
 /// Parse the lines of a [Fonts] or [Graphics] section into attachments.
 ///
@@ -24,6 +29,9 @@ pub fn parse_attachments(
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut encoded: Vec<u8> = Vec::new();
     let mut header_line = 0usize;
+    // Decoded bytes flushed so far in this call. The document-level
+    // total is enforced by the caller on top of this per-call sum.
+    let mut decoded_total: usize = 0;
 
     for (i, line) in lines.iter().enumerate() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -51,6 +59,8 @@ pub fn parse_attachments(
             }
             if let Some(last) = attachments.last_mut() {
                 last.data = decode_flushed(&encoded, start_line + header_line, &last.filename)?;
+                decoded_total =
+                    check_total_budget(decoded_total, last.data.len(), start_line + header_line)?;
             }
             encoded.clear();
             header_line = i;
@@ -99,9 +109,36 @@ pub fn parse_attachments(
 
     if let Some(last) = attachments.last_mut() {
         last.data = decode_flushed(&encoded, start_line + header_line, &last.filename)?;
+        decoded_total =
+            check_total_budget(decoded_total, last.data.len(), start_line + header_line)?;
     }
+    // Keep the total observable for the document-level check without
+    // re-summing: a debug assertion documents the invariant instead.
+    debug_assert_eq!(
+        decoded_total,
+        attachments.iter().map(|a| a.data.len()).sum::<usize>()
+    );
 
     Ok(attachments)
+}
+
+/// Add freshly decoded bytes to a running total, enforcing
+/// `MAX_TOTAL_ATTACHMENT_BYTES` with checked arithmetic. Pure over
+/// lengths, so boundaries are unit-testable without huge buffers.
+fn check_total_budget(total: usize, additional: usize, line: usize) -> Result<usize, ParseError> {
+    let sum = total
+        .checked_add(additional)
+        .ok_or_else(|| ParseError::line_error(line, "Attachment data size overflow".to_string()))?;
+    if sum > MAX_TOTAL_ATTACHMENT_BYTES {
+        return Err(ParseError::line_error(
+            line,
+            format!(
+                "Total attachment data exceeds the {} MiB document budget",
+                MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    Ok(sum)
 }
 
 /// Match `fontname:` / `filename:` headers case-insensitively.
@@ -328,6 +365,20 @@ mod tests {
         assert!(err.contains("12"), "line number must appear: {err}");
         assert!(err.contains("0x20"), "byte must appear: {err}");
         assert!(err.contains("bad.ttf"), "filename must appear: {err}");
+    }
+
+    #[test]
+    fn test_total_budget_boundaries() {
+        // Pure over lengths: exact budget passes, one byte over fails,
+        // and usize overflow fails instead of wrapping.
+        assert_eq!(
+            check_total_budget(MAX_TOTAL_ATTACHMENT_BYTES - 1, 1, 0).unwrap(),
+            MAX_TOTAL_ATTACHMENT_BYTES
+        );
+        assert!(check_total_budget(MAX_TOTAL_ATTACHMENT_BYTES, 1, 0).is_err());
+        assert!(check_total_budget(usize::MAX, 1, 0).is_err());
+        assert!(check_total_budget(usize::MAX, usize::MAX, 0).is_err());
+        assert_eq!(check_total_budget(0, 0, 0).unwrap(), 0);
     }
 
     #[test]

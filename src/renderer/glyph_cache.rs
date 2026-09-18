@@ -111,6 +111,19 @@ impl GlyphCache {
         faux_bold: bool,
         faux_italic: bool,
     ) -> CachedGlyph {
+        // Degenerate scales never reach ab_glyph: non-finite and
+        // non-positive sizes are empty, and past f32::MAX the px scale
+        // cannot even be represented (ab_glyph takes f32).
+        if !font_size.is_finite() || font_size <= 0.0 || font_size > f64::from(f32::MAX) {
+            return CachedGlyph {
+                bitmap: Vec::new(),
+                width: 0,
+                height: 0,
+                bearing_x: 0.0,
+                bearing_y: 0.0,
+                advance: 0.0,
+            };
+        }
         let scale = PxScale::from(font_size as f32);
         let scaled = font.as_scaled(scale);
 
@@ -122,8 +135,12 @@ impl GlyphCache {
         match outlined {
             Some(outlined) => {
                 let bounds = outlined.px_bounds();
-                let width = bounds.width().max(0.0) as u32 + 2;
-                let height = bounds.height().max(0.0) as u32 + 2;
+                // Saturating `+ 2`: a hostile font size can push bounds
+                // past `u32::MAX`, where `as u32` saturates and a plain
+                // `+ 2` would overflow (debug panic). The budget check
+                // below then degrades to an empty glyph.
+                let width = (bounds.width().max(0.0) as u32).saturating_add(2);
+                let height = (bounds.height().max(0.0) as u32).saturating_add(2);
 
                 // Hostile font sizes must degrade to an empty glyph: the
                 // u64 product can neither wrap (u32 `width * height` would)
@@ -186,8 +203,22 @@ impl GlyphCache {
                 let (bitmap, width, bearing_x) = if faux_italic {
                     let shear = 0.2126_f32;
                     let extra = (height as f32 * shear).ceil().max(1.0) as u32;
-                    let new_width = width + extra;
-                    let mut sheared = vec![0u8; (new_width * height) as usize];
+                    let new_width = width.saturating_add(extra);
+                    // u64 product: `new_width * height` in u32 could wrap
+                    // for pathological near-budget bitmaps (debug panic,
+                    // then OOB indexing). Over budget degrades to empty.
+                    let sheared_pixels = u64::from(new_width) * u64::from(height);
+                    if sheared_pixels == 0 || sheared_pixels > MAX_GLYPH_BITMAP_PIXELS {
+                        return CachedGlyph {
+                            bitmap: Vec::new(),
+                            width: 0,
+                            height: 0,
+                            bearing_x: 0.0,
+                            bearing_y: 0.0,
+                            advance: scaled.h_advance(glyph_id),
+                        };
+                    }
+                    let mut sheared = vec![0u8; sheared_pixels as usize];
                     for y in 0..height {
                         let shift = ((height - 1 - y) as f32 * shear).round() as u32;
                         for x in 0..width {
@@ -311,6 +342,22 @@ mod tests {
         let g = cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
         assert!(g.width > 0 && g.height > 0);
         assert!(!g.bitmap.is_empty());
+    }
+
+    #[test]
+    fn test_absurd_font_size_never_overflows_dims() {
+        // Past `u32::MAX` pixels, `as u32` saturates: the `+ 2` padding
+        // and the faux-italic widen must not overflow (debug panic) or
+        // wrap (under-allocation + OOB). All degrade to empty glyphs.
+        let fm = manager_with_two_fonts();
+        let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
+        let mut cache = GlyphCache::new(64);
+        let gid = m0.font.glyph_id('A');
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let g = cache.get_or_rasterize(m0.id, m0.font, gid, 1e12, bold, italic);
+            assert_eq!((g.width, g.height), (0, 0), "bold={bold} italic={italic}");
+            assert!(g.bitmap.is_empty());
+        }
     }
 
     #[test]

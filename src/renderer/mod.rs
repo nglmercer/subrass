@@ -265,7 +265,9 @@ impl SubtitleRenderer {
                 self.doc.script_info.play_res_y,
                 self.video_width,
                 self.video_height,
-                self.doc.script_info.wrap_style as i32,
+                // Parse-validated 0-3; clamp so direct struct writes past
+                // i32::MAX wrap no fields (a bare `as i32` would go negative).
+                self.doc.script_info.wrap_style.min(i32::MAX as u32) as i32,
                 &self.doc.styles,
             );
         }

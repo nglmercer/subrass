@@ -67,7 +67,9 @@ impl Time {
 
     pub fn from_millis(millis: u64) -> Self {
         let total_cs = millis / 10;
-        let hours = (total_cs / 360000) as u32;
+        // Saturate: past ~476k years the hours no longer fit u32, and a
+        // bare `as u32` would wrap. Minutes/seconds/cs are mod-bounded.
+        let hours = u32::try_from(total_cs / 360000).unwrap_or(u32::MAX);
         let minutes = ((total_cs % 360000) / 6000) as u32;
         let seconds = ((total_cs % 6000) / 100) as u32;
         let centiseconds = (total_cs % 100) as u32;

@@ -114,11 +114,13 @@ impl TextShaper {
             baseline: 0.0,
             missing_glyphs: 0,
         };
-        // Raw degenerate sizes (<= 0, NaN) shape to nothing instead
-        // of feeding ab_glyph invalid scales. (At the override level,
-        // `\fs0` and non-positive results reset to the style size per
-        // libass; this guard covers direct callers and style data.)
-        if !font_size.is_finite() || font_size <= 0.0 {
+        // Raw degenerate sizes shape to nothing instead of feeding
+        // ab_glyph invalid scales: non-finite, non-positive, or past
+        // f32::MAX (the px scale is f32 and cannot represent more).
+        // (At the override level, `\fs0` and non-positive results reset
+        // to the style size per libass; this guard covers direct
+        // callers and style data.)
+        if !font_size.is_finite() || font_size <= 0.0 || font_size > f64::from(f32::MAX) {
             return empty;
         }
         let Some((_, primary)) = fonts.first() else {
@@ -211,7 +213,7 @@ impl TextShaper {
         font_size: f64,
         spacing: f64,
     ) -> f64 {
-        if !font_size.is_finite() || font_size <= 0.0 {
+        if !font_size.is_finite() || font_size <= 0.0 || font_size > f64::from(f32::MAX) {
             return 0.0;
         }
         if fonts.is_empty() {

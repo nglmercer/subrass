@@ -147,7 +147,13 @@ fn checked_buffer_len(width: u32, height: u32) -> Result<usize, RenderError> {
     usize::try_from(bytes).map_err(|_| RenderError::AllocationTooLarge { width, height })
 }
 
-/// RGBA render buffer for subtitle compositing
+/// RGBA render buffer for subtitle compositing.
+///
+/// Invariant: `pixels.len() == width * height * 4` with both dimensions
+/// within [`MAX_DIMENSION`] and the pixel count within
+/// [`MAX_BUFFER_PIXELS`]. `new`/`resize` enforce this; direct field
+/// writes that break it can cause panics in pixel methods, so downstream
+/// users must preserve it (treat the fields as read-mostly).
 #[derive(Debug)]
 pub struct RenderBuffer {
     pub width: u32,
@@ -253,10 +259,12 @@ impl RenderBuffer {
         let idx = ((y * self.width + x) * 4) as usize;
         let inv = 255 - a as u32;
 
-        self.pixels[idx] = (r as u32 + self.pixels[idx] as u32 * inv / 255) as u8;
-        self.pixels[idx + 1] = (g as u32 + self.pixels[idx + 1] as u32 * inv / 255) as u8;
-        self.pixels[idx + 2] = (b as u32 + self.pixels[idx + 2] as u32 * inv / 255) as u8;
-        self.pixels[idx + 3] = (a as u32 + self.pixels[idx + 3] as u32 * inv / 255) as u8;
+        // Each sum can reach 510 (e.g. white over white), so clamp:
+        // a bare `as u8` would wrap mod 256 instead of saturating.
+        self.pixels[idx] = (r as u32 + self.pixels[idx] as u32 * inv / 255).min(255) as u8;
+        self.pixels[idx + 1] = (g as u32 + self.pixels[idx + 1] as u32 * inv / 255).min(255) as u8;
+        self.pixels[idx + 2] = (b as u32 + self.pixels[idx + 2] as u32 * inv / 255).min(255) as u8;
+        self.pixels[idx + 3] = (a as u32 + self.pixels[idx + 3] as u32 * inv / 255).min(255) as u8;
     }
 
     /// Composite another straight-alpha RGBA buffer over this one.
@@ -827,6 +835,16 @@ mod tests {
         buf.blend_pixel(5, 5, 255, 255, 255, 128);
         let px = buf.get_pixel(5, 5);
         assert!(px[3] > 128);
+    }
+
+    #[test]
+    fn test_blend_pixel_premul_saturates() {
+        // White over white sums past 255 per channel: must saturate,
+        // not wrap mod 256.
+        let mut buf = RenderBuffer::new(2, 1).unwrap();
+        buf.set_pixel(0, 0, 255, 255, 255, 255);
+        buf.blend_pixel_premul(0, 0, 255, 255, 255, 255);
+        assert_eq!(buf.get_pixel(0, 0), [255, 255, 255, 255]);
     }
 
     #[test]

@@ -156,6 +156,107 @@ fn malformed_documents_error_without_panic() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn repeated_sections_cannot_bypass_event_cap() {
+    // MAX_EVENTS is per document: 60k + 40k + 1 events across two
+    // [Events] sections must fail, while exactly MAX_EVENTS passes.
+    // Native only: 200k event parses are too slow for a browser runner
+    // (the counting logic itself is unit-tested everywhere).
+    use subrass::parser::event::MAX_EVENTS;
+    let fmt = "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+    let line = "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,x\n";
+    let mut over = String::from("[Events]\n");
+    over.push_str(fmt);
+    over.push_str(&line.repeat(60_000));
+    over.push_str("[Events]\n");
+    over.push_str(fmt);
+    over.push_str(&line.repeat(40_001));
+    let err = SubtitleRenderer::new(&over)
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(err.contains("Too many events"), "{err}");
+    let mut exact = String::from("[Events]\n");
+    exact.push_str(fmt);
+    exact.push_str(&line.repeat(60_000));
+    exact.push_str("[Events]\n");
+    exact.push_str(fmt);
+    exact.push_str(&line.repeat(MAX_EVENTS - 60_000));
+    assert!(
+        SubtitleRenderer::new(&exact).is_ok(),
+        "exactly MAX_EVENTS across sections must parse"
+    );
+}
+
+#[test]
+fn repeated_sections_cannot_bypass_style_cap() {
+    // MAX_STYLES is per document, across [V4+ Styles] and [V4 Styles].
+    use subrass::parser::style::MAX_STYLES;
+    let fmt_v4 = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n";
+    let style = "Style: S,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1\n";
+    let mut over = String::from("[V4+ Styles]\n");
+    over.push_str(fmt_v4);
+    over.push_str(&style.repeat(MAX_STYLES));
+    over.push_str("[V4+ Styles]\n");
+    over.push_str(fmt_v4);
+    over.push_str(style);
+    let err = SubtitleRenderer::new(&over)
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(err.contains("Too many styles"), "{err}");
+}
+
+#[test]
+fn repeated_sections_cannot_bypass_attachment_caps() {
+    // Count cap spans [Fonts] + [Graphics]: 200 + 57 attachments fail.
+    let mut doc = String::from("[Fonts]\n");
+    for i in 0..200 {
+        doc.push_str(&format!("fontname: f{i}.ttf\n15*$\n"));
+    }
+    doc.push_str("[Graphics]\n");
+    for i in 0..57 {
+        doc.push_str(&format!("filename: g{i}.bmp\n15*$\n"));
+    }
+    let err = SubtitleRenderer::new(&doc)
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(err.contains("Too many attachments"), "{err}");
+    // And the byte accessor sums decoded data across sections.
+    let doc = "[Fonts]\nfontname: a.ttf\n15*$\n[Graphics]\nfilename: b.bmp\n15*$\n";
+    let parsed = subrass::parser::AssDocument::parse(doc).expect("parses");
+    assert_eq!(parsed.total_attachment_bytes(), 6);
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn aggregate_attachment_bytes_are_bounded() {
+    // Five 60 MiB attachments (each under the 64 MiB per-attachment
+    // cap) exceed the 256 MiB document budget and must fail. Native
+    // only: ~400 MiB of transient test data is too heavy for a
+    // browser test runner.
+    use subrass::parser::attachment::MAX_ATTACHMENT_BYTES;
+    // '!' (33) decodes to zero bytes; length must avoid len % 4 == 1.
+    let decoded_each = 60 * 1024 * 1024;
+    assert!(decoded_each < MAX_ATTACHMENT_BYTES);
+    let encoded_len = decoded_each / 3 * 4;
+    let payload = "!".repeat(encoded_len);
+    let mut doc = String::new();
+    for i in 0..5 {
+        doc.push_str("[Fonts]\n");
+        doc.push_str(&format!("fontname: big{i}.ttf\n"));
+        doc.push_str(&payload);
+        doc.push('\n');
+    }
+    let err = SubtitleRenderer::new(&doc)
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(err.contains("document budget"), "{err}");
+}
+
+#[test]
 fn invalid_video_sizes_are_rejected() {
     let mut renderer = SubtitleRenderer::new(&doc("hi")).expect("doc parses");
     for (w, h) in [(0, 144), (256, 0), (0, 0), (100_000, 100_000)] {

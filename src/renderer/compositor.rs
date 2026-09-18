@@ -1240,6 +1240,9 @@ impl Compositor {
                 resolved.complex_fade = None;
             }
             OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4) => {
+                // Alpha components wrap mod 256 (`as u8`), matching
+                // libass's `(uint8_t)` truncation; in-spec 0-255 values
+                // are unaffected, and opacity clamps to [0, 1] at use.
                 resolved.complex_fade = Some(ComplexFade {
                     a1: *a1 as u8,
                     a2: *a2 as u8,
@@ -2656,9 +2659,11 @@ impl Compositor {
                 },
             ) => {
                 // Band bottom is exclusive in VSFilter; our clips are
-                // inclusive, hence `bottom - 1`.
+                // inclusive, hence `bottom - 1`. Saturating: finite but
+                // absurd band edges (1e19) saturate the `as i64` casts,
+                // and plain `-/+ 1` would then overflow in debug builds.
                 let y0 = (top * scale_y).floor() as i64;
-                let y1 = (bottom * scale_y).ceil() as i64 - 1;
+                let y1 = ((bottom * scale_y).ceil() as i64).saturating_sub(1);
                 let w = buffer.width as i64;
                 if w > 0 {
                     let x1 = w.saturating_sub(1).min(i32::MAX as i64) as i32;
@@ -2667,7 +2672,12 @@ impl Compositor {
                     effects::apply_clip(buffer, (0, cy0, x1, cy1));
                 }
                 if fadeaway > 0.0 {
-                    effects::apply_fadeaway_y(buffer, y0, y0.max(y1 + 1), fadeaway * scale_y);
+                    effects::apply_fadeaway_y(
+                        buffer,
+                        y0,
+                        y0.max(y1.saturating_add(1)),
+                        fadeaway * scale_y,
+                    );
                 }
             }
             None => {}

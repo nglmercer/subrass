@@ -86,6 +86,13 @@ impl AssDocument {
         self.styles.len()
     }
 
+    /// Total decoded attachment bytes across the whole document.
+    /// Bounded by `MAX_TOTAL_ATTACHMENT_BYTES` at parse time; hosts can
+    /// use this to account for attachment memory before loading fonts.
+    pub fn total_attachment_bytes(&self) -> usize {
+        self.attachments.iter().map(|a| a.data.len()).sum()
+    }
+
     pub fn get_events_at_time(&self, time_ms: u64) -> Vec<&Event> {
         event::get_events_at_time(&self.events, time_ms)
     }
@@ -131,32 +138,113 @@ fn process_section(
         Section::ScriptInfo => {
             doc.script_info = script_info::parse_script_info(lines, first_content_line)?;
         }
-        // Repeated style/event sections append: earlier data is kept.
+        // Repeated style/event sections append: earlier data is kept,
+        // but every cap is enforced per document (checked), so extra
+        // sections cannot bypass the per-section limits.
         Section::V4PlusStyles => {
-            doc.styles
-                .extend(style::parse_styles(lines, first_content_line, false)?);
+            let parsed = style::parse_styles(lines, first_content_line, false)?;
+            check_global_count(
+                doc.styles.len(),
+                parsed.len(),
+                style::MAX_STYLES,
+                "styles",
+                first_content_line,
+            )?;
+            doc.styles.extend(parsed);
         }
         Section::V4Styles => {
-            doc.styles
-                .extend(style::parse_styles(lines, first_content_line, true)?);
+            let parsed = style::parse_styles(lines, first_content_line, true)?;
+            check_global_count(
+                doc.styles.len(),
+                parsed.len(),
+                style::MAX_STYLES,
+                "styles",
+                first_content_line,
+            )?;
+            doc.styles.extend(parsed);
         }
         Section::Events => {
-            doc.events
-                .extend(event::parse_events(lines, first_content_line)?);
+            let parsed = event::parse_events(lines, first_content_line)?;
+            check_global_count(
+                doc.events.len(),
+                parsed.len(),
+                event::MAX_EVENTS,
+                "events",
+                first_content_line,
+            )?;
+            doc.events.extend(parsed);
         }
         Section::Fonts => {
-            doc.attachments.extend(attachment::parse_attachments(
-                lines,
-                AttachmentKind::Font,
-                first_content_line,
-            )?);
+            let parsed =
+                attachment::parse_attachments(lines, AttachmentKind::Font, first_content_line)?;
+            check_global_attachments(doc, &parsed, first_content_line)?;
+            doc.attachments.extend(parsed);
         }
         Section::Graphics => {
-            doc.attachments.extend(attachment::parse_attachments(
-                lines,
-                AttachmentKind::Graphic,
-                first_content_line,
-            )?);
+            let parsed =
+                attachment::parse_attachments(lines, AttachmentKind::Graphic, first_content_line)?;
+            check_global_attachments(doc, &parsed, first_content_line)?;
+            doc.attachments.extend(parsed);
+        }
+    }
+    Ok(())
+}
+
+/// Enforce a per-document count cap across appended sections with
+/// checked arithmetic. Pure over lengths, so boundaries (including
+/// `usize` overflow) are unit-testable without huge inputs.
+fn check_global_count(
+    existing: usize,
+    additional: usize,
+    max: usize,
+    what: &str,
+    line: usize,
+) -> Result<usize, ParseError> {
+    let total = existing
+        .checked_add(additional)
+        .ok_or_else(|| ParseError::line_error(line, format!("Too many {what} (count overflow)")))?;
+    if total > max {
+        return Err(ParseError::line_error(
+            line,
+            format!("Too many {what} (limit {max} per document)"),
+        ));
+    }
+    Ok(total)
+}
+
+/// Enforce the document-wide attachment count and decoded-byte budget
+/// before appending a freshly parsed section. Both sums use checked
+/// arithmetic; pure over lengths except for the final byte summation.
+fn check_global_attachments(
+    doc: &AssDocument,
+    parsed: &[Attachment],
+    line: usize,
+) -> Result<(), ParseError> {
+    check_global_count(
+        doc.attachments.len(),
+        parsed.len(),
+        attachment::MAX_ATTACHMENTS,
+        "attachments",
+        line,
+    )?;
+    let mut total = 0usize;
+    for len in doc
+        .attachments
+        .iter()
+        .chain(parsed.iter())
+        .map(|a| a.data.len())
+    {
+        total = total.checked_add(len).ok_or_else(|| {
+            ParseError::line_error(line, "Attachment data size overflow".to_string())
+        })?;
+        if total > attachment::MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(ParseError::line_error(
+                line,
+                format!(
+                    "Total attachment data exceeds the {} MiB document budget",
+                    attachment::MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
+                ),
+            ));
         }
     }
     Ok(())
@@ -347,5 +435,51 @@ Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
         // Valid: metadata with no styles/events renders nothing.
         let doc = AssDocument::parse("[Script Info]\nTitle: empty\n").unwrap();
         assert!(doc.styles.is_empty() && doc.events.is_empty());
+    }
+
+    #[test]
+    fn test_global_count_boundaries() {
+        // Pure over lengths: exact cap passes, cap+1 fails, and usize
+        // overflow fails instead of wrapping around the cap.
+        assert_eq!(check_global_count(99, 1, 100, "things", 0).unwrap(), 100);
+        assert!(check_global_count(100, 1, 100, "things", 0).is_err());
+        assert!(check_global_count(usize::MAX, 1, 100, "things", 0).is_err());
+        assert!(check_global_count(usize::MAX, usize::MAX, 100, "things", 0).is_err());
+        assert_eq!(check_global_count(0, 0, 100, "things", 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_global_attachments_wiring() {
+        use crate::types::AttachmentKind;
+        // Small totals append fine and the byte accessor sums them.
+        let mut doc = AssDocument::new();
+        let one = Attachment {
+            kind: AttachmentKind::Font,
+            filename: "a.ttf".to_string(),
+            data: vec![0u8; 3],
+        };
+        let two = Attachment {
+            kind: AttachmentKind::Graphic,
+            filename: "b.bmp".to_string(),
+            data: vec![0u8; 5],
+        };
+        check_global_attachments(&doc, &[one.clone()], 0).unwrap();
+        doc.attachments.push(one);
+        check_global_attachments(&doc, &[two.clone()], 0).unwrap();
+        doc.attachments.push(two);
+        assert_eq!(doc.total_attachment_bytes(), 8);
+        // Count cap enforced across the accumulated vec: 257 empty
+        // attachments trip the count check before bytes matter.
+        let empty = Attachment {
+            kind: AttachmentKind::Font,
+            filename: "e.ttf".to_string(),
+            data: Vec::new(),
+        };
+        let many = vec![empty; attachment::MAX_ATTACHMENTS + 1];
+        let err = check_global_attachments(&AssDocument::new(), &many, 7)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line 7"), "{err}");
+        assert!(err.contains("Too many attachments"), "{err}");
     }
 }

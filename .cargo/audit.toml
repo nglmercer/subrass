@@ -1,0 +1,17 @@
+# cargo-audit configuration (plan #39).
+#
+# RUSTSEC-2026-0192: `ttf-parser` 0.25.1 is flagged `informational =
+# "unmaintained"` — the author archived the crate; this is NOT a
+# security vulnerability. Dependency path:
+#
+#   subrass -> ab_glyph 0.2.32 -> owned_ttf_parser 0.25.1 -> ttf-parser 0.25.1
+#
+# The advisory lists `patched = []`, so NO version upgrade of
+# ab_glyph / owned_ttf_parser / ttf-parser can resolve it. The only
+# removal path is migrating the font stack to the suggested
+# alternative (`skrifa`), which is a large rewrite and intentionally
+# out of scope. Ignored here explicitly with this rationale instead
+# of being silently suppressed.
+
+[advisories]
+ignore = ["RUSTSEC-2026-0192"]

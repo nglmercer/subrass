@@ -1,4 +1,4 @@
-use crate::renderer::buffer::{RenderBuffer, MAX_OUTLINE_RADIUS};
+use crate::renderer::buffer::{bitmap_has_pixels, finite_to_u32, RenderBuffer, MAX_OUTLINE_RADIUS};
 
 /// Apply shadow effect to a glyph bitmap
 #[allow(clippy::too_many_arguments)]
@@ -16,29 +16,44 @@ pub fn apply_shadow(
     if !shadow_x.is_finite() || !shadow_y.is_finite() {
         return;
     }
-    if glyph_bitmap.len() < glyph_width as usize * glyph_height as usize {
+    if !bitmap_has_pixels(glyph_bitmap, glyph_width, glyph_height) {
         return;
     }
     let sx = shadow_x.round().clamp(-4096.0, 4096.0) as i32;
     let sy = shadow_y.round().clamp(-4096.0, 4096.0) as i32;
+    let base_x = i64::from(x) + i64::from(sx);
+    let base_y = i64::from(y) + i64::from(sy);
+    if base_x < i64::from(i32::MIN) - 65_536
+        || base_x > i64::from(i32::MAX) + 65_536
+        || base_y < i64::from(i32::MIN) - 65_536
+        || base_y > i64::from(i32::MAX) + 65_536
+    {
+        return;
+    }
 
-    for gy in 0..glyph_height as i32 {
-        for gx in 0..glyph_width as i32 {
-            let alpha = glyph_bitmap[(gy as u32 * glyph_width + gx as u32) as usize];
+    for gy in 0..glyph_height {
+        for gx in 0..glyph_width {
+            let idx = (u64::from(gy) * u64::from(glyph_width) + u64::from(gx)) as usize;
+            let alpha = glyph_bitmap.get(idx).copied().unwrap_or(0);
             if alpha > 0 {
-                let px = x.saturating_add(gx).saturating_add(sx);
-                let py = y.saturating_add(gy).saturating_add(sy);
-                let a = (alpha as u32 * shadow_color[3] as u32 / 255) as u8;
-                if let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) {
-                    buffer.blend_pixel(
-                        px,
-                        py,
-                        shadow_color[0],
-                        shadow_color[1],
-                        shadow_color[2],
-                        a,
-                    );
+                let px_i64 = base_x + i64::from(gx);
+                let py_i64 = base_y + i64::from(gy);
+                if px_i64 < 0
+                    || py_i64 < 0
+                    || px_i64 >= i64::from(buffer.width)
+                    || py_i64 >= i64::from(buffer.height)
+                {
+                    continue;
                 }
+                let a = (u32::from(alpha) * u32::from(shadow_color[3]) / 255) as u8;
+                buffer.blend_pixel(
+                    px_i64 as u32,
+                    py_i64 as u32,
+                    shadow_color[0],
+                    shadow_color[1],
+                    shadow_color[2],
+                    a,
+                );
             }
         }
     }
@@ -60,45 +75,54 @@ pub fn apply_outline(
     if !outline_width.is_finite() || outline_width <= 0.0 {
         return;
     }
-    if glyph_bitmap.len() < glyph_width as usize * glyph_height as usize {
+    if !bitmap_has_pixels(glyph_bitmap, glyph_width, glyph_height) {
         return;
     }
     // Clamp: an unbounded radius turns the dx/dy loops into a hang.
-    let outline_width = outline_width.min(MAX_OUTLINE_RADIUS);
-    let radius = outline_width.ceil() as i32;
+    let outline_width = outline_width.clamp(0.0, MAX_OUTLINE_RADIUS);
+    let radius = outline_width.ceil().clamp(0.0, 4096.0) as i32;
     let max_dist = outline_width + 0.5;
     let max_dist_sq = max_dist * max_dist;
+    if !max_dist_sq.is_finite() || max_dist_sq <= 0.0 {
+        return;
+    }
     let inv_max_dist_sq = 1.0 / max_dist_sq;
-    let base_alpha = outline_color[3] as f64;
+    let base_alpha = f64::from(outline_color[3]);
 
-    for gy in 0..glyph_height as i32 {
-        for gx in 0..glyph_width as i32 {
-            let alpha = glyph_bitmap[(gy as u32 * glyph_width + gx as u32) as usize];
+    for gy in 0..glyph_height {
+        for gx in 0..glyph_width {
+            let idx = (u64::from(gy) * u64::from(glyph_width) + u64::from(gx)) as usize;
+            let alpha = glyph_bitmap.get(idx).copied().unwrap_or(0);
             if alpha > 0 {
-                let glyph_alpha_mult = alpha as f64 / 255.0;
+                let glyph_alpha_mult = f64::from(alpha) / 255.0;
                 for dy in -radius..=radius {
-                    let dy_sq = (dy * dy) as f64;
+                    let dy_sq = f64::from(dy) * f64::from(dy);
                     for dx in -radius..=radius {
-                        let dist_sq = dy_sq + (dx * dx) as f64;
+                        let dist_sq = dy_sq + f64::from(dx) * f64::from(dx);
                         if dist_sq <= max_dist_sq {
                             // Quadratic falloff: alpha = base * (1 - dist²/max²)
                             // Visually nearly identical to linear, but eliminates sqrt
                             let a =
                                 (base_alpha * glyph_alpha_mult * (1.0 - dist_sq * inv_max_dist_sq))
-                                    as u8;
+                                    .clamp(0.0, 255.0) as u8;
                             if a > 0 {
-                                let px = x.saturating_add(gx).saturating_add(dx);
-                                let py = y.saturating_add(gy).saturating_add(dy);
-                                if let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) {
-                                    buffer.blend_pixel(
-                                        px,
-                                        py,
-                                        outline_color[0],
-                                        outline_color[1],
-                                        outline_color[2],
-                                        a,
-                                    );
+                                let px_i64 = i64::from(x) + i64::from(gx) + i64::from(dx);
+                                let py_i64 = i64::from(y) + i64::from(gy) + i64::from(dy);
+                                if px_i64 < 0
+                                    || py_i64 < 0
+                                    || px_i64 >= i64::from(buffer.width)
+                                    || py_i64 >= i64::from(buffer.height)
+                                {
+                                    continue;
                                 }
+                                buffer.blend_pixel(
+                                    px_i64 as u32,
+                                    py_i64 as u32,
+                                    outline_color[0],
+                                    outline_color[1],
+                                    outline_color[2],
+                                    a,
+                                );
                             }
                         }
                     }
@@ -138,40 +162,50 @@ pub fn apply_outline_xy(
     } else {
         (ox, oy)
     };
-    if glyph_bitmap.len() < glyph_width as usize * glyph_height as usize {
+    if !bitmap_has_pixels(glyph_bitmap, glyph_width, glyph_height) {
         return;
     }
-    let radius_x = ox.ceil() as i32;
-    let radius_y = oy.ceil() as i32;
+    let radius_x = ox.ceil().clamp(0.0, 4096.0) as i32;
+    let radius_y = oy.ceil().clamp(0.0, 4096.0) as i32;
     let max_x = ox + 0.5;
     let max_y = oy + 0.5;
-    let base_alpha = outline_color[3] as f64;
+    if !max_x.is_finite() || !max_y.is_finite() || max_x <= 0.0 || max_y <= 0.0 {
+        return;
+    }
+    let base_alpha = f64::from(outline_color[3]);
 
-    for gy in 0..glyph_height as i32 {
-        for gx in 0..glyph_width as i32 {
-            let alpha = glyph_bitmap[(gy as u32 * glyph_width + gx as u32) as usize];
+    for gy in 0..glyph_height {
+        for gx in 0..glyph_width {
+            let idx = (u64::from(gy) * u64::from(glyph_width) + u64::from(gx)) as usize;
+            let alpha = glyph_bitmap.get(idx).copied().unwrap_or(0);
             if alpha > 0 {
-                let glyph_alpha_mult = alpha as f64 / 255.0;
+                let glyph_alpha_mult = f64::from(alpha) / 255.0;
                 for dy in -radius_y..=radius_y {
-                    let ny = dy as f64 / max_y;
+                    let ny = f64::from(dy) / max_y;
                     for dx in -radius_x..=radius_x {
-                        let nx = dx as f64 / max_x;
+                        let nx = f64::from(dx) / max_x;
                         let dist_sq = nx * nx + ny * ny;
                         if dist_sq <= 1.0 {
-                            let a = (base_alpha * glyph_alpha_mult * (1.0 - dist_sq)) as u8;
+                            let a = (base_alpha * glyph_alpha_mult * (1.0 - dist_sq))
+                                .clamp(0.0, 255.0) as u8;
                             if a > 0 {
-                                let px = x.saturating_add(gx).saturating_add(dx);
-                                let py = y.saturating_add(gy).saturating_add(dy);
-                                if let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) {
-                                    buffer.blend_pixel(
-                                        px,
-                                        py,
-                                        outline_color[0],
-                                        outline_color[1],
-                                        outline_color[2],
-                                        a,
-                                    );
+                                let px_i64 = i64::from(x) + i64::from(gx) + i64::from(dx);
+                                let py_i64 = i64::from(y) + i64::from(gy) + i64::from(dy);
+                                if px_i64 < 0
+                                    || py_i64 < 0
+                                    || px_i64 >= i64::from(buffer.width)
+                                    || py_i64 >= i64::from(buffer.height)
+                                {
+                                    continue;
                                 }
+                                buffer.blend_pixel(
+                                    px_i64 as u32,
+                                    py_i64 as u32,
+                                    outline_color[0],
+                                    outline_color[1],
+                                    outline_color[2],
+                                    a,
+                                );
                             }
                         }
                     }
@@ -198,7 +232,17 @@ pub fn apply_alpha_mask(buffer: &mut RenderBuffer, mask: &RenderBuffer, inverse:
     }
 }
 
-/// Apply border style 3 (opaque box background)
+/// Apply border style 3 (opaque box background): the event text block
+/// grown by outline-derived padding on every side, filled with
+/// `fill_color` as straight `[r, g, b, opacity]` (the caller passes
+/// the OUTLINE color per VSFilter/libass, converts ASS transparency,
+/// and applies event fade before calling).
+///
+/// Event margins are layout (they position the text), never decorative
+/// box padding. Padding comes from the effective outline so the box
+/// hugs the text the way the reference opaque box does, and honors
+/// `ScaledBorderAndShadow` through the caller's pre-scaled values.
+/// All geometry is saturating: extreme inputs clip, never wrap.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_opaque_box(
     buffer: &mut RenderBuffer,
@@ -206,27 +250,26 @@ pub fn apply_opaque_box(
     y: i32,
     width: i32,
     height: i32,
-    margin_l: i32,
-    margin_r: i32,
-    margin_v: i32,
-    back_color: [u8; 4],
-    _play_res_x: u32,
-    _play_res_y: u32,
+    pad_x: i32,
+    pad_y: i32,
+    fill_color: [u8; 4],
 ) {
-    let box_x = x.saturating_sub(margin_l);
-    let box_y = y.saturating_sub(margin_v);
-    let box_w = width.saturating_add(margin_l).saturating_add(margin_r);
-    let box_h = height.saturating_add(margin_v.saturating_mul(2));
+    let pad_x = pad_x.max(0);
+    let pad_y = pad_y.max(0);
+    let box_x = x.saturating_sub(pad_x);
+    let box_y = y.saturating_sub(pad_y);
+    let box_w = width.saturating_add(pad_x.saturating_mul(2));
+    let box_h = height.saturating_add(pad_y.saturating_mul(2));
 
     buffer.fill_rect(
         box_x,
         box_y,
         box_w,
         box_h,
-        back_color[0],
-        back_color[1],
-        back_color[2],
-        back_color[3],
+        fill_color[0],
+        fill_color[1],
+        fill_color[2],
+        fill_color[3],
     );
 }
 
@@ -258,12 +301,30 @@ fn clear_rect(buffer: &mut RenderBuffer, x0: i64, y0: i64, x1: i64, y1: i64) {
     if x0 > x1 || y0 > y1 {
         return;
     }
-    let stride = buffer.width as usize * 4;
+    let stride = match usize::try_from(buffer.width)
+        .ok()
+        .and_then(|w| w.checked_mul(4))
+    {
+        Some(s) => s,
+        None => return,
+    };
     for y in y0..=y1 {
-        let row_start = y as usize * stride;
-        let start = row_start + x0 as usize * 4;
-        let end = row_start + (x1 as usize + 1) * 4;
-        if end <= buffer.pixels.len() {
+        let (Ok(yu), Ok(x0u), Ok(x1u)) =
+            (usize::try_from(y), usize::try_from(x0), usize::try_from(x1))
+        else {
+            continue;
+        };
+        let (Some(row_start), Some(x1p1)) = (yu.checked_mul(stride), x1u.checked_add(1)) else {
+            continue;
+        };
+        let (Some(x0b), Some(x1b)) = (x0u.checked_mul(4), x1p1.checked_mul(4)) else {
+            continue;
+        };
+        let (Some(start), Some(end)) = (row_start.checked_add(x0b), row_start.checked_add(x1b))
+        else {
+            continue;
+        };
+        if end <= buffer.pixels.len() && start <= end {
             buffer.pixels[start..end].fill(0);
         }
     }
@@ -302,13 +363,92 @@ pub fn apply_inverse_clip(buffer: &mut RenderBuffer, clip_rect: (i32, i32, i32, 
     clear_rect(buffer, cx0, cy0, cx1, cy1);
 }
 
+/// Scale the alpha channel of every pixel in a row range by `mult` (0..=1).
+fn scale_alpha_rows(buffer: &mut RenderBuffer, y0: i64, y1: i64, mult: f64) {
+    if !(0.0..=1.0).contains(&mult) || buffer.width == 0 || buffer.height == 0 {
+        return;
+    }
+    let w = buffer.width as i64;
+    let h = buffer.height as i64;
+    for y in y0.max(0)..=y1.min(h - 1) {
+        let row = (y * w * 4) as usize;
+        for x in 0..w {
+            let idx = row + (x * 4) as usize + 3;
+            if let Some(a) = buffer.pixels.get_mut(idx) {
+                *a = (f64::from(*a) * mult).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Scale the alpha channel of every pixel in a column range by `mult` (0..=1).
+fn scale_alpha_cols(buffer: &mut RenderBuffer, x0: i64, x1: i64, mult: f64) {
+    if !(0.0..=1.0).contains(&mult) || buffer.width == 0 || buffer.height == 0 {
+        return;
+    }
+    let w = buffer.width as i64;
+    let h = buffer.height as i64;
+    for y in 0..h {
+        let row = (y * w * 4) as usize;
+        for x in x0.max(0)..=x1.min(w - 1) {
+            let idx = row + (x * 4) as usize + 3;
+            if let Some(a) = buffer.pixels.get_mut(idx) {
+                *a = (f64::from(*a) * mult).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Banner `fadeawaywidth`: linear alpha ramps at the left and right
+/// frame edges over `fade_px` output pixels each. Multipliers follow
+/// VSFilter exactly: left column `i` scales by `i / fade` (edge column
+/// fully transparent), right column `j` by `(w - j) / fade`.
+/// Overlapping ramps (fade wider than the frame) multiply, as in
+/// VSFilter. The loop runs over frame columns, so hostile fade widths
+/// stay O(frame). Non-positive widths are a no-op.
+pub fn apply_fadeaway_x(buffer: &mut RenderBuffer, fade_px: f64) {
+    if !fade_px.is_finite() || fade_px <= 0.0 || buffer.width == 0 {
+        return;
+    }
+    let w = buffer.width as i64;
+    let reach = fade_px.ceil().min(w as f64) as i64;
+    for i in 0..reach {
+        scale_alpha_cols(buffer, i, i, i as f64 / fade_px);
+        scale_alpha_cols(buffer, w - 1 - i, w - 1 - i, (i as f64 + 1.0) / fade_px);
+    }
+}
+
+/// Scroll `fadeawayheight`: linear alpha ramps at the band's top edge
+/// (row `top + i` scales by `i / fade`) and bottom edge (row
+/// `bottom - 1 - i` scales by `(i + 1) / fade`) over `fade_px` output
+/// pixels each. `bottom` is exclusive, matching VSFilter's band clip.
+/// The loop runs over affected rows only, so hostile fade heights stay
+/// O(frame). Non-positive heights are a no-op.
+pub fn apply_fadeaway_y(buffer: &mut RenderBuffer, top: i64, bottom: i64, fade_px: f64) {
+    if !fade_px.is_finite() || fade_px <= 0.0 || buffer.height == 0 {
+        return;
+    }
+    let h = buffer.height as i64;
+    let reach = fade_px.ceil().min(h as f64) as i64;
+    for i in 0..reach {
+        scale_alpha_rows(buffer, top + i, top + i, i as f64 / fade_px);
+        scale_alpha_rows(
+            buffer,
+            bottom - 1 - i,
+            bottom - 1 - i,
+            (i as f64 + 1.0) / fade_px,
+        );
+    }
+}
+
 /// Apply Gaussian-like blur to buffer. Non-finite or negative radii are
 /// ignored; large radii are clamped by [`RenderBuffer::box_blur`].
 pub fn apply_blur(buffer: &mut RenderBuffer, blur_radius: f64) {
     if !blur_radius.is_finite() || blur_radius <= 0.0 {
         return;
     }
-    let radius = (blur_radius * 2.0).round().clamp(0.0, u32::MAX as f64) as u32;
+    let radius =
+        finite_to_u32((blur_radius * 2.0).round().clamp(0.0, f64::from(u32::MAX))).unwrap_or(0);
     buffer.box_blur(radius);
 }
 
@@ -364,6 +504,51 @@ mod tests {
         let mut buf = RenderBuffer::new(w, h).unwrap();
         buf.pixels.fill(255);
         buf
+    }
+
+    #[test]
+    fn test_fadeaway_x_ramps_both_edges() {
+        let mut buf = solid_buffer(20, 4);
+        apply_fadeaway_x(&mut buf, 10.0);
+        let col = |x: u32| buf.get_pixel(x, 0)[3];
+        // VSFilter multipliers: left col i -> i/10, right col j -> (20-j)/10.
+        assert_eq!(col(0), 0);
+        assert_eq!(col(1), (255.0_f64 * 0.1).round() as u8);
+        assert_eq!(col(9), (255.0_f64 * 0.9).round() as u8);
+        assert_eq!(col(10), 255);
+        assert_eq!(col(19), (255.0_f64 * 0.1).round() as u8);
+        assert_eq!(col(18), (255.0_f64 * 0.2).round() as u8);
+    }
+
+    #[test]
+    fn test_fadeaway_y_ramps_band_edges() {
+        let mut buf = solid_buffer(4, 20);
+        apply_fadeaway_y(&mut buf, 4, 16, 6.0);
+        let row = |y: u32| buf.get_pixel(0, y)[3];
+        assert_eq!(row(4), 0);
+        assert_eq!(row(5), (255.0_f64 / 6.0).round() as u8);
+        assert_eq!(row(10), 255);
+        assert_eq!(row(15), (255.0_f64 / 6.0).round() as u8);
+        assert_eq!(row(14), (255.0_f64 * 2.0 / 6.0).round() as u8);
+        // Outside the band is untouched by the fade itself (clip clears it).
+        assert_eq!(row(0), 255);
+        assert_eq!(row(19), 255);
+    }
+
+    #[test]
+    fn test_fadeaway_hostile_values_safe() {
+        let mut buf = solid_buffer(8, 8);
+        // Terminates, no panic, no hang on extreme/degenerate input.
+        apply_fadeaway_x(&mut buf, 1e18);
+        apply_fadeaway_y(&mut buf, -100, 1_000_000, 1e18);
+        apply_fadeaway_x(&mut buf, f64::NAN);
+        apply_fadeaway_y(&mut buf, 0, 8, f64::INFINITY);
+        apply_fadeaway_x(&mut buf, 0.0);
+        apply_fadeaway_y(&mut buf, 0, 8, -5.0);
+        let mut empty = RenderBuffer::new(1, 1).unwrap();
+        empty.pixels.fill(0);
+        apply_fadeaway_x(&mut empty, 4.0);
+        apply_fadeaway_y(&mut empty, 0, 1, 4.0);
     }
 
     #[test]
@@ -538,10 +723,7 @@ mod tests {
             i32::MAX,
             i32::MAX,
             i32::MAX,
-            i32::MAX,
             [255, 255, 255, 255],
-            640,
-            480,
         );
         apply_opaque_box(
             &mut buf,
@@ -551,10 +733,27 @@ mod tests {
             i32::MAX,
             i32::MAX,
             i32::MAX,
-            i32::MAX,
             [255, 255, 255, 255],
-            640,
-            480,
         );
+    }
+
+    #[test]
+    fn test_apply_opaque_box_geometry_and_alpha() {
+        // Text block (4,4,8x8) + padding 2 -> box (2,2)-(13,13).
+        let mut buf = RenderBuffer::new(16, 16).unwrap();
+        apply_opaque_box(&mut buf, 4, 4, 8, 8, 2, 2, [255, 0, 0, 255]);
+        assert_eq!(buf.get_pixel(2, 2), [255, 0, 0, 255]);
+        assert_eq!(buf.get_pixel(13, 13), [255, 0, 0, 255]);
+        assert_eq!(buf.get_pixel(1, 1), [0, 0, 0, 0]);
+        assert_eq!(buf.get_pixel(14, 14), [0, 0, 0, 0]);
+        // Opacity 0 paints nothing (straight-alpha [3] slot).
+        let mut buf = RenderBuffer::new(16, 16).unwrap();
+        apply_opaque_box(&mut buf, 4, 4, 8, 8, 2, 2, [255, 0, 0, 0]);
+        assert!(buf.pixels.iter().all(|&p| p == 0));
+        // Negative padding clamps to a tight box.
+        let mut buf = RenderBuffer::new(16, 16).unwrap();
+        apply_opaque_box(&mut buf, 4, 4, 8, 8, -5, -5, [255, 0, 0, 255]);
+        assert_eq!(buf.get_pixel(4, 4), [255, 0, 0, 255]);
+        assert_eq!(buf.get_pixel(3, 3), [0, 0, 0, 0]);
     }
 }

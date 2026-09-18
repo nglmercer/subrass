@@ -295,6 +295,66 @@ mod tests {
         assert!(!event.is_active_at(4000));
     }
 
+    /// Plan #59: legacy SSA event rows (`Marked=`, no Layer).
+    #[test]
+    fn test_parse_ssa_marked_rows() {
+        // Canonical SSA order: Marked first, Text last.
+        let format: Vec<String> = [
+            "marked", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect",
+            "text",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for marked in ["Marked=0", "Marked=1"] {
+            let line = format!(
+                "Dialogue: {},0:00:01.00,0:00:04.00,Default,Actor,0,0,0,,Hello",
+                marked
+            );
+            let event = Event::parse_from_line_with_format(&line, Some(&format)).unwrap();
+            assert_eq!(event.event_type, EventType::Dialogue);
+            assert_eq!(event.layer, 0);
+            assert_eq!(event.name, "Actor");
+            assert_eq!(event.text, "Hello");
+        }
+    }
+
+    /// Plan #59: unusual field ordering, commas inside Text, and
+    /// SSA Effect values ride through by column name.
+    #[test]
+    fn test_parse_unusual_field_order() {
+        // Shuffled columns with Text still last; commas inside Text
+        // must not split into phantom columns.
+        let format: Vec<String> = ["text", "style", "end", "start", "marked"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Text-first violates the Text-last rule: rejected, not misparsed.
+        let line = "Dialogue: Hello,Default,0:00:04.00,0:00:01.00,Marked=0";
+        assert!(Event::parse_from_line_with_format(line, Some(&format)).is_err());
+
+        let format: Vec<String> = ["marked", "style", "end", "start", "name", "text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let line =
+            "Dialogue: Marked=0,Default,0:00:04.00,0:00:01.00,Actor,Hello, world, with commas";
+        let event = Event::parse_from_line_with_format(line, Some(&format)).unwrap();
+        assert_eq!(event.start, Time::new(0, 0, 1, 0));
+        assert_eq!(event.end, Time::new(0, 0, 4, 0));
+        assert_eq!(event.text, "Hello, world, with commas");
+        // Missing Layer/Marked and missing Text are errors.
+        let no_layer: Vec<String> = ["start", "end", "style", "text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(Event::parse_from_line_with_format(
+            "Dialogue: 0:00:01.00,0:00:04.00,Default,Hi",
+            Some(&no_layer)
+        )
+        .is_err());
+    }
+
     #[test]
     fn test_event_to_line() {
         let mut event = Event::new(EventType::Dialogue, "Default");

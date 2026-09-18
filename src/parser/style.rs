@@ -96,13 +96,34 @@ fn parse_style_line(
 
 /// Map style fields by column name, so both SSA [V4 Styles] and ASS
 /// [V4+ Styles] lines (even with reordered columns) parse correctly.
-/// Unknown columns are ignored; missing ones keep their defaults.
+/// Unknown columns are ignored; empty values keep their defaults.
+///
+/// Field-count policy: the value count must match the `Format:` column
+/// count exactly (a single trailing comma is forgiven), except that a
+/// missing trailing `Encoding` is tolerated for compatibility with
+/// real-world files that omit it. Anything else short — or any extra
+/// field — is a malformed line, not silent defaults.
 fn parse_style_by_columns(data: &str, columns: &[String]) -> Result<Style, String> {
-    let fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
+    let mut fields: Vec<&str> = data.split(',').map(|s| s.trim()).collect();
+    while fields.len() > columns.len() && fields.last().is_some_and(|s| s.is_empty()) {
+        fields.pop();
+    }
+    if fields.len() != columns.len() {
+        let missing_trailing_encoding =
+            fields.len() + 1 == columns.len() && columns.last().is_some_and(|c| c == "encoding");
+        if !missing_trailing_encoding {
+            return Err(format!(
+                "expected {} fields from Format, got {}",
+                columns.len(),
+                fields.len()
+            ));
+        }
+    }
     let mut style = Style::new("");
     let mut has_name = false;
 
     for (i, column) in columns.iter().enumerate() {
+        // Only a tolerated missing Encoding can be absent here.
         let Some(value) = fields.get(i) else {
             break;
         };
@@ -343,5 +364,47 @@ mod tests {
         let styles = parse_styles(&lines, 0, false).unwrap();
         assert_eq!(styles[0].font_size, 48.0);
         assert!(!styles[0].bold);
+    }
+
+    #[test]
+    fn test_style_field_count_mismatch_errors() {
+        let fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, Bold, ScaleX, Outline, Alignment, MarginL, Encoding";
+        // Too few (not just Encoding): useful expected/got error.
+        let lines = vec![fmt, "Style: Short,Arial,48"];
+        let err = parse_styles(&lines, 0, false).unwrap_err().to_string();
+        assert!(
+            err.contains("expected 10 fields from Format, got 3"),
+            "unexpected error: {err}"
+        );
+        // Too many: also an error.
+        let lines = vec![fmt, "Style: X,Arial,48,&H00FFFFFF&,-1,100,2,2,10,1,EXTRA"];
+        let err = parse_styles(&lines, 0, false).unwrap_err().to_string();
+        assert!(
+            err.contains("expected 10 fields from Format, got 11"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_style_missing_encoding_and_trailing_comma_tolerated() {
+        let fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, Bold, ScaleX, Outline, Alignment, MarginL, Encoding";
+        // Omitted trailing Encoding keeps the default.
+        let lines = vec![fmt, "Style: NoEnc,Arial,48,&H00FFFFFF&,-1,100,2,2,10"];
+        let styles = parse_styles(&lines, 0, false).unwrap();
+        assert_eq!(styles[0].encoding, 1);
+        // A single trailing comma is forgiven.
+        let lines = vec![fmt, "Style: Comma,Arial,48,&H00FFFFFF&,-1,100,2,2,10,1,"];
+        let styles = parse_styles(&lines, 0, false).unwrap();
+        assert_eq!(styles[0].name, "Comma");
+    }
+
+    #[test]
+    fn test_style_unknown_columns_ignored() {
+        let lines = vec![
+            "Format: Name, Fontname, FutureColumn, Fontsize",
+            "Style: U,Arial,whatever,44",
+        ];
+        let styles = parse_styles(&lines, 0, false).unwrap();
+        assert_eq!(styles[0].font_size, 44.0);
     }
 }

@@ -1,6 +1,8 @@
 use ab_glyph::{point, Font, FontArc, GlyphId, PxScale, ScaleFont};
 use std::collections::HashMap;
 
+use super::buffer::MAX_GLYPH_BITMAP_PIXELS;
+
 /// Cached rasterized glyph
 #[derive(Debug, Clone)]
 pub struct CachedGlyph {
@@ -120,10 +122,14 @@ impl GlyphCache {
         match outlined {
             Some(outlined) => {
                 let bounds = outlined.px_bounds();
-                let width = (bounds.width().max(0.0) as u32) + 2;
-                let height = (bounds.height().max(0.0) as u32) + 2;
+                let width = bounds.width().max(0.0) as u32 + 2;
+                let height = bounds.height().max(0.0) as u32 + 2;
 
-                if width == 0 || height == 0 {
+                // Hostile font sizes must degrade to an empty glyph: the
+                // u64 product can neither wrap (u32 `width * height` would)
+                // nor over-allocate past the shared glyph budget.
+                let pixels = u64::from(width) * u64::from(height);
+                if width == 0 || height == 0 || pixels == 0 || pixels > MAX_GLYPH_BITMAP_PIXELS {
                     return CachedGlyph {
                         bitmap: Vec::new(),
                         width: 0,
@@ -135,7 +141,7 @@ impl GlyphCache {
                 }
 
                 // Rasterize glyph
-                let mut bitmap = vec![0u8; (width * height) as usize];
+                let mut bitmap = vec![0u8; pixels as usize];
 
                 // Draw outline
                 outlined.draw(|x, y, coverage| {
@@ -286,6 +292,25 @@ mod tests {
         cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, true, false);
         cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, true);
         assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_huge_font_size_degrades_to_empty_glyph() {
+        // Hostile `\fs100000`-class sizes must return an empty (skipped)
+        // glyph in bounded time/memory — never wrap `width * height` or
+        // rasterize billions of pixels. Would take minutes / gigabytes
+        // without the cap.
+        let fm = manager_with_two_fonts();
+        let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
+        let mut cache = GlyphCache::new(64);
+        let gid = m0.font.glyph_id('A');
+        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 100_000.0, false, false);
+        assert_eq!((g.width, g.height), (0, 0));
+        assert!(g.bitmap.is_empty());
+        // Sane sizes still rasterize.
+        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        assert!(g.width > 0 && g.height > 0);
+        assert!(!g.bitmap.is_empty());
     }
 
     #[test]

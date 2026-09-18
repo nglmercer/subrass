@@ -15,6 +15,25 @@ use self::font::FontManager;
 use crate::parser::AssDocument;
 use crate::types::Event;
 
+/// Cap on collected diagnostics: each distinct message is kept once,
+/// and collection stops here so hostile documents cannot grow memory.
+const MAX_WARNINGS: usize = 64;
+
+/// True for characters in right-to-left scripts (Hebrew, Arabic
+/// blocks, RTL controls). Used only to emit a shaping diagnostic;
+/// layout itself stays left-to-right.
+fn is_right_to_left(ch: char) -> bool {
+    matches!(ch,
+        '\u{0590}'..='\u{05FF}'
+        | '\u{0600}'..='\u{06FF}'
+        | '\u{0750}'..='\u{077F}'
+        | '\u{08A0}'..='\u{08FF}'
+        | '\u{200F}' | '\u{202B}' | '\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FB50}'..='\u{FDFF}'
+        | '\u{FE70}'..='\u{FEFE}')
+}
+
 /// Main subtitle renderer
 pub struct SubtitleRenderer {
     doc: AssDocument,
@@ -25,10 +44,18 @@ pub struct SubtitleRenderer {
     ctx: Option<CanvasRenderingContext2d>,
     video_width: u32,
     video_height: u32,
+    /// Non-fatal diagnostics (e.g. embedded fonts that failed to load).
+    /// A malformed attachment *encoding* is a hard parse error, while a
+    /// decoded-but-unusable font only warns here and never breaks rendering.
+    warnings: Vec<String>,
 }
 
 impl SubtitleRenderer {
-    /// Create a new renderer from ASS content
+    /// Create a new renderer from ASS content.
+    ///
+    /// Fonts embedded in `[Fonts]` attachments are automatically decoded
+    /// and best-effort loaded (see [`Self::warnings`] for failures);
+    /// [`Self::load_font`] remains available for manual loading.
     pub fn new(ass_content: &str) -> Result<Self, String> {
         let doc =
             AssDocument::parse(ass_content).map_err(|e| format!("Failed to parse ASS: {}", e))?;
@@ -42,6 +69,7 @@ impl SubtitleRenderer {
             .map_err(|e| format!("Failed to load fallback font: {}", e))?;
 
         // Best-effort load of fonts embedded in the [Fonts] section
+        let mut warnings = Vec::new();
         for attachment in doc
             .attachments
             .iter()
@@ -57,12 +85,14 @@ impl SubtitleRenderer {
                     "Failed to load embedded font {}: {}",
                     attachment.filename, e
                 );
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(&msg.into());
-                #[cfg(not(target_arch = "wasm32"))]
-                eprintln!("{}", msg);
+                Self::push_warning(&mut warnings, msg);
             }
         }
+
+        // Static document diagnostics: unknown tags, unsupported
+        // effects, missing fonts, and right-to-left text. Collected
+        // once here (deduplicated, capped) rather than per frame.
+        Self::collect_doc_warnings(&doc, &font_manager, &mut warnings);
 
         let play_res_x = doc.script_info.play_res_x;
         let play_res_y = doc.script_info.play_res_y;
@@ -78,7 +108,85 @@ impl SubtitleRenderer {
             ctx: None,
             video_width: play_res_x,
             video_height: play_res_y,
+            warnings,
         })
+    }
+
+    /// Non-fatal diagnostics collected while building the renderer:
+    /// embedded fonts that decoded but failed to load, unsupported
+    /// override tags, unsupported `Effect` fields, requested fonts
+    /// with no loaded face (fallback is used), and right-to-left
+    /// text (laid out left-to-right). Each distinct message appears
+    /// once; the list is capped at [`MAX_WARNINGS`].
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Push a diagnostic unless already present; cap the list and
+    /// mirror to the console like before (API observability is new,
+    /// console logging is preserved).
+    fn push_warning(warnings: &mut Vec<String>, msg: String) {
+        if warnings.len() >= MAX_WARNINGS || warnings.contains(&msg) {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::warn_1(&msg.clone().into());
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!("{}", msg);
+        warnings.push(msg);
+    }
+
+    /// Scan the document for static compatibility issues.
+    fn collect_doc_warnings(
+        doc: &AssDocument,
+        font_manager: &FontManager,
+        warnings: &mut Vec<String>,
+    ) {
+        use crate::types::{LegacyEffect, OverrideTag};
+        let default_style = crate::types::Style::new("Default");
+        for event in &doc.events {
+            for tag in &event.parsed_tags {
+                if let OverrideTag::Unknown(name) = tag {
+                    Self::push_warning(
+                        warnings,
+                        format!("Unsupported override tag '\\{}' (ignored)", name),
+                    );
+                }
+            }
+            if !event.effect.trim().is_empty() && LegacyEffect::parse(&event.effect).is_none() {
+                Self::push_warning(
+                    warnings,
+                    format!(
+                        "Unsupported Effect field '{}' (renders as plain event)",
+                        event.effect.trim()
+                    ),
+                );
+            }
+            let style = doc
+                .find_style(&event.style)
+                .unwrap_or_else(|| doc.get_default_style().unwrap_or(&default_style));
+            let resolved = Compositor::resolve_style(style, event);
+            if !font_manager.has_family(&resolved.font_name) {
+                Self::push_warning(
+                    warnings,
+                    format!(
+                        "Font '{}' has no loaded face (using fallback)",
+                        resolved.font_name
+                    ),
+                );
+            }
+            if event.text.chars().any(is_right_to_left) {
+                Self::push_warning(
+                    warnings,
+                    "Right-to-left text is laid out left-to-right (no bidi shaping)".to_string(),
+                );
+            }
+        }
+    }
+
+    /// Number of loaded fonts (built-in fallback plus embedded/manual).
+    pub fn font_count(&self) -> usize {
+        self.font_manager.font_count()
     }
 
     /// Load a font from bytes
@@ -235,7 +343,111 @@ mod tests {
     #[test]
     fn test_embedded_garbage_font_does_not_break_renderer() {
         let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Fonts]\nfontname: Bad.ttf\n15*$\n";
-        assert!(SubtitleRenderer::new(ass).is_ok());
+        let renderer = SubtitleRenderer::new(ass).unwrap();
+        // Best-effort: construction succeeds but records a warning.
+        assert_eq!(renderer.font_count(), 1);
+        assert_eq!(renderer.warnings().len(), 1);
+        assert!(renderer.warnings()[0].contains("Bad.ttf"));
+    }
+
+    #[test]
+    fn test_valid_embedded_font_loads_automatically() {
+        // Round-trip the real fallback bytes through the attachment
+        // codec and confirm the renderer auto-loads them: no warnings,
+        // and the font count grows past the built-in fallback.
+        let encoded = crate::parser::attachment::encode_attachment_data(font::get_fallback_font());
+        let mut ass = String::from(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Fonts]\nfontname: Embedded.ttf\n",
+        );
+        for line in encoded.as_bytes().chunks(80) {
+            ass.push_str(std::str::from_utf8(line).unwrap());
+            ass.push('\n');
+        }
+        let renderer = SubtitleRenderer::new(&ass).unwrap();
+        assert!(renderer.warnings().is_empty());
+        assert_eq!(renderer.font_count(), 2);
+    }
+
+    /// Plan #58: one document exercising every diagnostic class.
+    #[test]
+    fn test_doc_warnings_cover_diagnostics() {
+        let ass = "[Script Info]\n\
+             ScriptType: v4.00+\n\
+             PlayResX: 640\n\
+             PlayResY: 480\n\
+             \n\
+             [V4+ Styles]\n\
+             Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+             Style: Default,MissingFamilyXYZ,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1\n\
+             \n\
+             [Events]\n\
+             Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+             Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,Karaoke;10,{\\frobnicator1}Hello\n\
+             Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,שלום\n";
+        let renderer = SubtitleRenderer::new(ass).unwrap();
+        let warnings = renderer.warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("frobnicator")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("Karaoke;10")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("MissingFamilyXYZ")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("Right-to-left")),
+            "{warnings:?}"
+        );
+        // Supported legacy effects and known tags stay silent.
+        let clean = "[Script Info]\n\
+             ScriptType: v4.00+\n\
+             PlayResX: 640\n\
+             PlayResY: 480\n\
+             \n\
+             [V4+ Styles]\n\
+             Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+             Style: Default,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1\n\
+             \n\
+             [Events]\n\
+             Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+             Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,Banner;20,{\\b1}Hello\n";
+        let renderer = SubtitleRenderer::new(clean).unwrap();
+        assert!(renderer.warnings().is_empty(), "{:?}", renderer.warnings());
+    }
+
+    /// Plan #58: diagnostics deduplicate and cap (hostile docs cannot
+    /// grow memory through warnings).
+    #[test]
+    fn test_doc_warnings_dedup_and_cap() {
+        let mut ass = String::from(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        );
+        for i in 0..200 {
+            ass.push_str(&format!(
+                "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,BogusEffect{i},{{\\unktag{i}Hi}}\n"
+            ));
+        }
+        let renderer = SubtitleRenderer::new(&ass).unwrap();
+        let warnings = renderer.warnings();
+        assert!(warnings.len() <= super::MAX_WARNINGS, "{}", warnings.len());
+        // Same unknown tag repeated collapses to one entry.
+        let mut ass2 = String::from(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        );
+        for _ in 0..50 {
+            ass2.push_str("Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\samebogus1}x\n");
+        }
+        let renderer = SubtitleRenderer::new(&ass2).unwrap();
+        let tag_warnings: Vec<_> = renderer
+            .warnings()
+            .iter()
+            .filter(|w| w.contains("samebogus"))
+            .collect();
+        assert_eq!(tag_warnings.len(), 1);
     }
 
     #[test]

@@ -3,6 +3,7 @@
   "module": "server.ts",
   "type": "module",
   "private": true,
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "build": "wasm-pack build --target web --out-dir pkg",
     "dev": "bun --watch server.ts",
@@ -11,7 +12,7 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "1.4.2",
     "typescript": "^5.5.0"
   }
 }

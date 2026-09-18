@@ -26,6 +26,8 @@ interface LoadWaiter {
 
 export interface WorkerBackendOptions {
   onError?: (message: string) => void;
+  /** Override worker construction (tests inject a fake). */
+  createWorker?: (url: URL) => Worker;
 }
 
 export class WorkerBackend implements RenderBackend {
@@ -63,20 +65,29 @@ export class WorkerBackend implements RenderBackend {
       // which app.ts needs for AssDoc. The worker has its own module
       // instance and initializes itself on the "init" message.
       await init();
-      this.readyPromise = new Promise<void>((resolve, reject) => {
-        this.readyResolve = resolve;
-        this.readyReject = reject;
-      });
-      const worker = new Worker(this.workerUrl, { type: "module" });
-      this.worker = worker;
-      worker.onmessage = (event: MessageEvent) => this.handleMessage(event.data);
-      worker.onerror = (event) => {
-        this.fail(new Error(`Render worker error: ${event.message}`));
-      };
-      worker.onmessageerror = () => {
-        this.fail(new Error("Render worker message deserialization failed"));
-      };
-      worker.postMessage({ kind: "init" });
+      if (this.disposed) {
+        // Disposed while wasm was initializing: never spawn the
+        // worker; init() below rejects on this promise instead.
+        this.readyPromise = Promise.reject(new Error("Worker backend disposed"));
+        this.readyPromise.catch(() => {});
+      } else {
+        this.readyPromise = new Promise<void>((resolve, reject) => {
+          this.readyResolve = resolve;
+          this.readyReject = reject;
+        });
+        const worker = this.options.createWorker
+          ? this.options.createWorker(this.workerUrl)
+          : new Worker(this.workerUrl, { type: "module" });
+        this.worker = worker;
+        worker.onmessage = (event: MessageEvent) => this.handleMessage(event.data);
+        worker.onerror = (event) => {
+          this.fail(new Error(`Render worker error: ${event.message}`));
+        };
+        worker.onmessageerror = () => {
+          this.fail(new Error("Render worker message deserialization failed"));
+        };
+        worker.postMessage({ kind: "init" });
+      }
     }
     await this.readyPromise;
     log("init() done — worker ready");
@@ -110,7 +121,14 @@ export class WorkerBackend implements RenderBackend {
 
   loadFont(name: string, data: Uint8Array): void {
     log("loadFont", { name, bytes: data.byteLength });
-    this.post({ kind: "loadFont", name, data }, [data.buffer]);
+    // Copy the exact view range: transferring `data.buffer` directly
+    // would detach the caller's whole pool and send the wrong bytes
+    // when `data` is a subarray view.
+    const buf = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength,
+    ) as ArrayBuffer;
+    this.post({ kind: "loadFont", name, data: buf }, [buf]);
   }
 
   renderFrame(timeMs: number): void {

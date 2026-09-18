@@ -1,0 +1,16 @@
+[Script Info]
+Title: corpus-sign
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Sign,DejaVu Sans,90,&H000040FF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,-8,1,2,2,5,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:06.00,Sign,,0,0,0,,{\pos(960,540)\frz-8\fax0.2\bord0\shad0\blur0.6\alpha&H20&}SHOP OPEN
+Dialogue: 0,0:00:00.00,0:00:06.00,Sign,,0,0,0,,{\move(200,900,1700,900,0,6000)\fad(300,300)\c&HFFFFFF&}Ticker {\i1}tape{\r} plain

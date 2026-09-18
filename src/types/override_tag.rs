@@ -9,19 +9,40 @@ pub struct TextSegment {
     pub tags: Vec<OverrideTag>,
 }
 
+/// Normalize a `\b` value to an ASS font weight (1..=1000):
+/// `\b0` is normal (400), `\b1` is bold (700), other values are
+/// explicit weights (clamped); negative values fall back to bold,
+/// matching the historical nonzero-means-bold behavior.
+pub fn ass_bold_weight(value: i32) -> u16 {
+    match value {
+        0 => 400,
+        1 => 700,
+        v if v < 0 => 700,
+        v => v.clamp(1, 1000) as u16,
+    }
+}
+
 /// Override tags in ASS text
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverrideTag {
     // Text formatting
-    Bold(bool),
+    /// `\b` as an ASS font weight: 400 = normal, 700 = bold.
+    /// See [`ass_bold_weight`] for the `\b0` / `\b1` mapping.
+    Bold(u16),
     Italic(bool),
     Underline(bool),
     StrikeOut(bool),
     FontName(String),
+    /// Absolute `\fs` size. Reference ASS has no relative `\fs+N`
+    /// form: `strtod`-based parsers read the sign as part of an
+    /// absolute number, so `\fs+10` means size 10. This parser matches
+    /// that behavior exactly.
     FontSize(f64),
-    FontSizeMultiplier(f64),
     LetterSpacing(f64),
-    Kerning(bool),
+    /// `\fe<id>` font encoding/charset override (stored in the resolved
+    /// style; shaping stays Unicode-based, so charset remapping itself
+    /// is partial — see the support matrix).
+    FontEncoding(i32),
     /// `\r` (reset to the event style) or `\rStyleName` (reset to a style).
     Reset(Option<String>),
 
@@ -99,6 +120,10 @@ pub enum OverrideTag {
     KaraokeDuration(u64),
     KaraokeSweep(u64),
     KaraokeOutline(u64),
+    /// `\kt<cs>`: explicit absolute start (centiseconds from line start)
+    /// for the next karaoke syllable. Sets the timeline clock without
+    /// starting a syllable; syllables still need `\k`-family durations.
+    KaraokeStart(u64),
 
     // Line breaks
     HardLineBreak,
@@ -177,9 +202,11 @@ impl OverrideTag {
         matches!(self, Self::Transform { .. })
     }
 
-    /// Line-global tags: line properties even when they appear textually
-    /// after the first visible segment (\pos, \move, \org, \clip, \iclip,
-    /// \fad, \fade). Segment style tags are everything else.
+    /// Line-global tags preserved across `\r`: the non-style line
+    /// properties (\pos, \move, \org, \clip, \iclip, \fad, \fade).
+    /// `\r` restores ordinary override state (fonts, colors, border,
+    /// rotation, karaoke, drawing mode, wrap, alignment, ...) to the
+    /// target style, so only these position/clip/fade properties survive.
     pub fn is_line_global(&self) -> bool {
         matches!(
             self,
@@ -196,12 +223,21 @@ impl OverrideTag {
         )
     }
 
+    /// Event-layout tags: line-global tags plus `\an` and `\q`, which
+    /// position and wrap the whole line no matter where they appear
+    /// textually (`Hello{\an7}` aligns the entire line). Unlike the
+    /// `\r`-preserved set, these are style-level layout properties:
+    /// event layout is determined once from the full line (last wins),
+    /// independent of `\r` segmentation.
+    pub fn is_event_layout(&self) -> bool {
+        self.is_line_global() || matches!(self, Self::Alignment(..) | Self::WrapStyle(..))
+    }
+
     /// True when every numeric payload is finite (layout-safe).
     fn all_finite(&self) -> bool {
         let f = |v: f64| v.is_finite();
         match self {
             Self::FontSize(v)
-            | Self::FontSizeMultiplier(v)
             | Self::LetterSpacing(v)
             | Self::RotationX(v)
             | Self::RotationY(v)
@@ -287,9 +323,12 @@ pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSeg
 
                 // Parse tags
                 for tag in parse_tag_group(&tag_str) {
-                    // Track drawing mode: any \pN with N > 0 enables it.
-                    if let OverrideTag::Drawing(n) = &tag {
-                        in_drawing_mode = *n > 0;
+                    // Track drawing mode: any \pN with N > 0 enables it,
+                    // and \r exits it (\p is not line-global).
+                    match &tag {
+                        OverrideTag::Drawing(n) => in_drawing_mode = *n > 0,
+                        OverrideTag::Reset(_) => in_drawing_mode = false,
+                        _ => {}
                     }
                     accumulated_tags.push(tag);
                 }
@@ -503,6 +542,8 @@ fn is_known_tag_name(name: &str) -> bool {
             | "K"
             | "kf"
             | "ko"
+            | "kt"
+            | "fe"
     )
 }
 
@@ -529,7 +570,7 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
     match name {
         "b" => {
             let val = params?.parse::<i32>().ok()?;
-            Some(OverrideTag::Bold(val != 0))
+            Some(OverrideTag::Bold(ass_bold_weight(val)))
         }
         "i" => {
             let val = params?.parse::<i32>().ok()?;
@@ -545,8 +586,14 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
         }
         "fn" => Some(OverrideTag::FontName(params?.trim().to_string())),
         "fs" => {
+            // Absolute size; a leading sign is part of the number
+            // (strtod-compatible: `\fs+10` is size 10, not relative).
             let val = params?.parse().ok()?;
             Some(OverrideTag::FontSize(val))
+        }
+        "fe" => {
+            let val = params?.parse().ok()?;
+            Some(OverrideTag::FontEncoding(val))
         }
         "fsp" => {
             let val = params?.parse().ok()?;
@@ -809,6 +856,10 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::KaraokeOutline(val))
         }
+        "kt" => {
+            let val = params?.parse().ok()?;
+            Some(OverrideTag::KaraokeStart(val))
+        }
         _ => {
             // Reconstruct tag string for unknown tags
             let tag_str = match params {
@@ -935,7 +986,28 @@ mod tests {
     fn test_parse_bold_tag() {
         let tags = OverrideTag::parse_from_text("{\\b1}Bold");
         assert_eq!(tags.len(), 1);
-        assert!(matches!(tags[0], OverrideTag::Bold(true)));
+        assert!(matches!(tags[0], OverrideTag::Bold(700)));
+    }
+
+    #[test]
+    fn test_bold_weight_mapping() {
+        // \b0 normal, \b1 bold, explicit numeric weights preserved.
+        for (text, want) in [
+            ("{\\b0}x", 400),
+            ("{\\b1}x", 700),
+            ("{\\b100}x", 100),
+            ("{\\b400}x", 400),
+            ("{\\b700}x", 700),
+            ("{\\b900}x", 900),
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Bold(w) if w == want),
+                "{text:?} -> {tags:?}, want Bold({want})"
+            );
+        }
+        assert_eq!(ass_bold_weight(-1), 700);
+        assert_eq!(ass_bold_weight(5000), 1000);
     }
 
     #[test]
@@ -966,7 +1038,7 @@ mod tests {
         let tag = OverrideTag::Position(100.0, 200.0);
         assert!(tag.is_positioning());
 
-        let tag = OverrideTag::Bold(true);
+        let tag = OverrideTag::Bold(700);
         assert!(!tag.is_positioning());
     }
 
@@ -1012,6 +1084,43 @@ mod tests {
         assert!(matches!(tags[1], OverrideTag::KaraokeSweep(60)));
         assert!(matches!(tags[2], OverrideTag::KaraokeSweep(70)));
         assert!(matches!(tags[3], OverrideTag::KaraokeOutline(80)));
+    }
+
+    #[test]
+    fn test_parse_kt_tag() {
+        let tags = OverrideTag::parse_from_text("{\\kt120}");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::KaraokeStart(120)));
+        // The k-splitter must not eat `kt`: mixed group in order.
+        let tags = OverrideTag::parse_from_text("{\\k50\\kt120\\kf30}");
+        assert_eq!(tags.len(), 3);
+        assert!(matches!(tags[0], OverrideTag::KaraokeDuration(50)));
+        assert!(matches!(tags[1], OverrideTag::KaraokeStart(120)));
+        assert!(matches!(tags[2], OverrideTag::KaraokeSweep(30)));
+    }
+
+    #[test]
+    fn test_parse_fe_tag() {
+        let tags = OverrideTag::parse_from_text("{\\fe128}Text");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::FontEncoding(128)));
+        let tags = OverrideTag::parse_from_text("{\\fe1}");
+        assert!(matches!(tags[0], OverrideTag::FontEncoding(1)));
+        // Missing value stays Unknown, never half-applied.
+        let tags = OverrideTag::parse_from_text("{\\fe}");
+        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+    }
+
+    #[test]
+    fn test_fs_sign_is_absolute_not_relative() {
+        // Reference ASS has no relative \fs form: strtod-compatible
+        // parsers read the sign as part of an absolute number.
+        let tags = OverrideTag::parse_from_text("{\\fs+10}x");
+        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == 10.0));
+        let tags = OverrideTag::parse_from_text("{\\fs-5}x");
+        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == -5.0));
+        let tags = OverrideTag::parse_from_text("{\\fs24}x");
+        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == 24.0));
     }
 
     #[test]
@@ -1210,8 +1319,44 @@ mod tests {
         assert!(OverrideTag::Position(0.0, 0.0).is_line_global());
         assert!(OverrideTag::Fade(0, 0).is_line_global());
         assert!(OverrideTag::Clip(0, 0, 1, 1).is_line_global());
-        assert!(!OverrideTag::Bold(true).is_line_global());
+        assert!(!OverrideTag::Bold(700).is_line_global());
         assert!(!OverrideTag::FontSize(10.0).is_line_global());
+        // \an and \q are event-layout (whole-line effect) but NOT
+        // \r-preserved: \r resets them like other style state.
+        assert!(!OverrideTag::Alignment(7).is_line_global());
+        assert!(!OverrideTag::WrapStyle(2).is_line_global());
+        assert!(!OverrideTag::Drawing(1).is_line_global());
+    }
+
+    #[test]
+    fn test_event_layout_classification() {
+        // Line-global tags are event-layout too.
+        assert!(OverrideTag::Position(0.0, 0.0).is_event_layout());
+        assert!(OverrideTag::Move(0.0, 0.0, 1.0, 1.0).is_event_layout());
+        assert!(OverrideTag::Origin(0.0, 0.0).is_event_layout());
+        assert!(OverrideTag::InverseClip(0, 0, 1, 1).is_event_layout());
+        assert!(OverrideTag::ComplexFade(0, 0, 0, 0, 0, 0, 0).is_event_layout());
+        // Plus whole-line layout properties.
+        assert!(OverrideTag::Alignment(7).is_event_layout());
+        assert!(OverrideTag::WrapStyle(2).is_event_layout());
+        // Segment-level tags are neither.
+        assert!(!OverrideTag::Bold(700).is_event_layout());
+        assert!(!OverrideTag::FontSize(10.0).is_event_layout());
+        assert!(!OverrideTag::KaraokeDuration(10).is_event_layout());
+        assert!(!OverrideTag::Drawing(1).is_event_layout());
+        assert!(!OverrideTag::Reset(None).is_event_layout());
+    }
+
+    #[test]
+    fn test_parse_reset_exits_drawing_mode() {
+        // \r re-enables break escapes swallowed in drawing mode.
+        let segs = parse_text_segments("{\\p1}m 0 0{\\r}a\\Nb");
+        let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert!(joined.contains('\n'), "{joined:?}");
+        // Without \r the break stays verbatim drawing text.
+        let segs = parse_text_segments("{\\p1}m 0 0 a\\Nb");
+        let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert!(!joined.contains('\n'), "{joined:?}");
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+    "generator":  "tests/reference/gen_references.ps1",
+    "ffmpeg_version":  "ffmpeg version 9.0.1-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "ffmpeg_buildconf_sha256":  "ec81720170793d0949365af16017ce17f3ce2fc1bae1043635d54c5b0700a1d4",
+    "font_file":  "fonts/DejaVuSans.ttf",
+    "font_sha256":  "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954",
+    "video":  [
+                  256,
+                  144
+              ],
+    "background":  "black (ass composited over opaque black)",
+    "generated_utc":  "2026-09-18T18:51:53.0931064Z",
+    "note":  "effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent)"
+}

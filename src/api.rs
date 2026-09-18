@@ -4,11 +4,18 @@ use web_sys::HtmlCanvasElement;
 use crate::parser::AssDocument;
 use crate::renderer::SubtitleRenderer as InnerRenderer;
 
+/// Largest integer a JS number / f64 represents exactly. Timestamps
+/// must fit here — `u64::MAX as f64` cannot be used as a boundary
+/// because it rounds up to 2^64, admitting unrepresentable values.
+const JS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
 /// Validate a millisecond timestamp coming from JavaScript.
 ///
-/// Rejects NaN, infinities, negatives, and values outside the u64 range
-/// instead of silently casting them (where `as u64` maps NaN/negatives
-/// to 0 and infinity to u64::MAX).
+/// Requires a finite value in `0..=Number.MAX_SAFE_INTEGER`.
+/// Fractional milliseconds are floored (matching media-timestamp callers
+/// that pass `currentTime * 1000`). Rejects NaN, infinities, negatives,
+/// and out-of-range values instead of silently casting them (where
+/// `as u64` maps NaN/negatives to 0 and infinity to u64::MAX).
 /// Plain-String validation so the logic is unit-testable on native
 /// targets (`JsError::new` requires wasm); the WASM boundary maps the
 /// message with `JsError::new`.
@@ -19,8 +26,8 @@ fn validate_millis(value: f64) -> Result<u64, String> {
     if value < 0.0 {
         return Err("Time must not be negative".to_string());
     }
-    if value > u64::MAX as f64 {
-        return Err("Time exceeds the representable range".to_string());
+    if value > JS_MAX_SAFE_INTEGER {
+        return Err("Time exceeds Number.MAX_SAFE_INTEGER milliseconds".to_string());
     }
     Ok(value as u64)
 }
@@ -330,6 +337,17 @@ impl SubtitleRenderer {
     pub fn clear_cache(&mut self) {
         self.inner.clear_cache();
     }
+
+    /// Non-fatal renderer diagnostics (e.g. embedded fonts that failed
+    /// to load) as a JS string array.
+    pub fn get_warnings(&self) -> Vec<String> {
+        self.inner.warnings().to_vec()
+    }
+
+    /// Number of loaded fonts (built-in fallback plus embedded/manual).
+    pub fn get_font_count(&self) -> usize {
+        self.inner.font_count()
+    }
 }
 
 #[cfg(test)]
@@ -339,9 +357,11 @@ mod tests {
     #[test]
     fn test_validate_millis_accepts_normal_values() {
         assert_eq!(validate_millis(0.0).unwrap(), 0);
+        assert_eq!(validate_millis(1.0).unwrap(), 1);
         assert_eq!(validate_millis(1500.0).unwrap(), 1500);
-        // Fractional millis truncate toward zero like a cast
+        // Fractional millis floor (media timestamps are fractional).
         assert_eq!(validate_millis(1500.9).unwrap(), 1500);
+        assert_eq!(validate_millis(0.9).unwrap(), 0);
     }
 
     #[test]
@@ -352,5 +372,18 @@ mod tests {
         assert!(validate_millis(-1.0).is_err());
         assert!(validate_millis(-0.5).is_err());
         assert!(validate_millis(1e30).is_err());
+    }
+
+    #[test]
+    fn test_validate_millis_safe_integer_boundary() {
+        // MAX_SAFE_INTEGER is the exact upper bound (u64::MAX-as-f64
+        // would round to 2^64 and admit unrepresentable values).
+        assert_eq!(
+            validate_millis(JS_MAX_SAFE_INTEGER).unwrap(),
+            9_007_199_254_740_991u64
+        );
+        assert!(validate_millis(JS_MAX_SAFE_INTEGER + 1.0).is_err());
+        assert!(validate_millis(18_446_744_073_709_516_160.0).is_err()); // 2^64
+        assert!(validate_millis(u64::MAX as f64).is_err());
     }
 }

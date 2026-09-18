@@ -87,6 +87,13 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         if (!renderer) throw new Error("No subtitle file loaded");
         renderer.render_frame(msg.timeMs ?? 0);
         const size = renderer.get_frame_size();
+        // Frame copies (plan #82 audit): `get_frame_data()` copies the
+        // WASM buffer into a fresh JS Uint8Array (required — WASM
+        // linear memory cannot be transferred and may grow, so no
+        // long-lived view into it is ever kept). The fresh buffer is
+        // then *transferred* (zero-copy move, not a copy) to the main
+        // thread, which copies it once more into ImageData for canvas
+        // painting. Total: one required WASM→JS copy per frame.
         const bytes = renderer.get_frame_data();
         self.postMessage(
           { kind: "frame", requestId: msg.requestId, w: size[0], h: size[1], bytes: bytes.buffer },

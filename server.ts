@@ -4,7 +4,15 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 
-const PORT = Number(process.env.PORT ?? 8001);
+/// Default dev-server port (build.sh and docs must agree with this).
+export const DEFAULT_PORT = 8001;
+
+/// Resolve the listen port: `$PORT` when set, otherwise [DEFAULT_PORT].
+export function resolvePort(envPort: string | undefined): number {
+  return Number(envPort ?? DEFAULT_PORT);
+}
+
+const PORT = resolvePort(process.env.PORT);
 const DEMO_INDEX = "./demo/index.html";
 
 const MIME_TYPES: Record<string, string> = {
@@ -34,6 +42,12 @@ const EXAMPLE_PAGES = new Map([
   ["/basic", "./demo/basic/index.html"],
   ["/worker", "./demo/worker/index.html"],
 ]);
+
+/// Content type for a file extension (leading dot, lowercase).
+/// Unknown extensions fall back to `application/octet-stream`.
+export function mimeFor(ext: string): string {
+  return MIME_TYPES[ext] ?? "application/octet-stream";
+}
 
 const DEMO_ROOT = resolve("./demo");
 const PKG_ROOT = resolve("./pkg");
@@ -83,7 +97,7 @@ const server = createServer(async (req, res) => {
         return;
       }
       const data = await readFile(filePath);
-      res.writeHead(200, { "Content-Type": MIME_TYPES[extname(filePath)] ?? "application/octet-stream" });
+      res.writeHead(200, { "Content-Type": mimeFor(extname(filePath)) });
       res.end(data);
       return;
     }
@@ -97,7 +111,7 @@ const server = createServer(async (req, res) => {
         return;
       }
       const data = await readFile(filePath);
-      res.writeHead(200, { "Content-Type": MIME_TYPES[extname(filePath)] ?? "application/octet-stream" });
+      res.writeHead(200, { "Content-Type": mimeFor(extname(filePath)) });
       res.end(data);
       return;
     }
@@ -121,7 +135,7 @@ const server = createServer(async (req, res) => {
     // Subtitle sample
     if (pathname === "/sample.ass") {
       const data = await readFile("./demo/sample.ass");
-      res.writeHead(200, { "Content-Type": MIME_TYPES[".ass"] });
+      res.writeHead(200, { "Content-Type": mimeFor(".ass") });
       res.end(data);
       return;
     }

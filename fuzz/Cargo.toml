@@ -1,0 +1,30 @@
+[package]
+name = "subrass-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+subrass = { path = ".." }
+
+[[bin]]
+name = "parse_ass"
+path = "fuzz_targets/parse_ass.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "drawing"
+path = "fuzz_targets/drawing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false

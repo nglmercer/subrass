@@ -1,4 +1,9 @@
 /target
+/fuzz/target/
+/.tmpbox/
+*.rgba
+!/tests/golden/*.rgba
+!/tests/reference/*.rgba
 /pkg
 /node_modules
 *.wasm

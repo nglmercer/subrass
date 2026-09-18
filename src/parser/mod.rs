@@ -228,8 +228,10 @@ Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
 
     #[test]
     fn test_parse_embedded_fonts_and_graphics() {
-        // "ABC" encodes to "15*$" in the SSA uuencode variant
-        let ass = "[Script Info]\nScriptType: v4.00+\n\n[Fonts]\nfontname: Test.ttf\n15*$\n\n[Graphics]\nfontname: logo.bmp\n15*$\n";
+        // "ABC" encodes to "15*$" in the SSA uuencode variant.
+        // Headers are section-aware: fontname: in [Fonts],
+        // filename: in [Graphics].
+        let ass = "[Script Info]\nScriptType: v4.00+\n\n[Fonts]\nfontname: Test.ttf\n15*$\n\n[Graphics]\nfilename: logo.bmp\n15*$\n";
         let doc = AssDocument::parse(ass).unwrap();
 
         assert_eq!(doc.attachments.len(), 2);

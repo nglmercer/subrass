@@ -1,13 +1,13 @@
-use super::buffer::RenderBuffer;
+use super::buffer::{add_coord, effective_shear, finite_to_i32, RenderBuffer};
 use super::effects;
 use super::font::FontManager;
 use super::glyph_cache::GlyphCache;
 use super::shaper::TextShaper;
 use crate::types::color::Color;
 use crate::types::override_tag::{parse_text_segments, parse_text_segments_with_wrap, TextSegment};
-use crate::types::{Event, EventType, OverrideTag, Style};
+use crate::types::{Event, EventType, LegacyEffect, OverrideTag, Style};
 use crate::utils::Matrix3x3;
-use ab_glyph::FontArc;
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use std::borrow::Cow;
 
 /// Resolved style with all overrides applied
@@ -16,12 +16,16 @@ pub struct ResolvedStyle {
     pub base_style: Style,
     pub font_name: String,
     pub font_size: f64,
+    /// Font encoding/charset id (`\fe`, default from the style).
+    /// Stored and reset correctly; glyph selection stays Unicode-based.
+    pub font_encoding: i32,
     pub color: Color,
     pub secondary_color: Color,
     pub outline_color: Color,
     pub shadow_color: Color,
     pub back_color: Color,
-    pub bold: bool,
+    /// ASS font weight: 400 = normal, 700 = bold (from `\b` or the style).
+    pub font_weight: u16,
     pub italic: bool,
     pub underline: bool,
     pub strike_out: bool,
@@ -69,7 +73,12 @@ pub struct VectorClip {
     pub drawing: String,
 }
 
-/// Line-global state preserved across `\r` resets.
+/// Line-global state preserved across `\r` resets: exactly the
+/// non-style line properties (`\pos`, `\move`, `\org`, `\clip`,
+/// `\iclip`, `\fad`, `\fade`). Everything else — including `\p`
+/// drawing mode, `\pbo`, fonts, colors, border/shadow, rotation,
+/// karaoke, wrap, and alignment — resets to the target style, because
+/// `\r` restores ordinary override state for following text.
 struct LineGlobalKeep {
     position: Option<(f64, f64)>,
     origin: Option<(f64, f64)>,
@@ -81,7 +90,6 @@ struct LineGlobalKeep {
     fade_in: u64,
     fade_out: u64,
     complex_fade: Option<ComplexFade>,
-    drawing_mode: i32,
 }
 
 impl LineGlobalKeep {
@@ -97,7 +105,6 @@ impl LineGlobalKeep {
             fade_in: resolved.fade_in,
             fade_out: resolved.fade_out,
             complex_fade: resolved.complex_fade.clone(),
-            drawing_mode: resolved.drawing_mode,
         }
     }
 
@@ -112,7 +119,6 @@ impl LineGlobalKeep {
         resolved.fade_in = self.fade_in;
         resolved.fade_out = self.fade_out;
         resolved.complex_fade = self.complex_fade;
-        resolved.drawing_mode = self.drawing_mode;
     }
 }
 
@@ -161,11 +167,15 @@ struct WrapWord {
 /// independently wrapped runs. `\n` elsewhere acts as a space. Drawing
 /// runs pass through verbatim and are never wrapped. Words wider than
 /// `max_width` stay on their own line (no character-level splitting).
+///
+/// `fonts` is the measurement chain (primary first): word widths use
+/// the same per-glyph fallback cascade as shaping, so wrap decisions
+/// match rendered widths even when the primary lacks characters.
 fn wrap_event_text(
     text: &str,
     wrap_style: i32,
     max_width: f64,
-    font: &FontArc,
+    fonts: &[&FontArc],
     font_size: f64,
     spacing: f64,
 ) -> String {
@@ -173,19 +183,36 @@ fn wrap_event_text(
         return text.to_string();
     }
 
-    /// Scan a `{...}` group for a `\pN` drawing-mode switch.
-    fn drawing_mode_in_group(group: &str) -> Option<i32> {
-        let mut rest = group;
-        while let Some(pos) = rest.find("\\p") {
-            rest = &rest[pos + 2..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if !digits.is_empty() {
-                if let Ok(mode) = digits.parse::<i32>() {
-                    return Some(mode);
+    /// Drawing state after a `{...}` group: the last of `\pN` / `\r`
+    /// wins in textual order. `\r` exits drawing mode because `\p` is
+    /// not line-global; `{\r\p1}` stays drawing, `{\p1\r}` does not.
+    fn drawing_state_after_group(group: &str) -> Option<bool> {
+        let bytes = group.as_bytes();
+        let mut state: Option<bool> = None;
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] == b'\\' {
+                let c = bytes[i + 1];
+                if c == b'p' {
+                    // `\pN` with digits; `\pbo` has none and is skipped.
+                    let mut j = i + 2;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > i + 2 {
+                        if let Ok(mode) = group[i + 2..j].parse::<i32>() {
+                            state = Some(mode > 0);
+                        }
+                        i = j;
+                        continue;
+                    }
+                } else if c == b'r' {
+                    state = Some(false);
                 }
             }
+            i += 1;
         }
-        None
+        state
     }
 
     // Tokenize into words (with pending tag prefixes) and hard breaks.
@@ -205,7 +232,7 @@ fn wrap_event_text(
                 return;
             }
             let has_text = !word.is_empty();
-            let width = TextShaper::measure_text(word, font, font_size, spacing);
+            let width = TextShaper::measure_text_with_fallback(word, fonts, font_size, spacing);
             words.push(WrapWord {
                 prefix: std::mem::take(prefix),
                 text: std::mem::take(word),
@@ -238,8 +265,8 @@ fn wrap_event_text(
                     flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
                     prefix.push_str(&group);
                 }
-                if let Some(mode) = drawing_mode_in_group(&group) {
-                    in_drawing = mode > 0;
+                if let Some(drawing) = drawing_state_after_group(&group) {
+                    in_drawing = drawing;
                 }
             }
             '\\' if in_drawing => {
@@ -303,7 +330,7 @@ fn wrap_event_text(
         });
     }
 
-    let space_width = TextShaper::measure_text(" ", font, font_size, spacing);
+    let space_width = TextShaper::measure_text_with_fallback(" ", fonts, font_size, spacing);
 
     // Wrap each explicit-line run independently, then rejoin with breaks.
     let mut out = String::with_capacity(text.len() + 16);
@@ -377,17 +404,22 @@ fn greedy_wrap_lines(
     lines
 }
 
-/// Smart line grouping (wrap style 0): choose breaks to minimize total
-/// raggedness (squared leftover per line, last line free), which balances
-/// lines with the top line widest. Overlong single words keep their own
-/// line. Dynamic program over word count — subtitle runs are short.
+/// Smart line grouping (wrap style 0): greedy fill, then pairwise
+/// rebalance (libass `wrap_lines_smart`: move the last word of a line
+/// to the next line while it reduces the pair's length difference).
+/// This balances lines instead of minimizing leftover (a 224/140
+/// greedy split rebalances toward even halves, as in libass).
+/// Overlong single words keep their own line. Words only ever move
+/// to later lines, so the loop always terminates.
 fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec<Vec<usize>> {
-    let n = words.len();
-    // Width of words[i..j] as one line (prefix-only entries are free).
-    let span_width = |i: usize, j: usize| -> f64 {
+    let mut lines = greedy_wrap_lines(words, false, max_width, space_width);
+    // Trimmed width of one line (prefix-only entries are free, spaces
+    // only between text words).
+    let line_len = |line: &[usize]| -> f64 {
         let mut w = 0.0_f64;
         let mut text_words = 0usize;
-        for word in &words[i..j] {
+        for &idx in line {
+            let word = &words[idx];
             if word.text.is_empty() && word.width == 0.0 {
                 continue;
             }
@@ -399,58 +431,34 @@ fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec
         }
         w
     };
-    // dp[j] = (min cost for words[0..j], best break point)
-    let mut dp: Vec<(f64, usize)> = vec![(f64::INFINITY, 0); n + 1];
-    dp[0] = (0.0, 0);
-    for j in 1..=n {
-        for i in 0..j {
-            if dp[i].0.is_infinite() {
-                continue;
-            }
-            let w = span_width(i, j);
-            let is_last = j == n;
-            let cost = if w <= max_width {
-                // Last line is free: ragged bottom is expected.
-                if is_last {
-                    dp[i].0
-                } else {
-                    let slack = max_width - w;
-                    dp[i].0 + slack * slack
+    loop {
+        let mut moved = false;
+        let mut i = 0usize;
+        while i + 1 < lines.len() {
+            // Never empty a line (merging breaks is never beneficial).
+            if lines[i].len() > 1 {
+                let l1 = line_len(&lines[i]);
+                let l2 = line_len(&lines[i + 1]);
+                let mut new_l1 = lines[i].clone();
+                let w = new_l1.pop().expect("len > 1");
+                let mut new_l2 = Vec::with_capacity(lines[i + 1].len() + 1);
+                new_l2.push(w);
+                new_l2.extend_from_slice(&lines[i + 1]);
+                let l1_new = line_len(&new_l1);
+                let l2_new = line_len(&new_l2);
+                if (l1_new - l2_new).abs() < (l1 - l2).abs() {
+                    lines[i] = new_l1;
+                    lines[i + 1] = new_l2;
+                    moved = true;
                 }
-            } else if j - i == 1 {
-                // Single overlong word: allowed, penalized by overflow.
-                let over = w - max_width;
-                dp[i].0 + over * over + 1e12
-            } else {
-                continue;
-            };
-            // Strictly-less keeps the earliest (top-widest) break on ties.
-            if cost < dp[j].0 {
-                dp[j] = (cost, i);
             }
+            i += 1;
         }
-    }
-    // Fall back to greedy if nothing fit (should not happen: single
-    // words always fit), then reconstruct line breaks.
-    if dp[n].0.is_infinite() {
-        return greedy_wrap_lines(words, false, max_width, space_width);
-    }
-    let mut breaks = vec![n];
-    let mut j = n;
-    while j > 0 {
-        let i = dp[j].1;
-        breaks.push(i);
-        if i >= j {
+        if !moved {
             break;
         }
-        j = i;
     }
-    breaks.reverse();
-    breaks
-        .windows(2)
-        .map(|w| (w[0]..w[1]).collect::<Vec<usize>>())
-        .filter(|line| !line.is_empty())
-        .collect()
+    lines
 }
 
 /// Wrap one run of words and append the result to `out`.
@@ -465,8 +473,9 @@ fn render_wrapped_run(
         return;
     }
 
-    // Style 0 balances lines (top widest); 1 fills greedily from the top;
-    // 3 fills greedily from the bottom (bottom widest).
+    // Style 0 fills greedily, then rebalances pairs toward even halves
+    // (libass); 1 fills greedily from the top; 3 fills greedily from
+    // the bottom (bottom widest).
     let lines: Vec<Vec<usize>> = if wrap_style == 0 {
         smart_wrap_lines(words, max_width, space_width)
     } else {
@@ -501,7 +510,7 @@ enum KaraokeKind {
     Hard,
     /// `\K` / `\kf` — left-to-right color sweep over the syllable
     Sweep,
-    /// `\ko` — outline hidden once the syllable starts
+    /// `\ko` — outline hidden before the syllable starts, visible from start
     Outline,
 }
 
@@ -548,22 +557,31 @@ fn karaoke_is_primary(syl: &KaraokeSyllable, elapsed_ms: u64) -> bool {
     elapsed_ms >= syl.start_ms
 }
 
-/// `\ko` outline rule: the outline is suppressed once the syllable begins.
+/// `\ko` outline rule: the outline is suppressed *before* the syllable
+/// begins (`elapsed < start`, secondary fill + no outline) and becomes
+/// visible from the exact start instant (primary fill + normal outline).
 fn karaoke_outline_suppressed(elapsed_ms: u64, start_ms: u64) -> bool {
-    elapsed_ms >= start_ms
+    elapsed_ms < start_ms
 }
 
 /// Build the karaoke syllable timeline for segmented event text.
+///
+/// `seg_widths` must hold the already-resolved layout width of each
+/// segment (shaped text width or drawing width, in the same space the
+/// renderer consumes), so karaoke timing widths match actual rendering
+/// even with inline `\fs`/`\fn`/`\fscx`/`\fsp` changes.
 ///
 /// Returns the syllables (times in ms relative to event start, with
 /// measured widths) and, per segment, the index of the syllable it belongs
 /// to (`None` for text before the first karaoke tag). Segments after a
 /// karaoke tag keep belonging to that syllable until the next karaoke tag.
+///
+/// Timing is relative-duration based (`\k` / `\K` / `\kf` / `\ko`
+/// advance the clock), except `\kt<cs>` sets the clock to an explicit
+/// absolute start for the next syllable (gaps and overlaps allowed).
 fn build_karaoke_timeline(
     segments: &[TextSegment],
-    font: &FontArc,
-    font_size: f64,
-    spacing: f64,
+    seg_widths: &[f64],
 ) -> (Vec<KaraokeSyllable>, Vec<Option<usize>>) {
     let mut syllables: Vec<KaraokeSyllable> = Vec::new();
     let mut seg_syllable: Vec<Option<usize>> = vec![None; segments.len()];
@@ -577,30 +595,36 @@ fn build_karaoke_timeline(
         let new_tags = &segment.tags[from..];
         prev_tag_count = segment.tags.len();
 
-        let mut started = None;
+        // Tags apply in order within the group: `\kt` sets the
+        // absolute clock, and a `\k`-family tag records a syllable at
+        // the clock then current (last karaoke tag in the group wins).
+        // A trailing `\kt` past the syllable end sticks for the next
+        // syllable (explicit gaps/overlaps allowed).
+        let mut started: Option<(KaraokeKind, u64, u64)> = None;
         for tag in new_tags {
             match tag {
-                OverrideTag::KaraokeDuration(d) => started = Some((KaraokeKind::Hard, *d)),
-                OverrideTag::KaraokeSweep(d) => started = Some((KaraokeKind::Sweep, *d)),
-                OverrideTag::KaraokeOutline(d) => started = Some((KaraokeKind::Outline, *d)),
+                OverrideTag::KaraokeStart(t) => clock = t.saturating_mul(10),
+                OverrideTag::KaraokeDuration(d) => started = Some((KaraokeKind::Hard, *d, clock)),
+                OverrideTag::KaraokeSweep(d) => started = Some((KaraokeKind::Sweep, *d, clock)),
+                OverrideTag::KaraokeOutline(d) => started = Some((KaraokeKind::Outline, *d, clock)),
                 _ => {}
             }
         }
 
-        if let Some((kind, dur_cs)) = started {
+        if let Some((kind, dur_cs, start_ms)) = started {
+            let dur_ms = dur_cs.saturating_mul(10);
             syllables.push(KaraokeSyllable {
-                start_ms: clock,
-                dur_ms: dur_cs.saturating_mul(10),
+                start_ms,
+                dur_ms,
                 kind,
                 width: 0.0,
             });
-            clock = clock.saturating_add(dur_cs.saturating_mul(10));
+            clock = clock.max(start_ms.saturating_add(dur_ms));
         }
 
         if !syllables.is_empty() {
             let idx = syllables.len() - 1;
-            syllables[idx].width +=
-                TextShaper::measure_text(&segment.text, font, font_size, spacing);
+            syllables[idx].width += seg_widths.get(i).copied().unwrap_or(0.0).max(0.0);
             seg_syllable[i] = Some(idx);
         }
     }
@@ -618,14 +642,21 @@ struct DrawingLayout {
     height: f64,
 }
 
-/// One laid-out segment: resolved style, shaped glyphs, font identity,
+/// One face in a segment's fallback chain (primary first): the
+/// stable font id plus the faux synthesis its glyphs require.
+#[derive(Debug, Clone, Copy)]
+struct LayoutFace {
+    id: usize,
+    faux_bold: bool,
+    faux_italic: bool,
+}
+
+/// One laid-out segment: resolved style, shaped glyphs, fallback faces,
 /// and optional drawing geometry.
 struct LayoutItem {
     resolved: ResolvedStyle,
     shaped: crate::renderer::shaper::ShapedLine,
-    font_id: usize,
-    faux_bold: bool,
-    faux_italic: bool,
+    faces: Vec<LayoutFace>,
     drawing: Option<DrawingLayout>,
     skipped: bool,
 }
@@ -636,6 +667,113 @@ struct LayoutBlock {
     width: f64,
     height: f64,
     baseline: f64,
+}
+
+/// Advance the cumulative `\fay` baseline shear by one glyph (or
+/// drawing): `fay * scale_y / scale_x * advance` (libass
+/// `apply_baseline_shear`). Non-finite increments (degenerate scales
+/// or advances) are ignored so one bad value cannot poison the rest
+/// of the line; callers reset the accumulator at line breaks.
+fn accumulate_fay_shear(accum: &mut f64, shear_y: f64, scale_x: f64, scale_y: f64, advance: f64) {
+    if shear_y == 0.0 {
+        return;
+    }
+    if !shear_y.is_finite() || !scale_x.is_finite() || !scale_y.is_finite() || !advance.is_finite()
+    {
+        return;
+    }
+    if scale_x.abs() < 1e-9 {
+        return;
+    }
+    let inc = shear_y * scale_y / scale_x * advance;
+    if inc.is_finite() {
+        *accum += inc;
+    }
+}
+
+/// True laid-out width of every event line, in render order. Mirrors
+/// the render loop exactly — skipped segments contribute nothing,
+/// mid-segment shaper rows open new lines (zero-scale glyphs excluded,
+/// like the renderer's row marker), and trailing breaks close the line
+/// — so entry `i` is the width of the line the renderer calls `i`.
+/// First row group of a segment continues the current line (segments
+/// never start mid-line content elsewhere); leading breaks open lines.
+fn event_line_widths(segments: &[TextSegment], items: &[LayoutItem]) -> Vec<f64> {
+    let mut lines = vec![0.0_f64];
+    for (segment, item) in segments.iter().zip(items.iter()) {
+        if item.skipped {
+            continue;
+        }
+        // Leading breaks open lines (the render loop advances its line
+        // index identically). Only '\n': mid-segment '\r' rows are caught
+        // by row grouping on both sides; segment-boundary '\r' is ignored
+        // by both, matching the existing trailing-break rule below.
+        let leading = segment.text.chars().take_while(|c| *c == '\n').count();
+        lines.extend(std::iter::repeat_n(0.0, leading));
+        if let Some(drawing) = &item.drawing {
+            if drawing.width.is_finite() {
+                if let Some(last) = lines.last_mut() {
+                    *last += drawing.width.max(0.0);
+                }
+            }
+        } else {
+            // Row-group widths: `x` restarts at 0 on every shaper row,
+            // so each group's width is its furthest `x + advance` edge.
+            let mut groups: Vec<f64> = Vec::new();
+            let mut row_y: Option<f64> = None;
+            let mut row_w = 0.0_f64;
+            for glyph in &item.shaped.glyphs {
+                if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
+                    continue;
+                }
+                if row_y != Some(glyph.y) {
+                    if row_y.is_some() {
+                        groups.push(row_w);
+                    }
+                    row_y = Some(glyph.y);
+                    row_w = 0.0;
+                }
+                let edge = glyph.x + glyph.advance;
+                if edge.is_finite() && edge > row_w {
+                    row_w = edge;
+                }
+            }
+            if row_y.is_some() {
+                groups.push(row_w);
+            }
+            let mut groups = groups.into_iter();
+            if let Some(w0) = groups.next() {
+                if let Some(last) = lines.last_mut() {
+                    *last += w0;
+                }
+            }
+            for w in groups {
+                lines.push(w);
+            }
+        }
+        if segment.text.ends_with('\n') {
+            lines.push(0.0);
+        }
+    }
+    lines
+}
+
+/// Horizontal inset of one line inside the event block for the
+/// event-level alignment (libass aligns each line independently:
+/// short lines center/right-align on their own width, they do not
+/// hug the block edge). `block_width` must be the same width the
+/// block origin was computed from. Unknown alignments center, like
+/// [`Compositor::calculate_position`].
+fn line_align_inset(line_width: f64, block_width: f64, alignment: i32) -> f64 {
+    let extra = (block_width - line_width).max(0.0);
+    if !extra.is_finite() {
+        return 0.0;
+    }
+    match alignment {
+        1 | 4 | 7 => 0.0,
+        3 | 6 | 9 => extra,
+        _ => extra / 2.0,
+    }
 }
 
 /// Video pixels per drawing unit for a `\pN` mode: higher modes pack
@@ -656,7 +794,11 @@ fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i
         if !s.is_finite() {
             return v;
         }
-        (v as f64 * s).clamp(i32::MIN as f64, i32::MAX as f64) as i32
+        let p = f64::from(v) * s;
+        if !p.is_finite() {
+            return v;
+        }
+        finite_to_i32(p.clamp(f64::from(i32::MIN), f64::from(i32::MAX))).unwrap_or(v)
     };
     (
         conv(rect.0, scale_x),
@@ -667,15 +809,17 @@ fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i
 }
 
 /// Active drawing mode for a segment: the last `\pN` in its tags,
-/// falling back to the event-level mode.
+/// falling back to the event-level mode. A `\r` after the last `\pN`
+/// exits drawing mode (returns 0) because `\p` is not line-global.
 fn segment_drawing_mode(tags: &[OverrideTag], event_mode: i32) -> i32 {
-    tags.iter()
-        .rev()
-        .find_map(|t| match t {
-            OverrideTag::Drawing(m) => Some(*m),
-            _ => None,
-        })
-        .unwrap_or(event_mode)
+    for tag in tags.iter().rev() {
+        match tag {
+            OverrideTag::Drawing(m) => return *m,
+            OverrideTag::Reset(_) => return 0,
+            _ => {}
+        }
+    }
+    event_mode
 }
 
 /// Compositor - composites resolved subtitle events into a buffer
@@ -720,7 +864,29 @@ impl Compositor {
         }
     }
 
-    /// Apply transform tags with a given progress (0.0 to 1.0)
+    /// Apply `\t(...)` inner tags with a given progress (0.0 to 1.0).
+    ///
+    /// Transformability matrix (per Aegisub/VSFilter: `\t` animates
+    /// continuous style properties by interpolation):
+    ///
+    /// ```text
+    /// animated:  \c \1c \2c \3c \4c \alpha \1a \2a \3a \4a
+    ///            \fs \fscx \fscy \fsp
+    ///            \fr \frx \fry \frz \fax \fay
+    ///            \bord \xbord \ybord \shad \xshad \yshad
+    ///            \be \blur
+    /// ignored:   \pos \move \org (position animates via \move only)
+    ///            \clip \iclip incl. vector forms (not animatable)
+    ///            \an \q (whole-line layout, decided once)
+    ///            \p \pbo (drawing geometry is discrete)
+    ///            \fad \fade (own timing model)
+    ///            \b \i \u \s \fn \fe (discrete switches, not animated)
+    ///            karaoke \k \K \kf \ko \kt, \r, nested \t
+    /// ```
+    ///
+    /// Ignored tags are skipped silently inside `\t` (matching
+    /// reference behavior of animating only the supported set);
+    /// outside `\t` they apply normally.
     fn apply_transform_tags(resolved: &mut ResolvedStyle, tags: &[OverrideTag], progress: f64) {
         for target in tags {
             match target {
@@ -866,12 +1032,14 @@ impl Compositor {
             base_style: base_style.clone(),
             font_name: base_style.font_name.clone(),
             font_size: base_style.font_size,
+            font_encoding: base_style.encoding,
             color: base_style.primary_color,
             secondary_color: base_style.secondary_color,
             outline_color: base_style.outline_color,
             shadow_color: base_style.back_color,
             back_color: base_style.back_color,
-            bold: base_style.bold,
+            // Style Bold is boolean (-1/0): bold style means weight 700.
+            font_weight: if base_style.bold { 700 } else { 400 },
             italic: base_style.italic,
             underline: base_style.underline,
             strike_out: base_style.strike_out,
@@ -924,13 +1092,13 @@ impl Compositor {
     /// Apply a single override tag to a resolved style
     fn apply_single_tag(resolved: &mut ResolvedStyle, tag: &OverrideTag) {
         match tag {
-            OverrideTag::Bold(v) => resolved.bold = *v,
+            OverrideTag::Bold(w) => resolved.font_weight = *w,
             OverrideTag::Italic(v) => resolved.italic = *v,
             OverrideTag::Underline(v) => resolved.underline = *v,
             OverrideTag::StrikeOut(v) => resolved.strike_out = *v,
             OverrideTag::FontName(name) => resolved.font_name = name.clone(),
             OverrideTag::FontSize(size) => resolved.font_size = *size,
-            OverrideTag::FontSizeMultiplier(mult) => resolved.font_size *= mult,
+            OverrideTag::FontEncoding(enc) => resolved.font_encoding = *enc,
             OverrideTag::LetterSpacing(sp) => resolved.spacing = *sp,
             OverrideTag::PrimaryColor(c) => resolved.color = *c,
             OverrideTag::SecondaryColor(c) => resolved.secondary_color = *c,
@@ -962,7 +1130,12 @@ impl Compositor {
                 resolved.shadow_color = resolved.shadow_color.with_alpha(*a);
                 resolved.back_color = resolved.back_color.with_alpha(*a);
             }
-            OverrideTag::Position(x, y) => resolved.position = Some((*x, *y)),
+            // \pos and \move share one slot (VSFilter EF_MOVE): the
+            // last tag wins, so \pos clears an earlier \move.
+            OverrideTag::Position(x, y) => {
+                resolved.position = Some((*x, *y));
+                resolved.move_data = None;
+            }
             OverrideTag::Move(x1, y1, x2, y2) => {
                 resolved.move_data = Some(MoveData {
                     x1: *x1,
@@ -1018,9 +1191,12 @@ impl Compositor {
             }
             OverrideTag::ShearX(s) => resolved.shear_x = *s,
             OverrideTag::ShearY(s) => resolved.shear_y = *s,
+            // \fad and \fade share one slot (VSFilter EF_FADE): the
+            // last tag wins, so each form clears the other.
             OverrideTag::Fade(fi, fo) => {
                 resolved.fade_in = *fi;
                 resolved.fade_out = *fo;
+                resolved.complex_fade = None;
             }
             OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4) => {
                 resolved.complex_fade = Some(ComplexFade {
@@ -1032,13 +1208,22 @@ impl Compositor {
                     t3: *t3,
                     t4: *t4,
                 });
+                resolved.fade_in = 0;
+                resolved.fade_out = 0;
             }
+            // Single clip state: the last \clip-family tag wins across
+            // rect/vector and normal/inverse forms (later tags replace
+            // earlier ones rather than intersecting).
             OverrideTag::Clip(x1, y1, x2, y2) => {
                 resolved.clip = Some((*x1, *y1, *x2, *y2));
+                resolved.inverse_clip = None;
                 resolved.clip_vector = None;
+                resolved.inverse_clip_vector = None;
             }
             OverrideTag::InverseClip(x1, y1, x2, y2) => {
                 resolved.inverse_clip = Some((*x1, *y1, *x2, *y2));
+                resolved.clip = None;
+                resolved.clip_vector = None;
                 resolved.inverse_clip_vector = None;
             }
             OverrideTag::ClipVector { scale, drawing } => {
@@ -1047,13 +1232,17 @@ impl Compositor {
                     drawing: drawing.clone(),
                 });
                 resolved.clip = None;
+                resolved.inverse_clip = None;
+                resolved.inverse_clip_vector = None;
             }
             OverrideTag::InverseClipVector { scale, drawing } => {
                 resolved.inverse_clip_vector = Some(VectorClip {
                     scale: *scale,
                     drawing: drawing.clone(),
                 });
+                resolved.clip = None;
                 resolved.inverse_clip = None;
+                resolved.clip_vector = None;
             }
             OverrideTag::Blur(b) => resolved.blur = *b,
             OverrideTag::EdgeBlur(b) => resolved.blur = *b,
@@ -1066,10 +1255,11 @@ impl Compositor {
     /// Resolve an event's style with all override tags applied.
     ///
     /// Segment style tags from the initial override groups establish the
-    /// defaults, but line-global tags (\pos, \move, \org, \clip, \iclip,
-    /// \fad, \fade) apply no matter where they appear textually: they are
-    /// scanned across all segments (last one wins), so `{\pos(100,100)}Hi`
-    /// and `Hi{\pos(100,100)}` resolve identically.
+    /// defaults, but event-layout tags (\pos, \move, \org, \clip, \iclip,
+    /// \fad, \fade, \an, \q) apply no matter where they appear textually:
+    /// they are scanned across all segments (last one wins), so
+    /// `{\pos(100,100)}Hi` and `Hi{\pos(100,100)}` resolve identically,
+    /// as do `{\an7}Hi` and `Hi{\an7}`.
     pub fn resolve_style(base_style: &Style, event: &Event) -> ResolvedStyle {
         let segments = parse_text_segments(&event.text);
         let initial_tags = segments
@@ -1078,15 +1268,17 @@ impl Compositor {
             .unwrap_or(&[]);
         let mut resolved = Self::resolve_base_style(base_style, initial_tags);
 
-        // Line-global tags apply regardless of textual placement.
+        // Event-layout tags apply regardless of textual placement.
         // Segments carry accumulated tags, so only newly added tags per
         // segment are considered; later ones overwrite earlier ones.
+        // (\q has no ResolvedStyle field and is consumed separately from
+        // the event tag list; scanning it here is a harmless no-op.)
         let mut prev_tag_count = 0usize;
         for segment in &segments {
             let from = prev_tag_count.min(segment.tags.len());
             prev_tag_count = segment.tags.len();
             for tag in &segment.tags[from..] {
-                if tag.is_line_global() {
+                if tag.is_event_layout() {
                     Self::apply_single_tag(&mut resolved, tag);
                 }
             }
@@ -1289,20 +1481,37 @@ impl Compositor {
             let seg_resolved = Self::resolve_segment_style(
                 resolved, segment, event, styles, time_ms, start_ms, end_ms,
             );
-            let font_match = font_manager.find_font_with_match(
+            let font_match = font_manager.find_font_with_weight(
                 &seg_resolved.font_name,
-                seg_resolved.bold,
+                seg_resolved.font_weight,
                 seg_resolved.italic,
             );
             let seg_font_size =
                 seg_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
-            let shaped = TextShaper::shape(
+            // Per-glyph fallback chain (primary first): characters the
+            // primary lacks cascade to the next loaded face.
+            let chain = font_manager.fallback_chain(font_match.id);
+            let mut faces = Vec::with_capacity(chain.len());
+            let mut shape_fonts: Vec<(usize, &FontArc)> = Vec::with_capacity(chain.len());
+            for id in chain {
+                let (faux_bold, faux_italic) =
+                    font_manager.faux_for(id, seg_resolved.font_weight, seg_resolved.italic);
+                faces.push(LayoutFace {
+                    id,
+                    faux_bold,
+                    faux_italic,
+                });
+                if let Some(face) = font_manager.get_font(id) {
+                    shape_fonts.push((id, face));
+                }
+            }
+            let shaped = TextShaper::shape_with_fallback(
                 &segment.text,
-                font_match.font,
+                &shape_fonts,
                 seg_font_size,
                 seg_resolved.scale_x / 100.0,
                 seg_resolved.scale_y / 100.0,
-                seg_resolved.bold,
+                seg_resolved.font_weight,
                 seg_resolved.italic,
                 seg_resolved.spacing,
                 seg_resolved.color,
@@ -1329,9 +1538,7 @@ impl Compositor {
             items.push(LayoutItem {
                 resolved: seg_resolved,
                 shaped,
-                font_id: font_match.id,
-                faux_bold: font_match.faux_bold,
-                faux_italic: font_match.faux_italic,
+                faces,
                 drawing,
                 skipped,
             });
@@ -1416,11 +1623,21 @@ impl Compositor {
             return;
         }
 
+        // Scroll effects always clip to their band, and banner/scroll
+        // fadeaways scale edge alphas: both mutate the whole buffer, so
+        // they need an isolated event buffer like \clip and \blur.
+        // A fade-free banner only moves text and renders direct.
+        let effect_needs_isolation = match LegacyEffect::parse(&event.effect) {
+            Some(LegacyEffect::ScrollUp { .. } | LegacyEffect::ScrollDown { .. }) => true,
+            Some(LegacyEffect::Banner { fadeaway, .. }) => fadeaway > 0.0,
+            None => false,
+        };
         if resolved.clip.is_some()
             || resolved.inverse_clip.is_some()
             || resolved.clip_vector.is_some()
             || resolved.inverse_clip_vector.is_some()
             || resolved.blur > 0.0
+            || effect_needs_isolation
         {
             match RenderBuffer::new(video_width, video_height) {
                 Ok(mut event_buffer) => {
@@ -1524,23 +1741,41 @@ impl Compositor {
 
         let alpha = (alpha_mult * 255.0) as u8;
 
-        // Find font
-        let font = font_manager.find_font(&resolved.font_name, resolved.bold, resolved.italic);
+        // Find font (+ fallback chain for measurement/shaping).
+        let font_match = font_manager.find_font_with_weight(
+            &resolved.font_name,
+            resolved.font_weight,
+            resolved.italic,
+        );
+        let font = font_match.font;
+        let measure_chain: Vec<&FontArc> = font_manager
+            .fallback_chain(font_match.id)
+            .iter()
+            .filter_map(|id| font_manager.get_font(*id))
+            .collect();
         let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
 
         let scale_x = video_width as f64 / play_res_x as f64;
         let scale_y = video_height as f64 / play_res_y as f64;
 
+        // Legacy scroll effect (Banner/Scroll up/Scroll down), if any.
+        // Parsed once and reused for wrap, positioning, and clipping.
+        let legacy_effect = LegacyEffect::parse(&event.effect);
         // Effective wrap style: a per-event \q overrides the script default.
-        let wrap_style = event
-            .parsed_tags
-            .iter()
-            .rev()
-            .find_map(|tag| match tag {
-                OverrideTag::WrapStyle(q) => Some(*q),
-                _ => None,
-            })
-            .unwrap_or(script_wrap_style);
+        // Banner forces no-wrap (VSFilter sets wrapStyle 2 for banners).
+        let wrap_style = if matches!(legacy_effect, Some(LegacyEffect::Banner { .. })) {
+            2
+        } else {
+            event
+                .parsed_tags
+                .iter()
+                .rev()
+                .find_map(|tag| match tag {
+                    OverrideTag::WrapStyle(q) => Some(*q),
+                    _ => None,
+                })
+                .unwrap_or(script_wrap_style)
+        };
         let wrap_width =
             (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
         // Drawing runs pass through the wrapper verbatim (never wrapped).
@@ -1548,7 +1783,7 @@ impl Compositor {
             &event.text,
             wrap_style,
             wrap_width,
-            font,
+            &measure_chain,
             font_size,
             resolved.spacing,
         );
@@ -1625,6 +1860,48 @@ impl Compositor {
             base_y = origin_top + layout.baseline;
         }
 
+        // Legacy scroll effects override position on their axis (VSFilter
+        // `fPosOverride`, applied after \move). The other axis keeps its
+        // laid-out (or moved) position.
+        match legacy_effect {
+            Some(LegacyEffect::Banner {
+                delay,
+                left_to_right,
+                ..
+            }) => {
+                base_x = LegacyEffect::banner_x(
+                    time_ms - start_ms,
+                    delay,
+                    scale_x,
+                    left_to_right,
+                    0.0,
+                    video_width as f64,
+                    layout.width,
+                );
+            }
+            Some(
+                LegacyEffect::ScrollUp {
+                    top, bottom, delay, ..
+                }
+                | LegacyEffect::ScrollDown {
+                    top, bottom, delay, ..
+                },
+            ) => {
+                let down = matches!(legacy_effect, Some(LegacyEffect::ScrollDown { .. }));
+                let text_top = LegacyEffect::scroll_top(
+                    time_ms - start_ms,
+                    delay,
+                    scale_y,
+                    down,
+                    top * scale_y,
+                    bottom * scale_y,
+                    layout.height,
+                );
+                base_y = text_top + layout.baseline;
+            }
+            None => {}
+        }
+
         // Rotation origin for 3D effects. The default origin follows a move;
         // an explicit \org remains fixed in script coordinates.
         let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
@@ -1646,44 +1923,93 @@ impl Compositor {
             (ax, ay)
         };
 
-        // Border style 3 is an opaque box behind the event text.
+        // Border style 3 is an opaque box behind the event text:
+        // the text block grown by the effective outline on every side.
+        // Margins position the text; they are not box padding. The
+        // fill is the OUTLINE color (VSFilter copies colors[2] into
+        // the box polygon; libass fills the outline bitmap): BackColour
+        // only affects the shadow.
         if resolved.border_style == 3 {
-            let box_color = resolved.back_color.to_rgba();
+            let box_color = resolved.outline_color.to_ass_components();
+            let clamp_i32 = |v: f64| {
+                finite_to_i32(v.clamp(f64::from(i32::MIN), f64::from(i32::MAX))).unwrap_or(0)
+            };
+            let (box_rx, box_ry) = if resolved.scaled_border_and_shadow {
+                (scale_x, scale_y)
+            } else {
+                (1.0, 1.0)
+            };
             effects::apply_opaque_box(
                 buffer,
-                base_x as i32,
-                (base_y - layout.baseline) as i32,
-                layout.width.ceil() as i32,
-                layout.height.ceil() as i32,
-                (resolved.margin_l as f64 * scale_x).round() as i32,
-                (resolved.margin_r as f64 * scale_x).round() as i32,
-                (resolved.margin_v as f64 * scale_y).round() as i32,
+                clamp_i32(base_x),
+                clamp_i32(base_y - layout.baseline),
+                clamp_i32(layout.width.ceil().clamp(0.0, 65_536.0)),
+                clamp_i32(layout.height.ceil().clamp(0.0, 65_536.0)),
+                clamp_i32(
+                    (resolved.outline_x * box_rx * resolved.scale_x / 100.0)
+                        .round()
+                        .clamp(0.0, 65_536.0),
+                ),
+                clamp_i32(
+                    (resolved.outline_y * box_ry * resolved.scale_y / 100.0)
+                        .round()
+                        .clamp(0.0, 65_536.0),
+                ),
                 [
                     box_color[0],
                     box_color[1],
                     box_color[2],
-                    ((255 - box_color[3]) as f64 * alpha_mult) as u8,
+                    (f64::from(255 - box_color[3]) * alpha_mult).clamp(0.0, 255.0) as u8,
                 ],
-                play_res_x,
-                play_res_y,
             );
         }
 
-        // Karaoke syllable timeline (empty when the event has no karaoke tags)
-        let (karaoke_syllables, seg_syllable) =
-            build_karaoke_timeline(&segments, font, font_size, resolved.spacing);
+        // Karaoke syllable timeline (empty when the event has no karaoke tags).
+        // Widths come from the layout pass, so inline style changes and
+        // drawings measure exactly what rendering consumes.
+        let seg_widths: Vec<f64> = layout
+            .items
+            .iter()
+            .map(|item| {
+                if item.skipped {
+                    0.0
+                } else if let Some(drawing) = &item.drawing {
+                    drawing.width
+                } else {
+                    item.shaped.width
+                }
+            })
+            .collect();
+        let (karaoke_syllables, seg_syllable) = build_karaoke_timeline(&segments, &seg_widths);
         let mut syllable_consumed: Vec<f64> = vec![0.0; karaoke_syllables.len()];
         let elapsed_ms = time_ms.saturating_sub(start_ms);
 
         // Per-segment rendering
         let mut x_offset = 0.0_f64;
         let mut line_y_offset = 0.0_f64;
+        // Cumulative `\fay` baseline shear (libass
+        // `apply_baseline_shear`): reset per line, accumulated across
+        // segments on the same line like libass whole-text-layout mode.
+        let mut fay_line_shear = 0.0_f64;
+        // True line widths for per-line alignment, plus the current
+        // line index (advanced on breaks and mid-segment row changes
+        // exactly as `event_line_widths` counts them).
+        let line_widths = event_line_widths(&segments, &layout.items);
+        let mut cur_line: usize = 0;
 
         for (seg_idx, segment) in segments.iter().enumerate() {
             let item = &layout.items[seg_idx];
             if item.skipped {
                 continue;
             }
+            // Leading breaks open new lines (mirrors event_line_widths).
+            let leading = segment.text.chars().take_while(|c| *c == '\n').count();
+            if leading > 0 {
+                cur_line = cur_line.saturating_add(leading);
+                x_offset = 0.0;
+                fay_line_shear = 0.0;
+            }
+            let seg_first_line = cur_line;
 
             // Style/shape come from the layout pass; karaoke recolors here.
             let mut segment_resolved = item.resolved.clone();
@@ -1703,8 +2029,11 @@ impl Compositor {
                         }
                     }
                     KaraokeKind::Outline => {
+                        // \ko behaves like \k for fill (secondary before
+                        // start, primary from start) plus the outline rule:
+                        // outline suppressed before start, visible from start.
                         if karaoke_outline_suppressed(elapsed_ms, syl.start_ms) {
-                            // Hide the outline once the syllable begins
+                            segment_resolved.color = segment_resolved.secondary_color;
                             segment_resolved.outline_color.alpha = 255;
                         }
                     }
@@ -1724,14 +2053,31 @@ impl Compositor {
             // Drawing segments render vector paths at the pen position.
             if let Some(drawing) = &item.drawing {
                 let unit = drawing_unit_scale(scale_x, scale_y, drawing.mode);
+                // Sweep uses a midpoint approximation for drawings (no
+                // per-pixel split inside vector paths).
+                if let Some(edge) = sweep_boundary {
+                    if edge.is_finite() && drawing.width / 2.0 > edge {
+                        segment_resolved.color = segment_resolved.secondary_color;
+                    }
+                }
                 let color = segment_resolved.color.to_ass_components();
+                // The pen sits on the text baseline; a drawing's box
+                // hangs above it (bottom on the baseline), matching
+                // libass/VSFilter placement for drawing lines.
+                let draw_inset = line_align_inset(
+                    line_widths.get(cur_line).copied().unwrap_or(0.0),
+                    layout.width,
+                    resolved.alignment,
+                );
                 super::drawing::DrawingParser::render_drawing(
                     buffer,
                     &segment.text,
-                    base_x + x_offset - drawing.min_x,
+                    base_x + x_offset + draw_inset - drawing.min_x,
                     base_y + line_y_offset
+                        - drawing.height
                         - drawing.min_y
-                        - segment_resolved.drawing_baseline_offset * unit,
+                        - segment_resolved.drawing_baseline_offset * unit
+                        + fay_line_shear,
                     unit,
                     [
                         color[0],
@@ -1743,9 +2089,19 @@ impl Compositor {
                 if let Some(syl_idx) = seg_syllable[seg_idx] {
                     syllable_consumed[syl_idx] += drawing.width;
                 }
+                // Drawings advance the baseline shear like libass glyphs.
+                accumulate_fay_shear(
+                    &mut fay_line_shear,
+                    segment_resolved.shear_y,
+                    segment_resolved.scale_x,
+                    segment_resolved.scale_y,
+                    drawing.width,
+                );
                 if segment.text.ends_with('\n') {
                     x_offset = 0.0;
                     line_y_offset += drawing.height;
+                    fay_line_shear = 0.0;
+                    cur_line = cur_line.saturating_add(1);
                 } else {
                     x_offset += drawing.width;
                 }
@@ -1753,7 +2109,6 @@ impl Compositor {
             }
 
             // Text path: font, size, and shaping come from the layout pass.
-            let segment_font = font_manager.get_font(item.font_id).unwrap_or(font);
             let segment_font_size =
                 segment_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
             let shaped = &item.shaped;
@@ -1785,18 +2140,73 @@ impl Compositor {
             let shadow_alpha = segment_resolved.shadow_color.opacity();
 
             // Single pass over glyphs: cache lookup once, render outline + shadow + fill
+            // Row marker restarts per segment: the first row continues
+            // the current line (leading breaks were handled at segment
+            // start); later rows open new lines.
+            let mut shear_row_y: Option<f64> = None;
+            // Pen within the current row (its furthest advance edge);
+            // the segment leaves the pen at its last row's end.
+            let mut row_pen = 0.0_f64;
             for glyph in &shaped.glyphs {
                 if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
                     continue;
                 }
+                // A new shaper row inside this segment starts a new
+                // line: reset the shear accumulator, advance the line
+                // index (mirrors `event_line_widths`), and restart the
+                // pen at the new line's edge.
+                match shear_row_y {
+                    None => shear_row_y = Some(glyph.y),
+                    Some(y) if y == glyph.y => {}
+                    Some(_) => {
+                        shear_row_y = Some(glyph.y);
+                        fay_line_shear = 0.0;
+                        cur_line = cur_line.saturating_add(1);
+                        x_offset = 0.0;
+                        row_pen = 0.0;
+                    }
+                }
+                let edge = glyph.x + glyph.advance;
+                if edge.is_finite() && edge > row_pen {
+                    row_pen = edge;
+                }
+                let line_inset = line_align_inset(
+                    line_widths.get(cur_line).copied().unwrap_or(0.0),
+                    layout.width,
+                    resolved.alignment,
+                );
+                // Baseline shear (libass `apply_baseline_shear`): the
+                // glyph rides at the sheared baseline, then contributes
+                // its own advance to the following glyphs. Applied even
+                // when this glyph later fails to rasterize, matching the
+                // reference pass that runs before rasterization.
+                let glyph_y = glyph.y + fay_line_shear;
+                accumulate_fay_shear(
+                    &mut fay_line_shear,
+                    segment_resolved.shear_y,
+                    glyph.scale_x,
+                    glyph.scale_y,
+                    glyph.advance,
+                );
 
+                // Per-glyph fallback face (primary when the recorded id is
+                // absent); each face carries its own faux requirements.
+                let face = item
+                    .faces
+                    .iter()
+                    .find(|f| f.id == glyph.font_id)
+                    .or(item.faces.first());
+                let Some(face) = face else {
+                    continue;
+                };
+                let face_font = font_manager.get_font(face.id).unwrap_or(font);
                 let cached = self.glyph_cache.get_or_rasterize(
-                    item.font_id,
-                    segment_font,
+                    face.id,
+                    face_font,
                     glyph.glyph_id,
                     segment_font_size,
-                    item.faux_bold,
-                    item.faux_italic,
+                    face.faux_bold,
+                    face.faux_italic,
                 );
 
                 if cached.width == 0 || cached.height == 0 {
@@ -1819,50 +2229,92 @@ impl Compositor {
                         .0,
                     )
                 };
-                let scaled_width = ((cached.width as f64 * glyph.scale_x).round() as u32).max(1);
-                let scaled_height = ((cached.height as f64 * glyph.scale_y).round() as u32).max(1);
-                // Shear (\fax/\fay) warps the coverage bitmap before rotation.
+                let scaled_width = {
+                    let v = (f64::from(cached.width) * glyph.scale_x).round();
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
+                };
+                let scaled_height = {
+                    let v = (f64::from(cached.height) * glyph.scale_y).round();
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
+                };
+                // Transform order (ASS reference, libass
+                // `calc_transform_matrix` + VSFilter `Transform_C`):
+                // glyph-local scaling → `\fax`/`\fay` shear around the
+                // glyph-space pivot → rotation/perspective →
+                // compositing. The shear is folded into the projective
+                // pass below (single resample), never applied
+                // post-rotation.
                 let (work_bitmap, glyph_width, glyph_height) =
-                    if segment_resolved.shear_x != 0.0 || segment_resolved.shear_y != 0.0 {
-                        let (sheared, w, h) = RenderBuffer::shear_coverage_bitmap(
-                            &scaled_bitmap,
-                            scaled_width,
-                            scaled_height,
-                            segment_resolved.shear_x,
-                            segment_resolved.shear_y,
-                        );
-                        if sheared.is_empty() {
-                            continue;
-                        }
-                        (Cow::Owned(sheared), w, h)
-                    } else {
-                        (scaled_bitmap, scaled_width, scaled_height)
-                    };
-                let bearing_x = cached.bearing_x as f64 * glyph.scale_x;
-                let bearing_y = cached.bearing_y as f64 * glyph.scale_y;
+                    (scaled_bitmap, scaled_width, scaled_height);
+                let bearing_x = f64::from(cached.bearing_x) * glyph.scale_x;
+                let bearing_y = f64::from(cached.bearing_y) * glyph.scale_y;
 
                 // Calculate original center of the glyph relative to origin
-                let orig_cx = base_x + x_offset + glyph.x + bearing_x + glyph_width as f64 / 2.0;
+                // (`glyph_y` carries the cumulative `\fay` baseline shear;
+                // `line_inset` the line's alignment inside the block).
+                let orig_cx =
+                    base_x + x_offset + line_inset + glyph.x + bearing_x + glyph_width as f64 / 2.0;
                 let orig_cy =
-                    base_y + line_y_offset + glyph.y + bearing_y + glyph_height as f64 / 2.0;
+                    base_y + line_y_offset + glyph_y + bearing_y + glyph_height as f64 / 2.0;
+
+                // Shear pivot in scaled-bitmap pixels (libass parity,
+                // confirmed by pixel probes): `\fay` pivots at the pen
+                // x, `\fax` at the ascender line (one font ascent
+                // above the pen). Pen sits at (-bearing) in bitmap
+                // pixels. Non-uniform `\fsc` adjusts the factors
+                // exactly as the references' pre-scale shear does.
+                let ascent = face_font
+                    .as_scaled(PxScale::from(segment_font_size as f32))
+                    .ascent() as f64;
+                let pivot = (
+                    f64::from(-cached.bearing_x) * glyph.scale_x,
+                    (f64::from(-cached.bearing_y) - ascent) * glyph.scale_y,
+                );
 
                 let dx = orig_cx - org_x;
                 let dy = orig_cy - org_y;
 
-                // Construction of exact 3D rotation matrix (Order: Z, then Y, then X)
-                // ASS \frx and \fry rotations are negated compared to standard math
+                // Rotation matrix (libass `calc_transform_matrix` order:
+                // shear happens in the caller, then frz, then frx, then
+                // fry, i.e. M = Ry * Rx * Rz). All three ASS angles are
+                // negated versus standard math because screen Y grows
+                // downward: positive \frz runs counterclockwise on
+                // screen, matching the reference frames.
                 let rz = segment_resolved.angle;
                 let rx = segment_resolved.rotation_x;
                 let ry = segment_resolved.rotation_y;
 
-                let mat_z = Matrix3x3::rotation_z(rz.to_radians());
-                let mat_y = Matrix3x3::rotation_y(-ry.to_radians());
-                let mat_x = Matrix3x3::rotation_x(-rx.to_radians());
+                let mat_z = Matrix3x3::rotation_z((-rz).to_radians());
+                let mat_y = Matrix3x3::rotation_y((-ry).to_radians());
+                let mat_x = Matrix3x3::rotation_x((-rx).to_radians());
 
-                let matrix = mat_x.multiply(&mat_y).multiply(&mat_z);
+                let matrix = mat_y.multiply(&mat_x).multiply(&mat_z);
 
                 // Perspective distance (standard ASS is ~312.5-500 depending on resolution)
                 let perspective = 500.0 * (video_height as f64 / play_res_y as f64);
+
+                // Effective pre-rotation shear. References shear the
+                // unscaled glyph, so non-uniform scale adjusts the
+                // factors (libass `fax*sx/sy`, `fay*sy/sx`). Non-finite
+                // shear skips the glyph.
+                let Some((fax, fay)) =
+                    effective_shear((segment_resolved.shear_x, segment_resolved.shear_y))
+                else {
+                    continue;
+                };
+                let (sx, sy) = (glyph.scale_x, glyph.scale_y);
+                let (fax, fay) =
+                    if sx.is_finite() && sy.is_finite() && sx.abs() > 1e-9 && sy.abs() > 1e-9 {
+                        (fax * sx / sy, fay * sy / sx)
+                    } else {
+                        (fax, fay)
+                    };
 
                 // Use projective transform for exact perspective warping
                 let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
@@ -1872,17 +2324,50 @@ impl Compositor {
                         glyph_height,
                         &matrix,
                         perspective,
+                        (fax, fay),
+                        pivot,
                     );
-                // Calculate 3D position and perspective scale for the glyph center
+                // Calculate 3D position and perspective scale for the glyph center.
+                // Guard every value before division: degenerate input skips
+                // this glyph instead of propagating NaN/Inf into geometry.
+                if rot_bitmap.is_empty() {
+                    continue;
+                }
                 let (x3, y3, z3) = matrix.transform(dx, dy, 0.0);
-                let scale_factor = perspective / (perspective + z3);
+                if !perspective.is_finite() || !x3.is_finite() || !y3.is_finite() || !z3.is_finite()
+                {
+                    continue;
+                }
+                let denom = perspective + z3;
+                if !denom.is_finite() || denom.abs() < 1e-6 {
+                    continue;
+                }
+                let scale_factor = perspective / denom;
+                if !scale_factor.is_finite() {
+                    continue;
+                }
                 let px = x3 * scale_factor;
                 let py = y3 * scale_factor;
+                if !px.is_finite() || !py.is_finite() {
+                    continue;
+                }
+                // No post shear: the shear already warped the bitmap
+                // inside the projective pass (pre-rotation, glyph-local).
+                // The pass offset lands the sheared bitmap exactly.
 
-                // Final screen position
-                let final_gx = (org_x + px + rot_ox as f64) as i32;
-                let final_gy = (org_y + py + rot_oy as f64) as i32;
-
+                // Final screen position (validated; skip glyph if unrepresentable).
+                let (Some(final_gx), Some(final_gy)) = (
+                    finite_to_i32(
+                        (org_x + px + f64::from(rot_ox))
+                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
+                    ),
+                    finite_to_i32(
+                        (org_y + py + f64::from(rot_oy))
+                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
+                    ),
+                ) else {
+                    continue;
+                };
                 // Adjust effect scales by perspective factor
                 let current_outline_x = outline_scale_x * scale_factor;
                 let current_outline_y = outline_scale_y * scale_factor;
@@ -1929,31 +2414,57 @@ impl Compositor {
                     );
                 }
 
-                // Render main text (karaoke \K/\kf sweeps color per glyph:
-                // glyphs past the sweep edge keep the highlight color)
-                let fill_color = match sweep_boundary {
-                    Some(edge) if glyph.x + glyph.advance / 2.0 > edge => {
-                        segment_resolved.secondary_color
+                // Render main text. Karaoke \K/\kf sweeps *within* the
+                // glyph: pixels left of the sweep edge use the primary
+                // color, pixels right of it the secondary color. The edge
+                // is mapped to a bitmap-column fraction of the glyph
+                // advance (exact when unrotated; proportional under
+                // rotation/perspective). Coverage applies normally.
+                let primary_c = segment_resolved.color.to_ass_components();
+                let secondary_c = segment_resolved.secondary_color.to_ass_components();
+                let primary_a = segment_resolved.color.opacity();
+                let secondary_a = segment_resolved.secondary_color.opacity();
+                let split_px = sweep_boundary.and_then(|edge| {
+                    if !edge.is_finite() || glyph.advance <= 0.0 || rot_w == 0 {
+                        return None;
                     }
-                    _ => segment_resolved.color,
-                };
-                let color = fill_color.to_ass_components();
-                let color_alpha = fill_color.opacity();
+                    let frac = ((edge - glyph.x) / glyph.advance).clamp(0.0, 1.0);
+                    if !frac.is_finite() {
+                        return None;
+                    }
+                    Some(frac * f64::from(rot_w))
+                });
 
                 for py in 0..rot_h {
                     for px in 0..rot_w {
-                        let coverage = rot_bitmap[(py * rot_w + px) as usize];
+                        let idx = (u64::from(py) * u64::from(rot_w) + u64::from(px)) as usize;
+                        let coverage = rot_bitmap.get(idx).copied().unwrap_or(0);
                         if coverage > 0 {
-                            let a = ((coverage as u32 * color_alpha as u32 / 255) * alpha as u32
+                            let (color, color_alpha) = match split_px {
+                                Some(edge) if f64::from(px) + 0.5 >= edge => {
+                                    (secondary_c, secondary_a)
+                                }
+                                Some(_) => (primary_c, primary_a),
+                                None => match sweep_boundary {
+                                    // Degenerate glyph (no advance): whole-glyph fallback.
+                                    Some(edge) if glyph.x + glyph.advance / 2.0 > edge => {
+                                        (secondary_c, secondary_a)
+                                    }
+                                    _ => (primary_c, primary_a),
+                                },
+                            };
+                            let a = ((u32::from(coverage) * u32::from(color_alpha) / 255)
+                                * u32::from(alpha)
                                 / 255) as u8;
-                            buffer.blend_pixel(
-                                (final_gx + px as i32) as u32,
-                                (final_gy + py as i32) as u32,
-                                color[0],
-                                color[1],
-                                color[2],
-                                a,
-                            );
+                            // Widen through i64 and bounds-check before u32
+                            // conversion: never wrap i32 or rely on casts.
+                            let (Some(sx), Some(sy)) = (
+                                add_coord(final_gx, px, buffer.width),
+                                add_coord(final_gy, py, buffer.height),
+                            ) else {
+                                continue;
+                            };
+                            buffer.blend_pixel(sx, sy, color[0], color[1], color[2], a);
                         }
                     }
                 }
@@ -1962,24 +2473,45 @@ impl Compositor {
             // Decorations belong to the whole text segment, not individual
             // glyph bitmaps. Drawing them from the segment baseline avoids
             // gaps between glyphs and keeps them stable across font bearings.
-            if segment_resolved.underline || segment_resolved.strike_out {
-                let color = segment_resolved.color.to_rgba();
+            if (segment_resolved.underline || segment_resolved.strike_out) && scale_y.is_finite() {
+                let color = segment_resolved.color.to_ass_components();
                 let color_alpha = 255 - color[3];
                 let line_width = if segment_resolved.underline {
-                    (2.0 * scale_y).round().max(1.0) as i32
+                    (2.0 * scale_y).round().clamp(1.0, 4096.0) as i32
                 } else {
-                    (3.0 * scale_y).round().max(1.0) as i32
+                    (3.0 * scale_y).round().clamp(1.0, 4096.0) as i32
                 };
-                let mut line_offsets = Vec::new();
+                // (row baseline, row width): each row's bar spans only
+                // its own glyphs, not the segment's widest row.
+                let mut line_offsets: Vec<(f64, f64)> = Vec::new();
                 for glyph in &shaped.glyphs {
-                    if !line_offsets
-                        .iter()
-                        .any(|offset: &f64| (*offset - glyph.y).abs() < f64::EPSILON)
+                    // Zero-scale glyphs never render; excluding them keeps
+                    // row indices aligned with the render loop's marker.
+                    if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
+                        continue;
+                    }
+                    let edge = glyph.x + glyph.advance;
+                    let edge = if edge.is_finite() { edge.max(0.0) } else { 0.0 };
+                    match line_offsets
+                        .iter_mut()
+                        .find(|(y, _)| (*y - glyph.y).abs() < f64::EPSILON)
                     {
-                        line_offsets.push(glyph.y);
+                        Some(slot) => {
+                            slot.1 = slot.1.max(edge);
+                        }
+                        None => line_offsets.push((glyph.y, edge)),
                     }
                 }
-                for line_offset in line_offsets {
+                for (row_idx, (line_offset, row_width)) in line_offsets.iter().enumerate() {
+                    // Each row aligns like its rendered line: row 0 rides
+                    // the segment pen, later rows start at the line edge.
+                    let row_line = seg_first_line.saturating_add(row_idx);
+                    let row_inset = line_align_inset(
+                        line_widths.get(row_line).copied().unwrap_or(0.0),
+                        layout.width,
+                        resolved.alignment,
+                    );
+                    let row_pen_x = if row_idx == 0 { x_offset } else { 0.0 };
                     let decoration_y = if segment_resolved.underline {
                         base_y
                             + line_y_offset
@@ -1988,15 +2520,25 @@ impl Compositor {
                     } else {
                         base_y + line_y_offset + line_offset - shaped.baseline * 0.35
                     };
+                    let (Some(dx0), Some(dy0), Some(dw)) = (
+                        finite_to_i32(
+                            (base_x + row_pen_x + row_inset)
+                                .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
+                        ),
+                        finite_to_i32(decoration_y.clamp(f64::from(i32::MIN), f64::from(i32::MAX))),
+                        finite_to_i32(row_width.ceil().clamp(0.0, 65_536.0)),
+                    ) else {
+                        continue;
+                    };
                     buffer.fill_rect(
-                        (base_x + x_offset) as i32,
-                        decoration_y as i32,
-                        shaped.width.ceil() as i32,
+                        dx0,
+                        dy0,
+                        dw,
                         line_width,
                         color[0],
                         color[1],
                         color[2],
-                        (color_alpha as f64 * alpha_mult) as u8,
+                        (f64::from(color_alpha) * alpha_mult).clamp(0.0, 255.0) as u8,
                     );
                 }
             }
@@ -2011,8 +2553,12 @@ impl Compositor {
             if segment.text.ends_with('\n') {
                 x_offset = 0.0;
                 line_y_offset += shaped.height;
+                fay_line_shear = 0.0;
+                cur_line = cur_line.saturating_add(1);
             } else {
-                x_offset += shaped.width;
+                // The pen continues at the segment's LAST row end, not
+                // its widest row (equal for single-row segments).
+                x_offset += row_pen;
             }
         }
 
@@ -2036,6 +2582,54 @@ impl Compositor {
         }
         if let Some(vector) = &resolved.inverse_clip_vector {
             Self::apply_vector_clip(buffer, vector, scale_x, scale_y, true);
+        }
+
+        // Legacy scroll-effect clip bounds and edge fades (VSFilter
+        // EF_BANNER/EF_SCROLL clipper). Sequential clips intersect, so
+        // these compose with user \clips above.
+        match legacy_effect {
+            Some(LegacyEffect::Banner { fadeaway, .. }) => {
+                let w = buffer.width as i64;
+                let h = buffer.height as i64;
+                if w > 0 && h > 0 {
+                    let x1 = w.saturating_sub(1).min(i32::MAX as i64) as i32;
+                    let y1 = h.saturating_sub(1).min(i32::MAX as i64) as i32;
+                    effects::apply_clip(buffer, (0, 0, x1, y1));
+                }
+                if fadeaway > 0.0 {
+                    effects::apply_fadeaway_x(buffer, fadeaway * scale_x);
+                }
+            }
+            Some(
+                LegacyEffect::ScrollUp {
+                    top,
+                    bottom,
+                    fadeaway,
+                    ..
+                }
+                | LegacyEffect::ScrollDown {
+                    top,
+                    bottom,
+                    fadeaway,
+                    ..
+                },
+            ) => {
+                // Band bottom is exclusive in VSFilter; our clips are
+                // inclusive, hence `bottom - 1`.
+                let y0 = (top * scale_y).floor() as i64;
+                let y1 = (bottom * scale_y).ceil() as i64 - 1;
+                let w = buffer.width as i64;
+                if w > 0 {
+                    let x1 = w.saturating_sub(1).min(i32::MAX as i64) as i32;
+                    let cy0 = y0.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    let cy1 = y1.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    effects::apply_clip(buffer, (0, cy0, x1, cy1));
+                }
+                if fadeaway > 0.0 {
+                    effects::apply_fadeaway_y(buffer, y0, y0.max(y1 + 1), fadeaway * scale_y);
+                }
+            }
+            None => {}
         }
     }
 
@@ -2117,6 +2711,11 @@ impl Compositor {
                                     drawing_mode = mode > 0;
                                 }
                             }
+                            // `\r` exits drawing mode (\p is not line-global).
+                            'r' if in_tag => {
+                                chars.next();
+                                drawing_mode = false;
+                            }
                             _ if in_tag => {}
                             _ => {
                                 result.push('\\');
@@ -2156,11 +2755,138 @@ mod tests {
         fm.find_font("DejaVu Sans", false, false).clone()
     }
 
+    /// Render `text` at `time_ms` on a 640x480 buffer; returns the buffer.
+    fn render_text(text: &str, time_ms: u64) -> RenderBuffer {
+        render_text_with_style(text, &Style::new("Default"), time_ms)
+    }
+
+    /// Render `text` with an explicit style (640x480 buffer).
+    fn render_text_with_style(text: &str, style: &Style, time_ms: u64) -> RenderBuffer {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let line = format!("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{text}");
+        let event = Event::parse_from_line(&line).unwrap();
+        let resolved = Compositor::resolve_style(style, &event);
+        let mut buf = RenderBuffer::new(640, 480).unwrap();
+        comp.composite_event(
+            &mut buf,
+            &event,
+            &resolved,
+            &fm,
+            time_ms,
+            640,
+            480,
+            640,
+            480,
+            0,
+            &[],
+        );
+        buf
+    }
+
+    /// Render with explicit PlayRes/video sizes and border-scaling flag.
+    #[allow(clippy::too_many_arguments)]
+    fn render_sized(
+        text: &str,
+        style: &Style,
+        time_ms: u64,
+        play_w: u32,
+        play_h: u32,
+        vid_w: u32,
+        vid_h: u32,
+        scaled: bool,
+    ) -> RenderBuffer {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let line = format!("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{text}");
+        let event = Event::parse_from_line(&line).unwrap();
+        let mut resolved = Compositor::resolve_style(style, &event);
+        resolved.scaled_border_and_shadow = scaled;
+        let mut buf = RenderBuffer::new(vid_w, vid_h).unwrap();
+        comp.composite_event(
+            &mut buf,
+            &event,
+            &resolved,
+            &fm,
+            time_ms,
+            play_w,
+            play_h,
+            vid_w,
+            vid_h,
+            0,
+            &[],
+        );
+        buf
+    }
+
+    /// Bounding box (w, h) of non-transparent pixels, if any.
+    fn ink_bbox(buf: &RenderBuffer) -> Option<(u32, u32)> {
+        let (mut x0, mut y0) = (u32::MAX, u32::MAX);
+        let (mut x1, mut y1) = (0u32, 0u32);
+        for y in 0..buf.height {
+            for x in 0..buf.width {
+                if buf.get_pixel(x, y)[3] > 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if x0 > x1 {
+            None
+        } else {
+            Some((x1 - x0 + 1, y1 - y0 + 1))
+        }
+    }
+
+    /// Ink bands: one (x0, y0, x1, y1) box per maximal run of rows
+    /// containing ink. Separates rendered text lines for per-line
+    /// alignment assertions.
+    fn ink_bands(buf: &RenderBuffer) -> Vec<(u32, u32, u32, u32)> {
+        let mut rows = vec![false; buf.height as usize];
+        for y in 0..buf.height {
+            for x in 0..buf.width {
+                if buf.get_pixel(x, y)[3] > 0 {
+                    rows[y as usize] = true;
+                    break;
+                }
+            }
+        }
+        let mut bands = Vec::new();
+        let mut y = 0u32;
+        while y < buf.height {
+            if !rows[y as usize] {
+                y += 1;
+                continue;
+            }
+            let top = y;
+            while y < buf.height && rows[y as usize] {
+                y += 1;
+            }
+            let (mut x0, mut x1) = (buf.width, 0u32);
+            for yy in top..y {
+                for x in 0..buf.width {
+                    if buf.get_pixel(x, yy)[3] > 0 {
+                        x0 = x0.min(x);
+                        x1 = x1.max(x);
+                    }
+                }
+            }
+            bands.push((x0, top, x1, y - 1));
+        }
+        bands
+    }
+
     #[test]
     fn test_wrap_style_2_disables_wrapping() {
         let font = fallback_font();
         let text = "aa aa aa aa";
-        assert_eq!(wrap_event_text(text, 2, 1.0, &font, 48.0, 0.0), text);
+        assert_eq!(wrap_event_text(text, 2, 1.0, &[&font], 48.0, 0.0), text);
     }
 
     #[test]
@@ -2221,14 +2947,240 @@ mod tests {
         assert_eq!(seg.base_style.name, "Default");
     }
 
+    #[test]
+    fn test_reset_preserves_only_line_global() {
+        // \r keeps exactly \pos/\move/\org/\clip/\iclip/\fad/\fade and
+        // resets everything else (fonts, colors, border/shadow, rotation,
+        // blur, spacing, alignment, \p, \pbo) to the target style.
+        use crate::types::override_tag::TextSegment;
+        let base = Style::new("Default");
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segment = TextSegment {
+            text: "B".to_string(),
+            tags: vec![
+                OverrideTag::Position(5.0, 6.0),
+                OverrideTag::Move(1.0, 2.0, 3.0, 4.0),
+                OverrideTag::Origin(7.0, 8.0),
+                OverrideTag::Clip(0, 0, 10, 10),
+                OverrideTag::InverseClip(0, 0, 20, 20),
+                OverrideTag::Fade(100, 200),
+                OverrideTag::Bold(700),
+                OverrideTag::FontName("Other".to_string()),
+                OverrideTag::FontSize(99.0),
+                OverrideTag::LetterSpacing(9.0),
+                OverrideTag::PrimaryColor(Color::new(255, 0, 0, 0)),
+                OverrideTag::Border(9.0),
+                OverrideTag::Shadow(8.0),
+                OverrideTag::Blur(3.0),
+                OverrideTag::RotationZ(45.0),
+                OverrideTag::ScaleX(150.0),
+                OverrideTag::Alignment(7),
+                OverrideTag::Drawing(1),
+                OverrideTag::DrawingBaseline(5.0),
+                OverrideTag::Reset(None),
+            ],
+        };
+        let seg = Compositor::resolve_segment_style(&resolved, &segment, &event, &[], 0, 0, 2000);
+        // Line-global survivors (last clip wins across forms).
+        assert_eq!(seg.position, Some((5.0, 6.0)));
+        assert!(seg.move_data.is_some());
+        assert_eq!(seg.origin, Some((7.0, 8.0)));
+        assert_eq!(seg.clip, None);
+        assert_eq!(seg.inverse_clip, Some((0, 0, 20, 20)));
+        assert_eq!((seg.fade_in, seg.fade_out), (100, 200));
+        // Ordinary state resets to the style.
+        assert_eq!(seg.font_weight, if base.bold { 700 } else { 400 });
+        assert_eq!(seg.font_name, base.font_name);
+        assert_eq!(seg.font_size, base.font_size);
+        assert_eq!(seg.spacing, base.spacing);
+        assert_eq!(seg.color, base.primary_color);
+        assert_eq!(seg.outline_x, base.outline);
+        assert_eq!(seg.shadow_x, base.shadow);
+        assert_eq!(seg.blur, 0.0);
+        assert_eq!(seg.angle, 0.0);
+        assert_eq!(seg.scale_x, base.scale_x);
+        assert_eq!(seg.alignment, base.alignment);
+        assert_eq!(seg.drawing_mode, 0);
+        assert_eq!(seg.drawing_baseline_offset, 0.0);
+    }
+
+    #[test]
+    fn test_reset_exits_drawing_mode() {
+        // {\p1}...{\r}text: text after \r must not stay in drawing mode.
+        let segments = parse_text_segments("{\\p1}m 0 0 l 100 0 100 100{\\r}Normal text");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segment_drawing_mode(&segments[0].tags, 0), 1);
+        assert_eq!(segment_drawing_mode(&segments[1].tags, 0), 0);
+        // A later \p re-enters drawing mode.
+        let segments = parse_text_segments("{\\p1}a{\\r}b{\\p1}c");
+        assert_eq!(segment_drawing_mode(&segments[2].tags, 0), 1);
+        // Break escapes work again after \r (drawing no longer swallows them).
+        let segments = parse_text_segments("{\\p1}a{\\r}x\\Ny");
+        let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
+        assert!(joined.contains('\n'), "post-\\r \\N must break: {joined:?}");
+        // Resolved style agrees.
+        let base = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\p1}m 0 0{\\r}Hi",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(&event.text);
+        let seg =
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &[], 0, 0, 2000);
+        assert_eq!(seg.drawing_mode, 0);
+    }
+
+    #[test]
+    fn test_wrapper_resumes_after_reset_from_drawing() {
+        // Wrap tokenizer: text after {\r} wraps normally again instead of
+        // being treated as a verbatim drawing run.
+        let font = fallback_font();
+        let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
+        let out = wrap_event_text(
+            "{\\p1}m 0 0 l 10 0{\\r}aa aa aa aa",
+            0,
+            word_w + 1.0,
+            &[&font],
+            48.0,
+            0.0,
+        );
+        assert!(out.contains('\n'), "post-\\r text must wrap: {out:?}");
+        // Ordered groups: {\r\p1} stays drawing, {\p1\r} does not.
+        let still = wrap_event_text(
+            "{\\r\\p1}m 0 0 l 10 0 aa aa aa aa",
+            0,
+            word_w + 1.0,
+            &[&font],
+            48.0,
+            0.0,
+        );
+        assert!(
+            !still.contains('\n'),
+            "drawing run must not wrap: {still:?}"
+        );
+    }
+
+    #[test]
+    fn test_late_an_aligns_whole_line() {
+        // \an anywhere positions the entire line (last wins).
+        let base = Style::new("Default");
+        for text in ["{\\an7}Hi", "Hi{\\an7}"] {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            assert_eq!(
+                Compositor::resolve_style(&base, &event).alignment,
+                7,
+                "{text:?} must align the whole line"
+            );
+        }
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\an7}A{\\an1}B",
+        )
+        .unwrap();
+        assert_eq!(Compositor::resolve_style(&base, &event).alignment, 1);
+        // Render-level: late \an7 moves all ink to the top half.
+        let top = render_text("AAAA{\\an7}", 1000);
+        let bottom = render_text("AAAA", 1000);
+        let (_, th) = ink_bbox(&top).expect("top text renders");
+        let (_, bh) = ink_bbox(&bottom).expect("bottom text renders");
+        assert!(th > 0 && bh > 0);
+        let top_y = (0..top.height)
+            .find(|&y| (0..top.width).any(|x| top.get_pixel(x, y)[3] > 0))
+            .unwrap();
+        let bottom_y = (0..bottom.height)
+            .find(|&y| (0..bottom.width).any(|x| bottom.get_pixel(x, y)[3] > 0))
+            .unwrap();
+        assert!(top_y < 240, "late \\an7 must move ink up, got {top_y}");
+        assert!(
+            bottom_y > 240,
+            "default alignment stays down, got {bottom_y}"
+        );
+    }
+
+    #[test]
+    fn test_late_q_sets_event_wrap() {
+        // A late \q2 turns the soft \n into a hard break event-wide.
+        let one_line = render_text("A\\nB", 1000);
+        let two_lines = render_text("A\\nB{\\q2}", 1000);
+        let (_, h1) = ink_bbox(&one_line).expect("renders");
+        let (_, h2) = ink_bbox(&two_lines).expect("renders");
+        assert!(h2 > h1 * 3 / 2, "late \\q2 must hard-break: {h1} vs {h2}");
+    }
+
+    #[test]
+    fn test_multiple_global_tags_last_wins() {
+        // Repeated \pos: last one wins.
+        let base = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\pos(10,10)}A{\\pos(100,100)}B",
+        )
+        .unwrap();
+        assert_eq!(
+            Compositor::resolve_style(&base, &event).position,
+            Some((100.0, 100.0))
+        );
+        // Clip forms: strictly last tag wins (no intersection stacking).
+        for (text, want_clip, want_iclip) in [
+            (
+                "{\\clip(0,0,10,10)}A{\\iclip(0,0,20,20)}B",
+                None,
+                Some((0, 0, 20, 20)),
+            ),
+            (
+                "{\\iclip(0,0,20,20)}A{\\clip(0,0,10,10)}B",
+                Some((0, 0, 10, 10)),
+                None,
+            ),
+        ] {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            let r = Compositor::resolve_style(&base, &event);
+            assert_eq!(
+                (r.clip, r.inverse_clip),
+                (want_clip, want_iclip),
+                "{text:?}"
+            );
+        }
+        // Rect then vector (and back): single clip state.
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\clip(0,0,10,10)}A{\\clip(m 0 0 l 9 0 l 9 9)}B",
+        )
+        .unwrap();
+        let r = Compositor::resolve_style(&base, &event);
+        assert!(r.clip.is_none() && r.clip_vector.is_some());
+        // \pos + \move: move animation takes precedence (locked behavior;
+        // reference-fixture verification tracked in CONFORMANCE.md).
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:04.00,Default,,0,0,0,,{\\pos(10,10)\\move(0,0,100,0)}Hi",
+        )
+        .unwrap();
+        let r = Compositor::resolve_style(&base, &event);
+        assert_eq!(r.position, Some((10.0, 10.0)));
+        assert!(r.move_data.is_some());
+        let moved = render_text("{\\pos(10,10)\\move(0,0,100,0)}Hi", 2000);
+        let static_pos = render_text("{\\pos(10,10)}Hi", 2000);
+        assert_ne!(moved.as_bytes(), static_pos.as_bytes());
+    }
+
     fn render_event_text(text: &str, scaled: bool) -> RenderBuffer {
+        render_event_effect(text, "", scaled, 500)
+    }
+
+    fn render_event_effect(text: &str, effect: &str, scaled: bool, time_ms: u64) -> RenderBuffer {
         let mut comp = Compositor::new();
         let mut fm = FontManager::new();
         fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
             .unwrap();
         let event = Event::parse_from_line(&format!(
-            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{}",
-            text
+            "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,{},{}",
+            effect, text
         ))
         .unwrap();
         let style = Style::new("Default");
@@ -2240,7 +3192,7 @@ mod tests {
             &event,
             &resolved,
             &fm,
-            500,
+            time_ms,
             640,
             200,
             320,
@@ -2249,6 +3201,32 @@ mod tests {
             &[],
         );
         buf
+    }
+
+    fn painted_cols(buf: &RenderBuffer) -> (u32, u32) {
+        let mut min_x = u32::MAX;
+        let mut max_x = 0;
+        for (i, px) in buf.as_bytes().chunks_exact(4).enumerate() {
+            if px[3] > 0 {
+                let x = (i as u32) % buf.width;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+        }
+        (min_x, max_x)
+    }
+
+    fn painted_rows(buf: &RenderBuffer) -> (u32, u32) {
+        let mut min_y = u32::MAX;
+        let mut max_y = 0;
+        for (i, px) in buf.as_bytes().chunks_exact(4).enumerate() {
+            if px[3] > 0 {
+                let y = (i as u32) / buf.width;
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+        (min_y, max_y)
     }
 
     fn painted_pixels(buf: &RenderBuffer) -> usize {
@@ -2290,6 +3268,428 @@ mod tests {
         assert_eq!(painted_pixels(&iclipped), painted_pixels(&plain));
     }
 
+    /// Plan #28: `\pN` modes halve drawing units per step.
+    #[test]
+    fn test_drawing_unit_scale_p_modes() {
+        assert_eq!(drawing_unit_scale(2.0, 2.0, 0), 2.0);
+        assert_eq!(drawing_unit_scale(2.0, 2.0, 1), 2.0);
+        assert_eq!(drawing_unit_scale(2.0, 2.0, 2), 1.0);
+        assert_eq!(drawing_unit_scale(2.0, 2.0, 3), 0.5);
+        assert_eq!(drawing_unit_scale(2.0, 2.0, 4), 0.25);
+    }
+
+    /// Plan #28: end-to-end `\p2` renders at quarter area of `\p1`.
+    #[test]
+    fn test_drawing_p2_renders_smaller_than_p1() {
+        let square = "m 0 0 l 40 0 l 40 40 l 0 40";
+        let p1 = painted_pixels(&render_event_text(&format!("{{\\p1}}{square}"), true));
+        let p2 = painted_pixels(&render_event_text(&format!("{{\\p2}}{square}"), true));
+        assert!(p1 > 200, "p1 pixels: {p1}");
+        assert!(p2 > 20, "p2 pixels: {p2}");
+        let ratio = p1 as f64 / p2 as f64;
+        assert!(
+            (3.0..5.0).contains(&ratio),
+            "area ratio ~4x, got {ratio} ({p1}/{p2})"
+        );
+    }
+
+    /// Plan #28: `\pbo` shifts drawing placement vertically.
+    #[test]
+    fn test_pbo_shifts_drawing() {
+        fn min_row(buf: &RenderBuffer) -> u32 {
+            buf.as_bytes()
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, p)| p[3] > 0)
+                .map(|(i, _)| (i as u32) / buf.width)
+                .min()
+                .unwrap_or(u32::MAX)
+        }
+        let square = "m 0 0 l 40 0 l 40 40 l 0 40";
+        let plain = render_event_text(&format!("{{\\p1}}{square}"), true);
+        let shifted = render_event_text(&format!("{{\\p1\\pbo-20}}{square}"), true);
+        let dy = min_row(&shifted) as i32 - min_row(&plain) as i32;
+        // unit is 0.5 video px per drawing unit, so pbo -20 moves down 10px.
+        assert!((8..=12).contains(&dy), "pbo shift rows: {dy}");
+    }
+
+    /// Plan #27: the `\clip(scale, ...)` argument scales drawing units.
+    #[test]
+    fn test_vector_clip_scale_argument() {
+        // Centered band in script coords: covers centered text at
+        // scale 1, shrinks away from it at scale 2.
+        let band = "m 240 0 l 400 0 l 400 200 l 240 200";
+        let keep = render_event_text(&format!("{{\\clip(1,{band})}}Hello"), true);
+        assert!(painted_pixels(&keep) > 50, "scale 1 keeps text");
+        let drop = render_event_text(&format!("{{\\clip(2,{band})}}Hello"), true);
+        assert_eq!(painted_pixels(&drop), 0, "scale 2 drops text");
+    }
+
+    /// Plan #27: B-spline vector clips mask without panicking.
+    #[test]
+    fn test_vector_clip_bspline() {
+        let plain = painted_pixels(&render_event_text("Hello", true));
+        // Spline hump over the left half only: must remove some pixels.
+        let spline = "m 0 0 l 0 200 l 320 200 s 320 100 160 60 0 100 c";
+        let clipped = render_event_text(&format!("{{\\clip({spline})}}Hello"), true);
+        let kept = painted_pixels(&clipped);
+        assert!(kept > 0 && kept < plain, "plain {plain}, kept {kept}");
+    }
+
+    /// Plan #27: out-of-viewport vector clips are safe no-ops-ish.
+    #[test]
+    fn test_vector_clip_outside_viewport_safe() {
+        let far = "m 100000 100000 l 200000 100000 l 200000 200000 l 100000 200000";
+        let clipped = render_event_text(&format!("{{\\clip({far})}}Hello"), true);
+        assert_eq!(painted_pixels(&clipped), 0);
+        let iclipped = render_event_text(&format!("{{\\iclip({far})}}Hello"), true);
+        assert!(painted_pixels(&iclipped) > 100);
+    }
+
+    /// Plan #27: blur happens before clipping, so blurred pixels stay
+    /// inside the clip rect instead of bleeding past it.
+    #[test]
+    fn test_clip_with_blur_stays_inside() {
+        let buf = render_event_text("{\\blur5\\clip(240,0,400,200)}Hello", true);
+        assert!(painted_pixels(&buf) > 0);
+        // Script x 240..400 maps to video x 120..200 at 0.5 scale.
+        for (i, px) in buf.as_bytes().chunks_exact(4).enumerate() {
+            if px[3] > 0 {
+                let x = (i as u32) % buf.width;
+                assert!((120..=200).contains(&x), "blur bled to x={x}");
+            }
+        }
+    }
+
+    /// Plan #27: rotation + clip composes (screen-space clip bounds).
+    #[test]
+    fn test_clip_with_rotation_stays_inside() {
+        let buf = render_event_text("{\\frz45\\clip(240,0,400,200)}Hello", true);
+        assert!(painted_pixels(&buf) > 0);
+        for (i, px) in buf.as_bytes().chunks_exact(4).enumerate() {
+            if px[3] > 0 {
+                let x = (i as u32) % buf.width;
+                assert!((120..=200).contains(&x), "rotated pixel at x={x}");
+            }
+        }
+    }
+
+    /// Plan #24: a right-to-left banner moves left between frames.
+    #[test]
+    fn test_banner_moves_left_between_frames() {
+        let early = render_event_effect("Hello banner", "Banner;20", true, 200);
+        let late = render_event_effect("Hello banner", "Banner;20", true, 1200);
+        assert!(painted_pixels(&early) > 0);
+        assert!(painted_pixels(&late) > 0);
+        let (early_min, _) = painted_cols(&early);
+        let (late_min, _) = painted_cols(&late);
+        assert!(late_min < early_min, "{late_min} < {early_min}");
+    }
+
+    /// Plan #24: `lefttoright` banners move right between frames.
+    #[test]
+    fn test_banner_lefttoright_moves_right() {
+        let early = render_event_effect("Hello banner", "Banner;20;1", true, 200);
+        let late = render_event_effect("Hello banner", "Banner;20;1", true, 1200);
+        assert!(painted_pixels(&early) > 0);
+        assert!(painted_pixels(&late) > 0);
+        let (_, early_max) = painted_cols(&early);
+        let (_, late_max) = painted_cols(&late);
+        assert!(late_max > early_max, "{late_max} > {early_max}");
+    }
+
+    /// Plan #24: banner disables auto-wrap (single line, VSFilter
+    /// wrapStyle 2), while the same text wraps without the effect.
+    #[test]
+    fn test_banner_disables_wrap() {
+        let long = "Hello world this is a long line that must wrap around nicely";
+        let plain = render_event_effect(long, "", true, 500);
+        let banner = render_event_effect(long, "Banner;5", true, 2500);
+        let (plain_top, plain_bottom) = painted_rows(&plain);
+        let (banner_top, banner_bottom) = painted_rows(&banner);
+        assert!(
+            plain_bottom - plain_top > banner_bottom - banner_top,
+            "plain {}..{}, banner {}..{}",
+            plain_top,
+            plain_bottom,
+            banner_top,
+            banner_bottom
+        );
+    }
+
+    /// Plan #24: scroll-up stays inside its band and moves up.
+    #[test]
+    fn test_scroll_up_clips_to_band_and_moves_up() {
+        // Band 20..180 script px maps to video rows 10..90.
+        let early = render_event_effect("Hello scroll", "Scroll up;20;180;50", true, 1000);
+        let late = render_event_effect("Hello scroll", "Scroll up;20;180;50", true, 2000);
+        assert!(painted_pixels(&early) > 0);
+        assert!(painted_pixels(&late) > 0);
+        for buf in [&early, &late] {
+            let (top, bottom) = painted_rows(buf);
+            assert!((10..90).contains(&top), "top {top}");
+            assert!((10..90).contains(&bottom), "bottom {bottom}");
+        }
+        let (early_top, _) = painted_rows(&early);
+        let (late_top, _) = painted_rows(&late);
+        assert!(late_top < early_top, "{late_top} < {early_top}");
+    }
+
+    /// Plan #24: scroll-down moves down and respects the band.
+    #[test]
+    fn test_scroll_down_moves_down_inside_band() {
+        // Effective delay is 50/0.5 = 100ms/px: at 2000ms the block
+        // has entered the band, at 3000ms it has moved 10px further.
+        let early = render_event_effect("Hello scroll", "Scroll down;20;180;50", true, 2000);
+        let late = render_event_effect("Hello scroll", "Scroll down;20;180;50", true, 3000);
+        assert!(painted_pixels(&early) > 0);
+        assert!(painted_pixels(&late) > 0);
+        for buf in [&early, &late] {
+            let (top, bottom) = painted_rows(buf);
+            assert!((10..90).contains(&top), "top {top}");
+            assert!((10..90).contains(&bottom), "bottom {bottom}");
+        }
+        let (early_top, _) = painted_rows(&early);
+        let (late_top, _) = painted_rows(&late);
+        assert!(late_top > early_top, "{late_top} > {early_top}");
+    }
+
+    /// Plan #24: `delay = 0` is the fastest finite speed (no hang,
+    /// no division by zero): the banner crosses quickly.
+    #[test]
+    fn test_banner_delay_zero_is_fastest() {
+        // Effective delay clamps to 1ms/px: at 100ms the banner has
+        // travelled 100px (visible), by 500ms it has left the frame.
+        let at100 = render_event_effect("Hi", "Banner;0", true, 100);
+        let at500 = render_event_effect("Hi", "Banner;0", true, 500);
+        assert!(painted_pixels(&at100) > 0);
+        assert_eq!(painted_pixels(&at500), 0);
+    }
+
+    /// Plan #24: scroll fadeaway ramps alpha at the band edges.
+    #[test]
+    fn test_scroll_fadeaway_ramps_alpha() {
+        // Three tall lines scrolling down: at 1200ms the block spans
+        // the band top (video row 10), so rows 10..30 sit in the top
+        // fade ramp (fadeaway 40 script px = 20 video px) while rows
+        // past 30 render opaque.
+        let buf = render_event_effect("{\\fs40}A\\NB\\NC", "Scroll down;20;180;20;40", true, 1200);
+        assert!(painted_pixels(&buf) > 0);
+        let row_alpha = |y: u32| -> u8 {
+            buf.as_bytes()
+                .chunks_exact(4)
+                .skip((y * buf.width) as usize)
+                .take(buf.width as usize)
+                .map(|p| p[3])
+                .max()
+                .unwrap_or(0)
+        };
+        assert_eq!(row_alpha(10), 0, "band top fully faded");
+        assert!(row_alpha(15) > 0, "ramp row faded in");
+        assert!(row_alpha(15) < row_alpha(35), "ramp below opaque rows");
+    }
+
+    /// Plan #24: the scroll band clip must not erase other events'
+    /// pixels (isolated event buffer + blend-back).
+    #[test]
+    fn test_scroll_clip_preserves_other_pixels() {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,Scroll up;60;140;50,Hi",
+        )
+        .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+        let mut buf = RenderBuffer::new(320, 100).unwrap();
+        // Marker "other event" pixel far above the band (rows 30..70).
+        buf.blend_pixel(10, 5, 255, 0, 0, 255);
+        comp.composite_event(
+            &mut buf,
+            &event,
+            &resolved,
+            &fm,
+            2500,
+            640,
+            200,
+            320,
+            100,
+            0,
+            &[],
+        );
+        assert_eq!(buf.get_pixel(10, 5), [255, 0, 0, 255]);
+    }
+
+    /// Plan #24: unknown/garbage effects render as plain events.
+    #[test]
+    fn test_unknown_effect_renders_plain() {
+        let plain = render_event_effect("Hello", "", true, 500);
+        for effect in ["Karaoke;10", "Banner", "Scroll up;10", "Banner;abc", ";20"] {
+            let buf = render_event_effect("Hello", effect, true, 500);
+            assert_eq!(
+                buf.as_bytes(),
+                plain.as_bytes(),
+                "effect {effect:?} must be ignored"
+            );
+        }
+    }
+
+    /// Plan #61: `\rName` matching is case-sensitive like every
+    /// other style lookup; a case mismatch falls back to the event style.
+    #[test]
+    fn test_reset_named_style_case_sensitive() {
+        let base = Style::new("Default");
+        let alt = Style::new("Alt");
+        let styles = vec![base.clone(), alt];
+        let resolve_after_reset = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            let resolved = Compositor::resolve_style(&base, &event);
+            let segments = parse_text_segments(&event.text);
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &styles, 0, 0, 2000)
+                .base_style
+                .name
+                .clone()
+        };
+        assert_eq!(resolve_after_reset("A{\\rAlt}B"), "Alt");
+        assert_eq!(resolve_after_reset("A{\\ralt}B"), "Default");
+        assert_eq!(resolve_after_reset("A{\\r Alt }B"), "Alt");
+    }
+
+    /// Plan #61: `\rAlt` restores alignment/border from the target
+    /// style, while nonzero event margins still override the target.
+    #[test]
+    fn test_reset_restores_target_layout_but_keeps_event_margins() {
+        let base = Style::new("Default");
+        let mut alt = Style::new("Alt");
+        alt.alignment = 7;
+        alt.outline = 9.0;
+        alt.margin_l = 11;
+        let styles = vec![base.clone(), alt];
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,33,,A{\\rAlt}B")
+                .unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(&event.text);
+        let seg =
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &styles, 0, 0, 2000);
+        assert_eq!(seg.alignment, 7);
+        assert_eq!(seg.outline_x, 9.0);
+        assert_eq!(seg.margin_l, 11);
+        // Event MarginV overrides the target style's margin.
+        assert_eq!(seg.margin_v, 33);
+    }
+
+    /// Plan #62: `\q` is event-level and survives `\r`; the last
+    /// group wins. Rendered: a `\q2` line stays single-line even
+    /// with a mid-line reset, while `\q0` wraps.
+    #[test]
+    fn test_wrap_override_survives_reset_last_wins() {
+        let long = "Hello world this is a long line that must wrap around nicely";
+        let nowrap = render_event_text(&format!("{{\\q2}}{long}{{\\r}}tail"), true);
+        let (top, bottom) = painted_rows(&nowrap);
+        let nowrap_span = bottom - top;
+        let wrapped = render_event_text(&format!("{{\\q2}}a{{\\q0}}{long}"), true);
+        let (top, bottom) = painted_rows(&wrapped);
+        let wrapped_span = bottom - top;
+        assert!(
+            wrapped_span > nowrap_span + 5,
+            "q2 single-line ({nowrap_span}) vs q0 wrapped ({wrapped_span})"
+        );
+    }
+
+    /// Plan #63: `\an` applies event-wide wherever it appears; the
+    /// last occurrence wins (VSFilter line-global alignment).
+    #[test]
+    fn test_alignment_late_tag_applies_event_wide() {
+        let base = Style::new("Default");
+        let resolve = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            Compositor::resolve_style(&base, &event).alignment
+        };
+        assert_eq!(resolve("Hello{\\an7}"), 7);
+        assert_eq!(resolve("{\\an7}Hello{\\an1}"), 1);
+        assert_eq!(resolve("{\\an9}A{\\r}B"), 9);
+    }
+
+    /// Plan #64/#65: `\pos` and `\move` share one slot — the last
+    /// tag wins in either order (VSFilter EF_MOVE parity).
+    #[test]
+    fn test_pos_move_last_wins_both_orders() {
+        let base = Style::new("Default");
+        let resolve = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            Compositor::resolve_style(&base, &event)
+        };
+        let r = resolve("{\\pos(10,10)}A{\\move(0,0,100,0)}B");
+        assert!(r.move_data.is_some());
+        let r = resolve("{\\move(0,0,100,0)}A{\\pos(100,100)}B");
+        assert!(r.move_data.is_none());
+        assert_eq!(r.position, Some((100.0, 100.0)));
+        // Render-level: pos-after-move is static across frames.
+        let a = render_event_effect("{\\move(0,0,100,0)}A{\\pos(100,100)}Hi", "", true, 500);
+        let b = render_event_effect("{\\move(0,0,100,0)}A{\\pos(100,100)}Hi", "", true, 1500);
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    /// Plan #64: `\fad` and `\fade` share one slot — the last tag
+    /// wins in either order (VSFilter EF_FADE parity).
+    #[test]
+    fn test_fad_fade_last_wins_both_orders() {
+        let base = Style::new("Default");
+        let resolve = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            Compositor::resolve_style(&base, &event)
+        };
+        let fade = "\\fade(255,0,255,0,500,1500,2000)";
+        let r = resolve(&format!("{{\\fad(100,200)}}A{{{fade}}}B"));
+        assert!(r.complex_fade.is_some());
+        assert_eq!((r.fade_in, r.fade_out), (0, 0));
+        let r = resolve(&format!("{{{fade}}}A{{\\fad(100,200)}}B"));
+        assert!(r.complex_fade.is_none());
+        assert_eq!((r.fade_in, r.fade_out), (100, 200));
+    }
+
+    /// Plan #66: rect/vector/normal/inverse clips share one slot —
+    /// the last `\clip`-family tag wins across all forms.
+    #[test]
+    fn test_clip_forms_last_wins_across_forms() {
+        let base = Style::new("Default");
+        let resolve = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            Compositor::resolve_style(&base, &event)
+        };
+        let vector = "\\clip(m 0 0 l 10 0 l 10 10)";
+        // Rect then vector: only the vector survives.
+        let r = resolve(&format!("{{\\clip(0,0,10,10)}}A{{{vector}}}B"));
+        assert!(r.clip.is_none());
+        assert!(r.clip_vector.is_some());
+        // Vector then rect: only the rect survives.
+        let r = resolve(&format!("{{{vector}}}A{{\\clip(0,0,10,10)}}B"));
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.clip_vector.is_none());
+        // Clip then iclip: only the inverse survives.
+        let r = resolve("{\\clip(0,0,10,10)}A{\\iclip(1,1,9,9)}B");
+        assert!(r.clip.is_none());
+        assert_eq!(r.inverse_clip, Some((1, 1, 9, 9)));
+    }
+
     #[test]
     fn test_extract_clean_text_wrap_aware() {
         let comp = Compositor::new();
@@ -2303,6 +3703,10 @@ mod tests {
         assert!(text.contains("m 0 0"));
         let (_, drawing) = comp.extract_clean_text("{\\p2}x{\\p0}y", 0);
         assert!(!drawing);
+        // \r exits drawing mode too.
+        let (text, drawing) = comp.extract_clean_text("{\\p1}m 0 0{\\r}a\\Nb", 0);
+        assert!(!drawing);
+        assert_eq!(text, "m 0 0a\nb");
     }
 
     #[test]
@@ -2359,6 +3763,121 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_timing_forms() {
+        // \t(accel) / \t(t1,t2) / \t(t1,t2,accel) parse distinctly and
+        // animate only inside their window.
+        let base = Style::new("Default");
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let size_at = |text: &str, time_ms: u64| {
+            let segments = parse_text_segments(text);
+            Compositor::resolve_segment_style(
+                &resolved,
+                &segments[0],
+                &event,
+                &[],
+                time_ms,
+                0,
+                10_000,
+            )
+            .font_size
+        };
+        // Full form: idle before t1, midpoint halfway, target after t2.
+        assert_eq!(size_at(r"{\t(1000,2000,\fs60)}x", 500), base.font_size);
+        assert!((size_at(r"{\t(1000,2000,\fs60)}x", 1500) - 54.0).abs() < 1e-9);
+        assert_eq!(size_at(r"{\t(1000,2000,\fs60)}x", 2500), 60.0);
+        // Accel-only form spans the whole event (t1=t2=0).
+        let tags = OverrideTag::parse_from_text(r"{\t(2.0,\fs60)}");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform { t1: 0, t2: 0, .. }
+        ));
+        assert!((size_at(r"{\t(2.0,\fs60)}x", 5000) - 51.0).abs() < 1e-9);
+        // (t1,t2) form defaults to linear (accel 1).
+        let tags = OverrideTag::parse_from_text(r"{\t(100,200,\fs60)}");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform {
+                t1: 100,
+                t2: 200,
+                ..
+            }
+        ));
+        assert!((size_at(r"{\t(100,200,\fs60)}x", 150) - 54.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_transform_animates_supported_set() {
+        // Every animatable tag reaches its target at progress 1.
+        let base = Style::new("Default");
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(
+            r"{\t(0,1,\c&H0000FF&\3c&H00FF00&\alpha&H80&\fs60\fscx150\fscy80\fsp4\frz45\frx10\fry20\fax1\fay2\bord5\xbord6\ybord7\shad3\xshad4\yshad5\blur2)}x",
+        );
+        let seg = Compositor::resolve_segment_style(
+            &resolved,
+            &segments[0],
+            &event,
+            &[],
+            5000,
+            0,
+            10_000,
+        );
+        assert_eq!(seg.color, Color::new(0x80, 255, 0, 0));
+        assert_eq!(seg.outline_color.green, 255);
+        assert_eq!(seg.font_size, 60.0);
+        assert_eq!(seg.scale_x, 150.0);
+        assert_eq!(seg.scale_y, 80.0);
+        assert_eq!(seg.spacing, 4.0);
+        assert_eq!(seg.angle, 45.0);
+        assert_eq!(seg.rotation_x, 10.0);
+        assert_eq!(seg.rotation_y, 20.0);
+        assert_eq!(seg.shear_x, 1.0);
+        assert_eq!(seg.shear_y, 2.0);
+        assert_eq!(seg.outline_x, 6.0);
+        assert_eq!(seg.outline_y, 7.0);
+        assert_eq!(seg.shadow_x, 4.0);
+        assert_eq!(seg.shadow_y, 5.0);
+        assert_eq!(seg.blur, 2.0);
+    }
+
+    #[test]
+    fn test_transform_ignores_non_animatable() {
+        // Position/clip/layout/discrete tags inside \t have no effect.
+        let base = Style::new("Default");
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(
+            r"{\t(0,1,\pos(1,2)\move(1,2,3,4)\org(5,6)\clip(0,0,9,9)\iclip(0,0,9,9)\an7\q2\p1\b1\i1\fnOther\fe2\k50\r\t(0,1,\fs99))}x",
+        );
+        let seg = Compositor::resolve_segment_style(
+            &resolved,
+            &segments[0],
+            &event,
+            &[],
+            5000,
+            0,
+            10_000,
+        );
+        assert_eq!(seg.position, None);
+        assert!(seg.move_data.is_none());
+        assert_eq!(seg.origin, None);
+        assert_eq!(seg.clip, None);
+        assert_eq!(seg.inverse_clip, None);
+        assert_eq!(seg.alignment, base.alignment);
+        assert_eq!(seg.drawing_mode, 0);
+        assert_eq!(seg.font_weight, 400);
+        assert_eq!(seg.italic, base.italic);
+        assert_eq!(seg.font_name, base.font_name);
+        assert_eq!(seg.font_encoding, base.encoding);
+        assert_eq!(seg.font_size, base.font_size);
+    }
+
+    #[test]
     fn test_transform_acceleration_direction() {
         // accel = 1 linear; > 1 starts slow; < 1 starts fast
         assert!((Compositor::apply_accel(0.25, 1.0) - 0.25).abs() < 1e-9);
@@ -2389,7 +3908,7 @@ mod tests {
     }
 
     #[test]
-    fn test_back_colour_override_is_used_for_shadow_and_box() {
+    fn test_back_colour_override_sets_shadow() {
         let style = Style::new("Default");
         let event = Event::parse_from_line(
             "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\4c&HFF00FF&}Text",
@@ -2403,14 +3922,15 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_greedy_top_wider() {
+    fn test_wrap_style_0_balances_lines() {
         let font = fallback_font();
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
         let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
-        // Room for exactly three words per line
+        // Room for exactly three words per line: greedy alone would emit
+        // 3+1, but style 0 rebalances (libass `wrap_lines_smart`) to 2+2.
         let max = word_w * 3.0 + space_w * 2.0 + 0.5;
-        let out = wrap_event_text("aa aa aa aa", 0, max, &font, 48.0, 0.0);
-        assert_eq!(out, "aa aa aa\naa");
+        let out = wrap_event_text("aa aa aa aa", 0, max, &[&font], 48.0, 0.0);
+        assert_eq!(out, "aa aa\naa aa");
     }
 
     #[test]
@@ -2419,7 +3939,7 @@ mod tests {
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
         let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
         let max = word_w * 3.0 + space_w * 2.0 + 0.5;
-        let out = wrap_event_text("aa aa aa aa", 3, max, &font, 48.0, 0.0);
+        let out = wrap_event_text("aa aa aa aa", 3, max, &[&font], 48.0, 0.0);
         assert_eq!(out, "aa\naa aa aa");
     }
 
@@ -2429,7 +3949,7 @@ mod tests {
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
         let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
         let max = word_w + space_w + 0.5; // only one word fits per line
-        let out = wrap_event_text("{\\c&H00FF00&}aa aa\\Naa", 0, max, &font, 48.0, 0.0);
+        let out = wrap_event_text("{\\c&H00FF00&}aa aa\\Naa", 0, max, &[&font], 48.0, 0.0);
         // Tag group survives, wrapping occurs, and the explicit break is kept
         assert_eq!(out, "{\\c&H00FF00&}aa\naa\naa");
     }
@@ -2437,7 +3957,7 @@ mod tests {
     #[test]
     fn test_wrap_no_spaces_unchanged() {
         let font = fallback_font();
-        let out = wrap_event_text("aaaaaaaa", 0, 5.0, &font, 48.0, 0.0);
+        let out = wrap_event_text("aaaaaaaa", 0, 5.0, &[&font], 48.0, 0.0);
         assert_eq!(out, "aaaaaaaa");
     }
 
@@ -2448,7 +3968,7 @@ mod tests {
         // "Hel" and "lo" are adjacent (no space) — must NOT get a space inserted.
         let text = "{\\k80}Hel{\\k60}lo {\\k100}world!";
         // Use a huge max_width so no wrapping occurs — we only test space preservation.
-        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        let out = wrap_event_text(text, 0, f64::MAX, &[&font], 48.0, 0.0);
         assert_eq!(out, "{\\k80}Hel{\\k60}lo {\\k100}world!");
     }
 
@@ -2457,7 +3977,7 @@ mod tests {
         let font = fallback_font();
         // "line " has a trailing space before the next tag group.
         let text = "{\\k80}Out{\\k70}line {\\k80}dis{\\k60}ap{\\k70}pears";
-        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        let out = wrap_event_text(text, 0, f64::MAX, &[&font], 48.0, 0.0);
         // The space between "line" and "dis" must be preserved; no space between "Out"|"line".
         assert_eq!(out, "{\\k80}Out{\\k70}line {\\k80}dis{\\k60}ap{\\k70}pears");
     }
@@ -2467,15 +3987,625 @@ mod tests {
         let font = fallback_font();
         // Inline tags like {\b0} between words must not eat the space.
         let text = "{\\b1}Bold{\\b0} {\\i1}Italic{\\i0} {\\u1}Under{\\u0}";
-        let out = wrap_event_text(text, 0, f64::MAX, &font, 48.0, 0.0);
+        let out = wrap_event_text(text, 0, f64::MAX, &[&font], 48.0, 0.0);
         assert_eq!(out, "{\\b1}Bold{\\b0} {\\i1}Italic{\\i0} {\\u1}Under{\\u0}");
+    }
+
+    fn karaoke_test_widths(segments: &[TextSegment]) -> Vec<f64> {
+        let font = fallback_font();
+        segments
+            .iter()
+            .map(|s| TextShaper::measure_text(&s.text, &font, 48.0, 0.0))
+            .collect()
+    }
+
+    #[test]
+    fn test_shear_applies_to_rotated_text_at_render() {
+        // Order-sensitive render test. libass `calc_transform_matrix`
+        // shears the glyph-local outline FIRST (x1/y1 shear basis),
+        // then rotates (frz → frx → fry); VSFilter `Transform_C`
+        // matches. {\frz90}MMMM is a tall narrow column. Pre-rotation
+        // \fax1 slants each glyph horizontally first, and the 90°
+        // rotation turns that extra width into extra HEIGHT: the
+        // column must grow TALLER with width roughly unchanged.
+        // (temp_plan #8 claimed post-rotation shear; that claim was
+        // wrong — verified against libass source — so this test pins
+        // the reference pre-rotation order instead.)
+        // Centered (\an5) so rotation cannot push ink off-screen and
+        // shrink the box by clipping rather than geometry.
+        let plain = render_text(r"{\an5\frz90}MMMM", 1000);
+        let sheared = render_text(r"{\an5\fax1\frz90}MMMM", 1000);
+        let (pw, ph) = ink_bbox(&plain).expect("rotated text must render");
+        let (sw, sh) = ink_bbox(&sheared).expect("sheared text must render");
+        assert!(
+            sh > ph,
+            "pre-rotation fax must lengthen the rotated column ({sh} <= {ph})"
+        );
+        assert!(
+            sw.abs_diff(pw) < pw / 2,
+            "pre-rotation fax must roughly preserve column width ({sw} vs {pw})"
+        );
+        assert_ne!(plain.as_bytes(), sheared.as_bytes());
+        // Dual axis: pre-rotation \fay slants vertically, so after a
+        // 90° rotation the column grows WIDER with height preserved.
+        let fayed = render_text(r"{\an5\fay1\frz90}MMMM", 1000);
+        let (fw, fh) = ink_bbox(&fayed).expect("fay text must render");
+        assert!(
+            fw > pw,
+            "pre-rotation fay must widen the rotated column ({fw} <= {pw})"
+        );
+        assert!(
+            fh.abs_diff(ph) < ph / 2,
+            "pre-rotation fay must roughly preserve column height ({fh} vs {ph})"
+        );
+    }
+
+    #[test]
+    fn test_combined_fax_fay_frx_fry_frz_org_renders() {
+        // Combined transform path (shear + all rotations + explicit
+        // origin) must render deterministically and differ from the
+        // shear-free variant.
+        let a = render_text(r"{\fax0.5\fay-0.25\frx30\fry20\frz10\org(320,240)}Ag", 1000);
+        let b = render_text(r"{\frx30\fry20\frz10\org(320,240)}Ag", 1000);
+        assert!(ink_bbox(&a).is_some());
+        assert!(ink_bbox(&b).is_some());
+        assert_ne!(a.as_bytes(), b.as_bytes());
+        // Extreme shear clamps instead of exploding or panicking.
+        let c = render_text(r"{\fax99999\fay-99999\frz45}Ag", 1000);
+        assert!(ink_bbox(&c).is_some());
+    }
+
+    #[test]
+    fn test_multiline_centers_each_line() {
+        // Centered alignment centers every line on its own width (libass
+        // behavior): the short second line must not hug the long line's
+        // left edge. 640x480 buffer, center x = 320.
+        let buf = render_text(r"{\an5}MMMMMMMM\NMM", 1000);
+        let bands = ink_bands(&buf);
+        assert_eq!(bands.len(), 2, "two ink bands, got {bands:?}");
+        for (i, &(x0, _, x1, _)) in bands.iter().enumerate() {
+            let center = f64::from(x0 + x1) / 2.0;
+            assert!(
+                (center - 320.0).abs() <= 3.0,
+                "line {i} centered at {center}, band {x0}..{x1}"
+            );
+        }
+        // The short line is strictly inset from the long line's edges.
+        assert!(bands[1].0 > bands[0].0 + 10, "bands {bands:?}");
+        assert!(bands[1].2 < bands[0].2 - 10, "bands {bands:?}");
+    }
+
+    #[test]
+    fn test_multiline_right_aligns_each_line() {
+        // \an6: every line's right edge lands on the same x.
+        let buf = render_text(r"{\an6}MMMMMMMM\NMM", 1000);
+        let bands = ink_bands(&buf);
+        assert_eq!(bands.len(), 2, "two ink bands, got {bands:?}");
+        assert!(
+            bands[0].2.abs_diff(bands[1].2) <= 2,
+            "right edges align: {bands:?}"
+        );
+        assert!(bands[1].0 > bands[0].0 + 10, "bands {bands:?}");
+    }
+
+    #[test]
+    fn test_multiline_left_aligns_each_line() {
+        // \an4: every line's left edge lands on the same x.
+        let buf = render_text(r"{\an4}MMMMMMMM\NMM", 1000);
+        let bands = ink_bands(&buf);
+        assert_eq!(bands.len(), 2, "two ink bands, got {bands:?}");
+        assert!(
+            bands[0].0.abs_diff(bands[1].0) <= 2,
+            "left edges align: {bands:?}"
+        );
+    }
+
+    #[test]
+    fn test_fay_baseline_shear_slants_line() {
+        // libass `apply_baseline_shear`: `\fay` shifts each glyph's
+        // baseline cumulatively, so the line slants (later glyphs ride
+        // lower for positive fay) instead of merely slanting each glyph
+        // in place. The first glyph stays put; the line grows taller.
+        let plain = render_text(r"{\an7\fay0}MMMM", 1000);
+        let sheared = render_text(r"{\an7\fay0.5}MMMM", 1000);
+        let (pw, ph) = ink_bbox(&plain).expect("plain renders");
+        let (sw, sh) = ink_bbox(&sheared).expect("sheared renders");
+        assert!(
+            sh > ph + 10,
+            "fay baseline shear must lengthen the line vertically ({sh} vs {ph})"
+        );
+        assert!(
+            sw.abs_diff(pw) <= pw / 2,
+            "fay baseline shear roughly preserves width ({sw} vs {pw})"
+        );
+        // Slant direction: the right half's ink centroid sits lower
+        // (larger y) than the left half's for positive fay.
+        let centroid = |buf: &RenderBuffer, x_lo: u32, x_hi: u32| -> f64 {
+            let (mut sum, mut n) = (0u64, 0u64);
+            for y in 0..buf.height {
+                for x in x_lo..x_hi {
+                    if buf.get_pixel(x, y)[3] > 0 {
+                        sum += u64::from(y);
+                        n += 1;
+                    }
+                }
+            }
+            sum as f64 / n.max(1) as f64
+        };
+        let bands = ink_bands(&sheared);
+        assert_eq!(bands.len(), 1);
+        let (x0, _, x1, _) = bands[0];
+        let mid = (x0 + x1) / 2;
+        let left = centroid(&sheared, x0, mid);
+        let right = centroid(&sheared, mid, x1 + 1);
+        assert!(
+            right > left + 5.0,
+            "positive fay must sink the right side ({right} vs {left})"
+        );
+    }
+
+    #[test]
+    fn test_fay_baseline_shear_resets_each_line() {
+        // The cumulative shear restarts on every line: the second line
+        // rides at the same height with or without `\fay`. Small fay so
+        // the slanted first line cannot bridge the inter-line gap.
+        let plain = render_text(r"{\an7}MM\NMM", 1000);
+        let sheared = render_text(r"{\an7\fay0.15}MM\NMM", 1000);
+        let pb = ink_bands(&plain);
+        let sb = ink_bands(&sheared);
+        assert_eq!(pb.len(), 2, "plain bands {pb:?}");
+        assert_eq!(sb.len(), 2, "sheared bands {sb:?}");
+        assert!(
+            sb[1].1.abs_diff(pb[1].1) <= 2,
+            "second line restarts unshifted: {sb:?} vs {pb:?}"
+        );
+        // ...while the first line slants (its band is taller).
+        assert!(
+            sb[0].3 - sb[0].1 > pb[0].3 - pb[0].1,
+            "first line slants: {sb:?} vs {pb:?}"
+        );
+    }
+
+    #[test]
+    fn test_accumulate_fay_shear_guards() {
+        // Pure helper: scaled advance accumulates; degenerate input is
+        // ignored rather than poisoning the line.
+        let mut acc = 0.0;
+        accumulate_fay_shear(&mut acc, 0.5, 1.0, 1.0, 10.0);
+        assert_eq!(acc, 5.0);
+        accumulate_fay_shear(&mut acc, 0.5, 2.0, 1.0, 10.0);
+        assert_eq!(acc, 7.5);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            accumulate_fay_shear(&mut acc, bad, 1.0, 1.0, 10.0);
+            accumulate_fay_shear(&mut acc, 0.5, bad, 1.0, 10.0);
+            accumulate_fay_shear(&mut acc, 0.5, 1.0, bad, 10.0);
+            accumulate_fay_shear(&mut acc, 0.5, 1.0, 1.0, bad);
+            assert_eq!(acc, 7.5, "bad {bad} ignored");
+        }
+        accumulate_fay_shear(&mut acc, 0.5, 0.0, 1.0, 10.0);
+        accumulate_fay_shear(&mut acc, 0.0, 1.0, 1.0, 10.0);
+        assert_eq!(acc, 7.5);
+    }
+
+    #[test]
+    fn test_frz_positive_runs_counterclockwise() {
+        // Positive `\frz` rotates counterclockwise on screen (libass
+        // `calc_transform_matrix`): the line's left end sinks while the
+        // right end rises.
+        let buf = render_text(r"{\an5\frz30}MMMM", 1000);
+        let bands = ink_bands(&buf);
+        assert_eq!(bands.len(), 1, "one slanted band: {bands:?}");
+        let (x0, _, x1, _) = bands[0];
+        assert!(x1 > x0 + 20, "wide enough to split: {bands:?}");
+        // Left half's lowest ink vs right half's highest ink: with the
+        // left end down and right end up, left-bottom exceeds right-top
+        // by a clear margin.
+        let mut left_bottom = 0u32;
+        let mut right_top = buf.height;
+        let mid = (x0 + x1) / 2;
+        for y in 0..buf.height {
+            for x in x0..mid {
+                if buf.get_pixel(x, y)[3] > 0 {
+                    left_bottom = left_bottom.max(y);
+                }
+            }
+            for x in mid..=x1 {
+                if buf.get_pixel(x, y)[3] > 0 {
+                    right_top = right_top.min(y);
+                }
+            }
+        }
+        assert!(
+            left_bottom > right_top + 10,
+            "left end must sink below right end ({left_bottom} vs {right_top})"
+        );
+    }
+
+    #[test]
+    fn test_fe_resolve_and_reset() {
+        let base = Style::new("Default");
+        assert_eq!(base.encoding, 1);
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fe128}A{\\r}B",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(&event.text);
+        let first =
+            Compositor::resolve_segment_style(&resolved, &segments[0], &event, &[], 0, 0, 2000);
+        assert_eq!(first.font_encoding, 128);
+        // \r resets the encoding to the style default.
+        let second =
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &[], 0, 0, 2000);
+        assert_eq!(second.font_encoding, 1);
+        // \fe renders (no charset remapping, but never breaks shaping).
+        let buf = render_text("{\\fe128}Hi", 1000);
+        assert!(ink_bbox(&buf).is_some());
+    }
+
+    #[test]
+    fn test_kt_explicit_timing() {
+        // Explicit absolute starts with a gap between syllables.
+        let segments = parse_text_segments("{\\kt0\\k50}a{\\kt200\\k50}b");
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
+        assert_eq!(syllables.len(), 2);
+        assert_eq!((syllables[0].start_ms, syllables[0].dur_ms), (0, 500));
+        assert_eq!((syllables[1].start_ms, syllables[1].dur_ms), (2000, 500));
+        assert_eq!(map, vec![Some(0), Some(1)]);
+        // Order within a group: {\k50\kt200} starts at the old clock and
+        // leaves 2000 for the next syllable.
+        let segments = parse_text_segments("{\\k50\\kt200}A{\\k50}B");
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, _) = build_karaoke_timeline(&segments, &widths);
+        assert_eq!(syllables[0].start_ms, 0);
+        assert_eq!(syllables[1].start_ms, 2000);
+        // Render in the gap: first syllable sung, second pending.
+        let buf = render_text("{\\kt0\\k50}a{\\kt200\\k50}b", 1000);
+        let bytes = buf.as_bytes();
+        assert!(bytes
+            .chunks_exact(4)
+            .any(|p| { p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0 }));
+        assert!(bytes
+            .chunks_exact(4)
+            .any(|p| { p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0 }));
+    }
+
+    #[test]
+    fn test_mixed_script_and_missing_glyphs_render() {
+        // CJK + Latin on the fallback chain renders ink (DejaVu covers
+        // Hiragana; anything missing degrades to .notdef, never a gap
+        // in layout or a panic).
+        let mixed = render_text("A\u{3042}\u{65E5}", 1000);
+        assert!(ink_bbox(&mixed).is_some());
+        let missing = render_text("A\u{10FFFF}B", 1000);
+        assert!(ink_bbox(&missing).is_some());
+        // Unknown families still render through manager fallback.
+        let unknown = render_text("{\\fnNoSuchFontXYZ}A", 1000);
+        assert!(ink_bbox(&unknown).is_some());
+    }
+
+    #[test]
+    fn test_wrap_chain_matches_single_font_when_covered() {
+        // Identical-coverage chains wrap exactly like a single font.
+        let font = fallback_font();
+        let single = wrap_event_text("aa aa aa aa", 0, 10.0, &[&font], 48.0, 0.0);
+        let chained = wrap_event_text("aa aa aa aa", 0, 10.0, &[&font, &font], 48.0, 0.0);
+        assert_eq!(single, chained);
+    }
+
+    fn opaque_box_style() -> Style {
+        let mut s = Style::new("Box");
+        s.border_style = 3;
+        s.outline_color = Color::new(0, 255, 0, 0); // opaque red box
+        s.back_color = Color::new(0, 0, 0, 255); // opaque blue: must NOT paint the box
+        s.outline = 2.0;
+        s.shadow = 0.0;
+        s
+    }
+
+    fn count_color(buf: &RenderBuffer, want: [u8; 3]) -> usize {
+        buf.as_bytes()
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0 && p[0] == want[0] && p[1] == want[1] && p[2] == want[2])
+            .count()
+    }
+
+    /// Bounding box of pixels exactly matching `want` (opaque), if any.
+    fn color_bbox(buf: &RenderBuffer, want: [u8; 3]) -> Option<(u32, u32, u32, u32)> {
+        let (mut x0, mut y0) = (u32::MAX, u32::MAX);
+        let (mut x1, mut y1) = (0u32, 0u32);
+        for y in 0..buf.height {
+            for x in 0..buf.width {
+                let p = buf.get_pixel(x, y);
+                if p[3] > 0 && p[0] == want[0] && p[1] == want[1] && p[2] == want[2] {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if x0 > x1 {
+            None
+        } else {
+            Some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+        }
+    }
+
+    #[test]
+    fn test_opaque_box_ignores_margins() {
+        // Position fixed by \pos: margins must not change the box.
+        let mut a = opaque_box_style();
+        a.margin_l = 0;
+        a.margin_r = 0;
+        a.margin_v = 0;
+        let mut b = opaque_box_style();
+        b.margin_l = 60;
+        b.margin_r = 60;
+        b.margin_v = 60;
+        let ra = render_text_with_style(r"{\pos(320,400)}Hi", &a, 1000);
+        let rb = render_text_with_style(r"{\pos(320,400)}Hi", &b, 1000);
+        assert_eq!(ra.as_bytes(), rb.as_bytes());
+    }
+
+    #[test]
+    fn test_opaque_box_padding_follows_outline() {
+        let mut thin = opaque_box_style();
+        thin.outline = 1.0;
+        let mut thick = opaque_box_style();
+        thick.outline = 8.0;
+        let red = [255, 0, 0];
+        let n_thin = count_color(
+            &render_text_with_style(r"{\pos(320,400)}Hi", &thin, 1000),
+            red,
+        );
+        let n_thick = count_color(
+            &render_text_with_style(r"{\pos(320,400)}Hi", &thick, 1000),
+            red,
+        );
+        assert!(n_thin > 0 && n_thick > n_thin);
+    }
+
+    #[test]
+    fn test_opaque_box_uses_outline_colour() {
+        // Reference behavior (VSFilter colors[2], libass outline
+        // bitmap): the box fills with the OUTLINE color; BackColour
+        // never paints the box.
+        let mut transparent = opaque_box_style();
+        transparent.outline_color = Color::new(255, 255, 0, 0); // fully transparent
+        let buf = render_text_with_style(r"{\pos(320,400)}Hi", &transparent, 1000);
+        assert_eq!(count_color(&buf, [255, 0, 0]), 0);
+        // Opaque outline paints the box (white glyphs still on top),
+        // opaque blue back stays out of the picture.
+        let buf = render_text_with_style(r"{\pos(320,400)}Hi", &opaque_box_style(), 1000);
+        assert!(count_color(&buf, [255, 0, 0]) > 0);
+        assert!(count_color(&buf, [255, 255, 255]) > 0);
+        assert_eq!(count_color(&buf, [0, 0, 255]), 0);
+        // A \3c override recolors the box.
+        let buf =
+            render_text_with_style(r"{\pos(320,400)\3c&H00FF00&}Hi", &opaque_box_style(), 1000);
+        assert!(count_color(&buf, [0, 255, 0]) > 0);
+    }
+
+    #[test]
+    fn test_opaque_box_suppresses_glyph_outline() {
+        let mut s1 = Style::new("Default");
+        s1.outline_color = Color::new(0, 0, 255, 0); // opaque green
+        s1.outline = 4.0;
+        let mut s3 = opaque_box_style();
+        s3.outline_color = Color::new(0, 0, 255, 0);
+        s3.outline = 4.0;
+        let green = [0, 255, 0];
+        assert!(
+            count_color(
+                &render_text_with_style(r"{\pos(320,400)}Hi", &s1, 1000),
+                green
+            ) > 0
+        );
+        // Box mode: green fills the box rect (back blue nowhere).
+        let boxed = render_text_with_style(r"{\pos(320,400)}Hi", &s3, 1000);
+        assert!(count_color(&boxed, green) > 0);
+        assert_eq!(count_color(&boxed, [0, 0, 255]), 0);
+        assert!(count_color(&boxed, [255, 255, 255]) > 0);
+    }
+
+    #[test]
+    fn test_opaque_box_covers_multiline() {
+        let style = opaque_box_style();
+        let red = [255, 0, 0];
+        let one = render_text_with_style(r"{\pos(320,400)}A", &style, 1000);
+        let two = render_text_with_style(r"{\pos(320,400)}A\NB", &style, 1000);
+        let (_, _, _, h1) = color_bbox(&one, red).expect("single-line box");
+        let (_, _, _, h2) = color_bbox(&two, red).expect("multiline box");
+        assert!(h2 > h1 * 3 / 2, "box must cover both lines: {h1} vs {h2}");
+    }
+
+    #[test]
+    fn test_scaled_outline_across_resolutions() {
+        // Same PlayRes, three video sizes: with ScaledBorderAndShadow
+        // the outline grows with resolution; without, it stays flat.
+        // At 1:1 the flag is a no-op (identical bytes).
+        let mut style = Style::new("Default");
+        style.outline_color = Color::new(0, 0, 255, 0);
+        style.outline = 6.0;
+        style.shadow = 0.0;
+        let green = [0, 255, 0];
+        let at = |w: u32, h: u32, scaled: bool| {
+            render_sized(r"{\pos(320,180)}H", &style, 1000, 640, 360, w, h, scaled)
+        };
+        assert_eq!(
+            at(640, 360, true).as_bytes(),
+            at(640, 360, false).as_bytes()
+        );
+        let (yes_lo, no_lo) = (
+            count_color(&at(640, 360, true), green),
+            count_color(&at(640, 360, false), green),
+        );
+        assert_eq!(yes_lo, no_lo);
+        assert!(yes_lo > 0);
+        let (yes_hi, no_hi) = (
+            count_color(&at(1920, 1080, true), green),
+            count_color(&at(1920, 1080, false), green),
+        );
+        // Scaled outline outgrows the unscaled one by a wide margin.
+        assert!(
+            yes_hi > no_hi * 2,
+            "scaled outline must dominate at 3x: {yes_hi} vs {no_hi}"
+        );
+        // Middle resolution sits strictly between for the scaled flag.
+        let yes_mid = count_color(&at(1280, 720, true), green);
+        assert!(yes_mid > yes_lo && yes_mid < yes_hi);
+    }
+
+    #[test]
+    fn test_scaled_box_padding_across_resolutions() {
+        // Box padding honors the flag: box width scales exactly with
+        // video size when scaled, and lags when not.
+        let mut style = opaque_box_style();
+        style.outline = 4.0;
+        let red = [255, 0, 0];
+        let width_at = |w: u32, h: u32, scaled: bool| {
+            let buf = render_sized(r"{\pos(320,180)}Hi", &style, 1000, 640, 360, w, h, scaled);
+            color_bbox(&buf, red).map(|b| b.2).unwrap_or(0)
+        };
+        let (y1, y3) = (width_at(640, 360, true), width_at(1920, 1080, true));
+        assert!(
+            (y3 as i32 - 3 * y1 as i32).abs() <= 3,
+            "scaled box must triple: {y1} -> {y3}"
+        );
+        let (n1, n3) = (width_at(640, 360, false), width_at(1920, 1080, false));
+        assert!(n3 < 3 * n1 - 5, "unscaled box must lag: {n1} -> {n3}");
+    }
+
+    #[test]
+    fn test_blur_is_flag_and_resolution_independent() {
+        // Locked current behavior: \blur radius is in video pixels and
+        // ignores ScaledBorderAndShadow (reference scaling of blur is
+        // unverified — see CONFORMANCE.md). Outline/shadow are zeroed
+        // so the flag has no other render effect to compare through:
+        // outlines DO scale with the flag (see scaled-outline tests),
+        // so a full-frame comparison with outlines would differ by design.
+        let mut style = Style::new("Default");
+        style.outline = 0.0;
+        style.shadow = 0.0;
+        let a = render_sized(
+            r"{\pos(320,180)\blur5}H",
+            &style,
+            1000,
+            640,
+            360,
+            1920,
+            1080,
+            true,
+        );
+        let b = render_sized(
+            r"{\pos(320,180)\blur5}H",
+            &style,
+            1000,
+            640,
+            360,
+            1920,
+            1080,
+            false,
+        );
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        let sharp = render_sized(
+            r"{\pos(320,180)}H",
+            &style,
+            1000,
+            640,
+            360,
+            1920,
+            1080,
+            true,
+        );
+        assert_ne!(a.as_bytes(), sharp.as_bytes());
+    }
+
+    #[test]
+    fn test_scaled_shadow_offset_across_resolutions() {
+        // Shadow reach (ink width with shadow minus without) triples
+        // with the flag and stays flat without it.
+        let mut shadowed = Style::new("Default");
+        shadowed.shadow = 12.0;
+        shadowed.outline = 0.0;
+        let mut plain = Style::new("Default");
+        plain.shadow = 0.0;
+        plain.outline = 0.0;
+        let ink_w = |style: &Style, w: u32, h: u32, scaled: bool| {
+            ink_bbox(&render_sized(
+                r"{\pos(100,100)}H",
+                style,
+                1000,
+                640,
+                360,
+                w,
+                h,
+                scaled,
+            ))
+            .map(|b| b.0)
+            .unwrap_or(0)
+        };
+        let reach = |w: u32, h: u32, scaled: bool| {
+            ink_w(&shadowed, w, h, scaled).saturating_sub(ink_w(&plain, w, h, scaled))
+        };
+        let (y1, y3) = (reach(640, 360, true), reach(1920, 1080, true));
+        assert!(y1 > 0, "shadow must extend ink");
+        assert!(
+            (y3 as i32 - 3 * y1 as i32).abs() <= 4,
+            "scaled shadow reach must triple: {y1} -> {y3}"
+        );
+        let (n1, n3) = (reach(640, 360, false), reach(1920, 1080, false));
+        assert!(
+            (n3 as i32 - n1 as i32).abs() <= 4,
+            "unscaled shadow reach must stay flat: {n1} -> {n3}"
+        );
+    }
+
+    #[test]
+    fn test_degenerate_font_size_renders_nothing_safely() {
+        // \fs0 / negative sizes shape to nothing instead of panicking
+        // or producing garbage.
+        for text in ["{\\fs0}Hi", "{\\fs-5}Hi"] {
+            let buf = render_text(text, 1000);
+            assert_eq!(ink_bbox(&buf), None, "{text:?} must render nothing");
+        }
+        // Positive sizes still render.
+        assert!(ink_bbox(&render_text("{\\fs+10}Hi", 1000)).is_some());
+    }
+
+    #[test]
+    fn test_bold_weight_resolve_and_render() {
+        // Resolve preserves explicit weights.
+        let base = Style::new("Default");
+        for (text, want) in [("{\\b0}B", 400), ("{\\b1}B", 700), ("{\\b900}B", 900)] {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            let segments = parse_text_segments(&event.text);
+            let resolved = Compositor::resolve_style(&base, &event);
+            let seg =
+                Compositor::resolve_segment_style(&resolved, &segments[0], &event, &[], 0, 0, 2000);
+            assert_eq!(seg.font_weight, want, "{text:?}");
+        }
+        // Render: \b1 and \b700 take the identical faux-bold path on a
+        // regular-only face; both differ from \b0.
+        let normal = render_text("{\\b0}Bold?", 1000);
+        let one = render_text("{\\b1}Bold?", 1000);
+        let seven = render_text("{\\b700}Bold?", 1000);
+        let nine = render_text("{\\b900}Bold?", 1000);
+        assert_eq!(one.as_bytes(), seven.as_bytes());
+        assert_eq!(seven.as_bytes(), nine.as_bytes());
+        assert_ne!(normal.as_bytes(), seven.as_bytes());
     }
 
     #[test]
     fn test_karaoke_timeline_hard_tags() {
         let segments = parse_text_segments("{\\k50}A{\\k30}B");
-        let font = fallback_font();
-        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
 
         assert_eq!(syllables.len(), 2);
         assert_eq!(syllables[0].start_ms, 0);
@@ -2491,8 +4621,8 @@ mod tests {
     #[test]
     fn test_karaoke_timeline_leading_text_ignored() {
         let segments = parse_text_segments("pre{\\kf40}X");
-        let font = fallback_font();
-        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
 
         assert_eq!(syllables.len(), 1);
         assert_eq!(syllables[0].kind, KaraokeKind::Sweep);
@@ -2504,21 +4634,20 @@ mod tests {
     fn test_karaoke_timeline_continuation_segments() {
         // A non-karaoke tag mid-syllable must not start a new syllable
         let segments = parse_text_segments("{\\k50}A{\\c&H00FF00&}B");
-        let font = fallback_font();
-        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
 
         assert_eq!(syllables.len(), 1);
         assert_eq!(map, vec![Some(0), Some(0)]);
-        let combined = TextShaper::measure_text("A", &font, 48.0, 0.0)
-            + TextShaper::measure_text("B", &font, 48.0, 0.0);
+        let combined: f64 = widths.iter().sum();
         assert!((syllables[0].width - combined).abs() < 1e-6);
     }
 
     #[test]
     fn test_karaoke_outline_kind() {
         let segments = parse_text_segments("{\\ko20}A");
-        let font = fallback_font();
-        let (syllables, _) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, _) = build_karaoke_timeline(&segments, &widths);
 
         assert_eq!(syllables.len(), 1);
         assert_eq!(syllables[0].kind, KaraokeKind::Outline);
@@ -2585,8 +4714,8 @@ mod tests {
         let style = Style::new("Default");
         let resolved = Compositor::resolve_style(&style, &event);
         let segments = parse_text_segments("{\\k100}A{\\k100}B");
-        let font = fallback_font();
-        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
 
         // First syllable at elapsed 0: started -> primary
         assert!(karaoke_is_primary(&syllables[0], 0));
@@ -2599,11 +4728,203 @@ mod tests {
     }
 
     #[test]
-    fn test_karaoke_outline_suppressed_after_start() {
-        // \ko: outline hidden once the syllable begins, not at its end.
-        assert!(!karaoke_outline_suppressed(999, 1000));
-        assert!(karaoke_outline_suppressed(1000, 1000));
-        assert!(karaoke_outline_suppressed(1500, 1000));
+    fn test_karaoke_outline_suppressed_before_start() {
+        // \ko: outline hidden while elapsed < start; visible from the
+        // exact start instant (reference ASS behavior).
+        assert!(karaoke_outline_suppressed(999, 1000));
+        assert!(!karaoke_outline_suppressed(1000, 1000));
+        assert!(!karaoke_outline_suppressed(1500, 1000));
+        assert!(!karaoke_outline_suppressed(0, 0));
+    }
+
+    #[test]
+    fn test_ko_multi_syllable_timing() {
+        // Two \ko syllables: starts at 0 and 500ms. Each syllable is
+        // independent: suppressed before its own start, visible from it.
+        let segments = parse_text_segments("{\\ko50}A{\\ko50}B");
+        let widths = karaoke_test_widths(&segments);
+        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
+        assert_eq!(syllables.len(), 2);
+        assert_eq!(map, vec![Some(0), Some(1)]);
+        let (s0, s1) = (&syllables[0], &syllables[1]);
+        assert_eq!((s0.start_ms, s0.dur_ms), (0, 500));
+        assert_eq!((s1.start_ms, s1.dur_ms), (500, 500));
+
+        // Syllable 0 (start 0): visible at/after 0.
+        assert!(!karaoke_outline_suppressed(0, s0.start_ms));
+        // Syllable 1 across its boundaries: start-1, start, middle,
+        // exact end, after end.
+        assert!(karaoke_outline_suppressed(499, s1.start_ms));
+        assert!(!karaoke_outline_suppressed(500, s1.start_ms));
+        assert!(!karaoke_outline_suppressed(750, s1.start_ms));
+        assert!(!karaoke_outline_suppressed(1000, s1.start_ms));
+        assert!(!karaoke_outline_suppressed(1500, s1.start_ms));
+        // Fill follows \k: secondary before start, primary from start.
+        assert!(karaoke_is_primary(
+            &KaraokeSyllable {
+                start_ms: s1.start_ms,
+                dur_ms: s1.dur_ms,
+                kind: KaraokeKind::Hard,
+                width: s1.width,
+            },
+            500
+        ));
+    }
+
+    #[test]
+    fn test_ko_render_fill_and_outline_transition() {
+        // \ko render: before a syllable starts it shows the secondary
+        // fill with no outline; from its start, primary fill + outline.
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,{\\ko100}A{\\ko100}B",
+        )
+        .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+        let render_at = |comp: &mut Compositor, time_ms: u64| {
+            let mut buf = RenderBuffer::new(320, 100).unwrap();
+            comp.composite_event(
+                &mut buf,
+                &event,
+                &resolved,
+                &fm,
+                time_ms,
+                320,
+                100,
+                320,
+                100,
+                0,
+                &[],
+            );
+            buf
+        };
+        let has_secondary = |buf: &RenderBuffer| {
+            buf.as_bytes()
+                .chunks_exact(4)
+                .any(|p| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0)
+        };
+        let has_primary = |buf: &RenderBuffer| {
+            buf.as_bytes()
+                .chunks_exact(4)
+                .any(|p| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0)
+        };
+        // Dark (outline-black) pixel count: grows when outlines appear.
+        let dark_count = |buf: &RenderBuffer| {
+            buf.as_bytes()
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0 && p[0] < 60 && p[1] < 60 && p[2] < 60)
+                .count()
+        };
+
+        // At 100ms: syllable 0 sung (primary + outline), syllable 1
+        // pending (secondary, no outline).
+        let early = render_at(&mut comp, 100);
+        assert!(has_primary(&early));
+        assert!(has_secondary(&early));
+
+        // At 2500ms both sung: primary only, and strictly more outline
+        // pixels than while the second syllable was pending.
+        let late = render_at(&mut comp, 2500);
+        assert!(has_primary(&late));
+        assert!(!has_secondary(&late));
+        assert!(
+            dark_count(&late) > dark_count(&early),
+            "outline must appear once the pending \\ko syllable starts"
+        );
+    }
+
+    #[test]
+    fn test_karaoke_timeline_uses_layout_widths() {
+        // The timeline must use caller-provided (layout) widths verbatim,
+        // so inline \fs/\fn/\fscx/\fsp changes measure correctly.
+        let segments = parse_text_segments("{\\k50}small{\\k50}BIG");
+        let (syllables, map) = build_karaoke_timeline(&segments, &[10.0, 90.0]);
+        assert_eq!(map, vec![Some(0), Some(1)]);
+        assert!((syllables[0].width - 10.0).abs() < 1e-9);
+        assert!((syllables[1].width - 90.0).abs() < 1e-9);
+        // Missing widths default to 0 rather than panicking.
+        let (syllables, _) = build_karaoke_timeline(&segments, &[]);
+        assert_eq!(syllables[0].width, 0.0);
+    }
+
+    #[test]
+    fn test_kf_sweep_splits_within_glyph() {
+        // \kf mid-sweep: one wide glyph must contain BOTH primary and
+        // secondary pixels (a true within-glyph sweep, not whole-glyph
+        // switching). Before start: all secondary; after: all primary.
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\\kf200}W")
+                .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+        let render_at = |comp: &mut Compositor, time_ms: u64| {
+            let mut buf = RenderBuffer::new(320, 100).unwrap();
+            comp.composite_event(
+                &mut buf,
+                &event,
+                &resolved,
+                &fm,
+                time_ms,
+                320,
+                100,
+                320,
+                100,
+                0,
+                &[],
+            );
+            buf
+        };
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        let is_primary = |p: &[u8]| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0;
+
+        // Mid-sweep (1000ms of 2000ms): both colors inside one glyph.
+        let mid = render_at(&mut comp, 1000);
+        let mid_bytes = mid.as_bytes();
+        assert!(
+            mid_bytes.chunks_exact(4).any(is_primary),
+            "mid-sweep glyph must contain primary pixels"
+        );
+        assert!(
+            mid_bytes.chunks_exact(4).any(is_secondary),
+            "mid-sweep glyph must contain secondary pixels"
+        );
+
+        // Before start the syllable is entirely secondary.
+        let event2 =
+            Event::parse_from_line("Dialogue: 0,0:00:02.00,0:00:05.00,Default,,0,0,0,,{\\kf200}W")
+                .unwrap();
+        let resolved2 = Compositor::resolve_style(&style, &event2);
+        let mut before = RenderBuffer::new(320, 100).unwrap();
+        comp.composite_event(
+            &mut before,
+            &event2,
+            &resolved2,
+            &fm,
+            2050,
+            320,
+            100,
+            320,
+            100,
+            0,
+            &[],
+        );
+        // 50ms into a 2000ms sweep: left sliver primary, rest secondary.
+        assert!(before.as_bytes().chunks_exact(4).any(is_secondary));
+
+        // After completion the syllable is entirely primary.
+        let done = render_at(&mut comp, 2500);
+        assert!(done.as_bytes().chunks_exact(4).any(is_primary));
+        assert!(!done.as_bytes().chunks_exact(4).any(is_secondary));
     }
 
     #[test]

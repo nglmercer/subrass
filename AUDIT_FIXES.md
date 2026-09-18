@@ -69,8 +69,10 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   non-finite accel falls back to linear; result clamped to [0, 1].
 - **#14 Karaoke `\k`**: secondary before the syllable, primary from the exact
   start instant (was: at end). Pure helper `karaoke_is_primary`.
-- **#15 Karaoke outline `\ko`**: outline suppressed once the syllable begins
-  (was: at end). Helper `karaoke_outline_suppressed`.
+- **#15 Karaoke outline `\ko`**: secondary fill + outline suppressed *before*
+  the syllable start, primary fill + outline from the exact start instant
+  (corrected from an earlier reversed implementation). Helper
+  `karaoke_outline_suppressed`.
 - **#16 Karaoke ordering**: `\K`/`\kf` sweep edges clamp to [0, 1]; `\ko` and
   sweep combine per documented rules.
 - **#17 `\n` vs `\N`**: `\N` always breaks; `\n` is a space except in wrap
@@ -149,12 +151,14 @@ All Rust behavior changes carry regression tests; run `cargo test`.
 - **#39 Faux bold/italic**: `FontMatch` reports `faux_bold/faux_italic` (true
   only when the face lacks the style); the cache keys on them so real-bold and
   faux-bold never share rasters; faux italic implemented as a 12° shear.
-- **#40 Attachment parsing** (`src/parser/attachment.rs`): supports `fontname:`
-  and `filename:` (case-insensitive); trailing `\r` handled.
+- **#40 Attachment parsing** (`src/parser/attachment.rs`): section-aware
+  headers (`fontname:` in `[Fonts]`, `filename:` in `[Graphics]`,
+  case-insensitive; wrong-section headers error); trailing `\r` handled.
 - **#41 Decode errors**: malformed uuencode payloads are line-numbered errors
   (never silent empty files); per-attachment and count caps enforced.
 - **#42 Embedded fonts**: exposed to JS (`get_attachment_count/name/kind/data`);
-  renderer does not auto-load (documented; call `load_font`).
+  `[Fonts]` attachments are additionally best-effort auto-loaded by the
+  renderer (failures surface via `warnings()`); manual `load_font` remains.
 - **#43 Attachments in docs**: parser tree + matrix updated.
 - **#44 Color helpers**: conversion directions explicit; `to_hex` emits valid
   CSS `#RRGGBBAA` (opacity slot).
@@ -256,11 +260,20 @@ directly.
 
 ## Intentional compatibility differences
 
-1. Blur runs before clipping (prevents bleed; differs from code order found).
+(See `CONFORMANCE.md` for the test-backed matrix. Earlier revisions of this
+list claimed `\ko`, `\K` edge splitting, smart wrap, per-glyph fallback,
+legacy effects, and auto-loading as differences or approximations; all have
+since been implemented and verified against libass reference frames.)
+
+1. Blur runs before clipping so blurred pixels cannot bleed outside the clip
+   region.
 2. `\r` preserves line-global tags wherever they appear (consistent rule).
-3. Wrap mode 0 is a raggedness-minimizing approximation of VSFilter smart wrap.
-4. Karaoke `\K` sweep is per-glyph with edge-glyph splitting.
-5. Rotation uses a fixed perspective distance (500); extreme angles degrade to
-   empty glyphs instead of over-allocating.
-6. No complex shaping, no per-glyph font fallback, no Banner/Scroll effects,
-   no embedded-font auto-loading (use `get_attachment_data` + `load_font`).
+3. Rotation uses a fixed perspective distance (500 × vertical resolution
+   ratio); extreme angles degrade to empty glyphs instead of over-allocating.
+4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
+   Indic/Arabic contextual forms); no system-font lookup.
+5. Unhinted coverage rasterizer: ~1px placement/AA differences versus
+   libass/FreeType hinted outlines (measured, not gated, in reference tests).
+6. Multi-line opaque boxes cover the whole block; libass draws per-line boxes.
+7. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent) rather than
+   libass's rebalance (libass itself marks styles 0/3 handling FIXME).

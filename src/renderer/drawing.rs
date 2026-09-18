@@ -50,12 +50,7 @@ impl DrawingParser {
         if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
             return;
         }
-        for polygon in &Self::polygons(text) {
-            if polygon.len() < 3 {
-                continue;
-            }
-            Self::fill_polygon(buffer, polygon, x, y, scale, color);
-        }
+        Self::fill_polygons(buffer, &Self::polygons(text), x, y, scale, color);
     }
 
     /// Render a drawing as a white alpha mask (alpha 255 inside shapes).
@@ -64,12 +59,7 @@ impl DrawingParser {
             return;
         }
         buffer.pixels.fill(0);
-        for polygon in &Self::polygons(text) {
-            if polygon.len() < 3 {
-                continue;
-            }
-            Self::fill_polygon_mask(buffer, polygon, x, y, scale);
-        }
+        Self::fill_polygons_mask(buffer, &Self::polygons(text), x, y, scale);
     }
 
     /// Measure a drawing's bounding box in drawing units.
@@ -445,16 +435,21 @@ impl DrawingParser {
     /// All coordinates are validated finite and clamped to the buffer
     /// before any loop runs; intersections use total ordering (no
     /// `partial_cmp().unwrap()` on potentially-NaN values).
-    fn scan_polygon(
+    ///
+    /// Fill rule is even-odd across the whole outline: crossings from
+    /// every contour pool together, so nested contours punch holes and
+    /// doubly-covered regions stay empty regardless of winding. This
+    /// matches reference ASS drawing/clip behavior for hollow shapes.
+    fn scan_polygons(
         buf_width: u32,
         buf_height: u32,
-        polygon: &[(f64, f64)],
+        polygons: &[Vec<(f64, f64)>],
         offset_x: f64,
         offset_y: f64,
         scale: f64,
         mut emit: impl FnMut(i32, i32),
     ) {
-        if polygon.len() < 3 || buf_width == 0 || buf_height == 0 {
+        if buf_width == 0 || buf_height == 0 {
             return;
         }
         let w = buf_width as i64;
@@ -462,47 +457,61 @@ impl DrawingParser {
 
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
-        for &(_, py) in polygon {
-            let screen_y = py * scale + offset_y;
-            if !screen_y.is_finite() {
-                return;
+        for polygon in polygons {
+            if polygon.len() < 3 {
+                continue;
             }
-            min_y = min_y.min(screen_y);
-            max_y = max_y.max(screen_y);
+            for &(_, py) in polygon {
+                let screen_y = py * scale + offset_y;
+                if !screen_y.is_finite() {
+                    return;
+                }
+                min_y = min_y.min(screen_y);
+                max_y = max_y.max(screen_y);
+            }
+        }
+        if min_y > max_y {
+            return;
         }
 
         let min_y = (min_y.floor() as i64).max(0).min(h - 1);
         let max_y = (max_y.ceil() as i64).max(0).min(h - 1);
 
-        let mut intersections = Vec::with_capacity(polygon.len().min(1024));
+        let total_edges: usize = polygons.iter().map(|p| p.len()).sum();
+        let mut intersections = Vec::with_capacity(total_edges.min(4096));
 
         for scan_y in min_y..=max_y {
             intersections.clear();
 
-            for i in 0..polygon.len() {
-                let j = (i + 1) % polygon.len();
-                let (x1, y1) = polygon[i];
-                let (x2, y2) = polygon[j];
-
-                let sy1 = y1 * scale + offset_y;
-                let sy2 = y2 * scale + offset_y;
-                let sx1 = x1 * scale + offset_x;
-                let sx2 = x2 * scale + offset_x;
-                if !(sy1.is_finite() && sy2.is_finite() && sx1.is_finite() && sx2.is_finite()) {
+            for polygon in polygons {
+                if polygon.len() < 3 {
                     continue;
                 }
+                for i in 0..polygon.len() {
+                    let j = (i + 1) % polygon.len();
+                    let (x1, y1) = polygon[i];
+                    let (x2, y2) = polygon[j];
 
-                if (sy1 <= scan_y as f64 && sy2 > scan_y as f64)
-                    || (sy2 <= scan_y as f64 && sy1 > scan_y as f64)
-                {
-                    let denom = sy2 - sy1;
-                    if denom.abs() < f64::EPSILON {
+                    let sy1 = y1 * scale + offset_y;
+                    let sy2 = y2 * scale + offset_y;
+                    let sx1 = x1 * scale + offset_x;
+                    let sx2 = x2 * scale + offset_x;
+                    if !(sy1.is_finite() && sy2.is_finite() && sx1.is_finite() && sx2.is_finite()) {
                         continue;
                     }
-                    let t = (scan_y as f64 - sy1) / denom;
-                    let ix = sx1 + t * (sx2 - sx1);
-                    if ix.is_finite() {
-                        intersections.push(ix);
+
+                    if (sy1 <= scan_y as f64 && sy2 > scan_y as f64)
+                        || (sy2 <= scan_y as f64 && sy1 > scan_y as f64)
+                    {
+                        let denom = sy2 - sy1;
+                        if denom.abs() < f64::EPSILON {
+                            continue;
+                        }
+                        let t = (scan_y as f64 - sy1) / denom;
+                        let ix = sx1 + t * (sx2 - sx1);
+                        if ix.is_finite() {
+                            intersections.push(ix);
+                        }
                     }
                 }
             }
@@ -522,29 +531,29 @@ impl DrawingParser {
         }
     }
 
-    fn fill_polygon(
+    fn fill_polygons(
         buffer: &mut RenderBuffer,
-        polygon: &[(f64, f64)],
+        polygons: &[Vec<(f64, f64)>],
         offset_x: f64,
         offset_y: f64,
         scale: f64,
         color: [u8; 4],
     ) {
         let (w, h) = (buffer.width, buffer.height);
-        Self::scan_polygon(w, h, polygon, offset_x, offset_y, scale, |px, py| {
+        Self::scan_polygons(w, h, polygons, offset_x, offset_y, scale, |px, py| {
             buffer.blend_pixel(px as u32, py as u32, color[0], color[1], color[2], color[3]);
         });
     }
 
-    fn fill_polygon_mask(
+    fn fill_polygons_mask(
         buffer: &mut RenderBuffer,
-        polygon: &[(f64, f64)],
+        polygons: &[Vec<(f64, f64)>],
         offset_x: f64,
         offset_y: f64,
         scale: f64,
     ) {
         let (w, h) = (buffer.width, buffer.height);
-        Self::scan_polygon(w, h, polygon, offset_x, offset_y, scale, |px, py| {
+        Self::scan_polygons(w, h, polygons, offset_x, offset_y, scale, |px, py| {
             let idx = ((py as u32 * w + px as u32) * 4) as usize;
             if idx + 3 < buffer.pixels.len() {
                 buffer.pixels[idx + 3] = 255;
@@ -566,6 +575,76 @@ mod tests {
     #[test]
     fn test_move_line_close_triangle() {
         assert!(rendered_pixels("m 10 10 l 50 10 l 30 40 c", 64, 64, 1.0) > 100);
+    }
+
+    /// Even-odd across contours (plan #27): a contour inside another
+    /// punches a hole, regardless of winding direction.
+    #[test]
+    fn test_nested_contour_punches_hole() {
+        let square = "m 10 10 l 50 10 l 50 50 l 10 50 ";
+        // Same winding: inner square is a hole.
+        let same = format!("{square}m 20 20 l 40 20 l 40 40 l 20 40");
+        // Reversed winding: still a hole (even-odd, not nonzero).
+        let reversed = format!("{square}m 20 20 l 20 40 l 40 40 l 40 20");
+        for text in [&same, &reversed] {
+            let mut buf = RenderBuffer::new(64, 64).unwrap();
+            DrawingParser::render_drawing(&mut buf, text, 0.0, 0.0, 1.0, [255; 4]);
+            assert_eq!(buf.get_pixel(15, 15)[3], 255, "{text}");
+            assert_eq!(buf.get_pixel(30, 30)[3], 0, "{text}");
+            assert_eq!(buf.get_pixel(5, 5)[3], 0, "{text}");
+        }
+    }
+
+    /// Even-odd overlap (plan #27): doubly-covered region stays empty.
+    #[test]
+    fn test_overlapping_squares_cancel() {
+        let mut buf = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_drawing(
+            &mut buf,
+            "m 10 20 l 40 20 l 40 40 l 10 40 m 25 20 l 55 20 l 55 40 l 25 40",
+            0.0,
+            0.0,
+            1.0,
+            [255; 4],
+        );
+        // Left-only and right-only wings are filled...
+        assert_eq!(buf.get_pixel(17, 30)[3], 255);
+        assert_eq!(buf.get_pixel(47, 30)[3], 255);
+        // ...but the doubly-covered middle cancels out.
+        assert_eq!(buf.get_pixel(32, 30)[3], 0);
+    }
+
+    /// Self-intersecting bowtie (plan #27): even-odd fills BOTH lobes
+    /// (a nonzero rule would leave one lobe empty).
+    #[test]
+    fn test_bowtie_self_intersection_fills_both_lobes() {
+        let mut buf = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_drawing(
+            &mut buf,
+            "m 10 10 l 50 50 l 10 50 l 50 10",
+            0.0,
+            0.0,
+            1.0,
+            [255; 4],
+        );
+        assert_eq!(buf.get_pixel(30, 20)[3], 255);
+        assert_eq!(buf.get_pixel(30, 40)[3], 255);
+        assert_eq!(buf.get_pixel(5, 30)[3], 0);
+    }
+
+    /// Hole through the alpha mask path (plan #27: vector clip mask).
+    #[test]
+    fn test_mask_punches_hole() {
+        let mut buf = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_mask(
+            &mut buf,
+            "m 10 10 l 50 10 l 50 50 l 10 50 m 20 20 l 40 20 l 40 40 l 20 40",
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert_eq!(buf.get_pixel(15, 15)[3], 255);
+        assert_eq!(buf.get_pixel(30, 30)[3], 0);
     }
 
     #[test]

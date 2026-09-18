@@ -1,0 +1,19 @@
+# Automated update PRs for pinned tooling (versions stay pinned; updates
+# arrive as deliberate pull requests, never as floating installs).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]

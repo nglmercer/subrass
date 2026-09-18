@@ -9,11 +9,13 @@ pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parse the lines of a [Fonts] or [Graphics] section into attachments.
 ///
-/// A `fontname:` (or `filename:`, for graphics) line starts a new
-/// attachment; every following line is appended verbatim to the current
-/// attachment's encoded data, decoded when the next header (or the end
-/// of the section) appears. Matching is case-insensitive. Malformed
-/// payloads are errors, never silent empty files.
+/// A header line starts a new attachment — `fontname:` in `[Fonts]`,
+/// `filename:` in `[Graphics]` (a header from the wrong section is an
+/// explicit error, never silent data). Every following line is validated
+/// against the payload alphabet and appended to the current attachment's
+/// encoded data, decoded when the next header (or the end of the section)
+/// appears. Matching is case-insensitive. Malformed payloads are errors,
+/// never silent empty files.
 pub fn parse_attachments(
     lines: &[&str],
     kind: AttachmentKind,
@@ -25,7 +27,21 @@ pub fn parse_attachments(
 
     for (i, line) in lines.iter().enumerate() {
         let line = line.trim_end_matches(['\r', '\n']);
-        if let Some(name) = strip_header(line) {
+        if let Some((prefix, name)) = strip_header(line) {
+            let expected = match kind {
+                AttachmentKind::Font => "fontname:",
+                AttachmentKind::Graphic => "filename:",
+            };
+            if !prefix.eq_ignore_ascii_case(expected) {
+                return Err(ParseError::line_error(
+                    start_line + i,
+                    format!(
+                        "Attachment header {:?} in the wrong section (expected {:?})",
+                        prefix.to_lowercase(),
+                        expected
+                    ),
+                ));
+            }
             // Flush the previous attachment
             if attachments.len() >= MAX_ATTACHMENTS {
                 return Err(ParseError::line_error(
@@ -51,7 +67,24 @@ pub fn parse_attachments(
                 data: Vec::new(),
             });
         } else if !attachments.is_empty() {
-            encoded.extend_from_slice(line.as_bytes());
+            // Empty lines are tolerated (skipped); every other byte must
+            // belong to the payload alphabet, with precise line numbers.
+            if !line.is_empty() {
+                if let Some(&bad) = line.as_bytes().iter().find(|c| !is_payload_byte(**c)) {
+                    let current = attachments
+                        .last()
+                        .map(|a| a.filename.as_str())
+                        .unwrap_or("?");
+                    return Err(ParseError::line_error(
+                        start_line + i,
+                        format!(
+                            "Invalid encoded byte 0x{:02X} in attachment {:?} (expected '!'..='`')",
+                            bad, current
+                        ),
+                    ));
+                }
+                encoded.extend_from_slice(line.as_bytes());
+            }
             if encoded.len() > MAX_ATTACHMENT_BYTES * 4 / 3 + 8 {
                 return Err(ParseError::line_error(
                     start_line + i,
@@ -72,13 +105,21 @@ pub fn parse_attachments(
 }
 
 /// Match `fontname:` / `filename:` headers case-insensitively.
-fn strip_header(line: &str) -> Option<&str> {
+/// Returns the matched prefix (original case) and the name that follows.
+fn strip_header(line: &str) -> Option<(&str, &str)> {
     for prefix in ["fontname:", "filename:"] {
         if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
-            return Some(&line[prefix.len()..]);
+            return Some((&line[..prefix.len()], &line[prefix.len()..]));
         }
     }
     None
+}
+
+/// True for bytes in the SSA attachment payload alphabet: the 64
+/// characters `'!'` (33) through `` '`' `` (96). Anything else —
+/// controls, spaces, high bytes, other punctuation — is malformed.
+fn is_payload_byte(c: u8) -> bool {
+    (33..=96).contains(&c)
 }
 
 fn decode_flushed(encoded: &[u8], line: usize, filename: &str) -> Result<Vec<u8>, ParseError> {
@@ -97,12 +138,43 @@ fn decode_flushed(encoded: &[u8], line: usize, filename: &str) -> Result<Vec<u8>
     Ok(data)
 }
 
+/// Encode bytes into ASS embedded-attachment data (test helper and
+/// inverse of [`decode_attachment_data`]).
+#[cfg(test)]
+pub(crate) fn encode_attachment_data(data: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let mut value = (chunk[0] as u32) << 16;
+        if chunk.len() >= 2 {
+            value |= (chunk[1] as u32) << 8;
+        }
+        if chunk.len() >= 3 {
+            value |= chunk[2] as u32;
+        }
+        let chars = match chunk.len() {
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        };
+        for i in 0..chars {
+            out.push((((value >> (6 * (3 - i))) & 63) as u8 + 33) as char);
+        }
+    }
+    out
+}
+
 /// Decode ASS embedded-attachment data (the SSA uuencode variant used by
 /// libass): each byte contributes `(c - 33) & 63` bits, packed 4 chars
 /// into 3 bytes; a final group of 2 chars yields 1 byte, 3 chars yield
 /// 2 bytes, and a lone trailing char is invalid.
+///
+/// Every input byte must belong to the payload alphabet (`'!'`..=`` '`' ``);
+/// anything else is rejected rather than masked into silent garbage.
 pub fn decode_attachment_data(encoded: &[u8]) -> Option<Vec<u8>> {
     if encoded.len() % 4 == 1 {
+        return None;
+    }
+    if !encoded.iter().all(|&c| is_payload_byte(c)) {
         return None;
     }
 
@@ -127,29 +199,6 @@ pub fn decode_attachment_data(encoded: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Inverse of decode_attachment_data, for building test fixtures
-    fn encode_attachment_data(data: &[u8]) -> String {
-        let mut out = String::new();
-        for chunk in data.chunks(3) {
-            let mut value = (chunk[0] as u32) << 16;
-            if chunk.len() >= 2 {
-                value |= (chunk[1] as u32) << 8;
-            }
-            if chunk.len() >= 3 {
-                value |= chunk[2] as u32;
-            }
-            let chars = match chunk.len() {
-                1 => 2,
-                2 => 3,
-                _ => 4,
-            };
-            for i in 0..chars {
-                out.push((((value >> (6 * (3 - i))) & 63) as u8 + 33) as char);
-            }
-        }
-        out
-    }
 
     #[test]
     fn test_decode_known_vector() {
@@ -223,16 +272,16 @@ mod tests {
         let d1 = encode_attachment_data(b"one");
         let d2 = encode_attachment_data(b"two");
         let section = [
-            "fontname: a.ttf".to_string(),
+            "filename: a.bmp".to_string(),
             d1,
-            "fontname: b.png".to_string(),
+            "filename: b.png".to_string(),
             d2,
         ];
         let refs: Vec<&str> = section.iter().map(|s| s.as_str()).collect();
         let attachments = parse_attachments(&refs, AttachmentKind::Graphic, 0).unwrap();
 
         assert_eq!(attachments.len(), 2);
-        assert_eq!(attachments[0].filename, "a.ttf");
+        assert_eq!(attachments[0].filename, "a.bmp");
         assert_eq!(attachments[0].data, b"one");
         assert_eq!(attachments[1].filename, "b.png");
         assert_eq!(attachments[1].data, b"two");
@@ -248,5 +297,53 @@ mod tests {
         assert!(parse_attachments(&refs, AttachmentKind::Font, 0)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_decode_rejects_out_of_alphabet_bytes() {
+        // Bytes the old `(c - 33) & 63` mask accepted silently: space,
+        // controls, DEL, high bytes, and punctuation above '`'.
+        for bad in [
+            &b"!!! "[..],
+            &b"\x0015*$"[..],
+            &b"15*\x7f"[..],
+            &b"15*\xc3"[..],
+            &b"15*{"[..],
+            &b"15*~"[..],
+            &b"15*\n"[..],
+        ] {
+            assert!(decode_attachment_data(bad).is_none(), "must reject {bad:?}");
+        }
+        // Boundary bytes are valid.
+        assert!(decode_attachment_data(b"!!!!").is_some());
+        assert!(decode_attachment_data(b"````").is_some());
+    }
+
+    #[test]
+    fn test_parse_rejects_bad_payload_line_with_line_number() {
+        let section = ["fontname: bad.ttf", "15*$", "!!!! !!!!"];
+        let err = parse_attachments(&section, AttachmentKind::Font, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("12"), "line number must appear: {err}");
+        assert!(err.contains("0x20"), "byte must appear: {err}");
+        assert!(err.contains("bad.ttf"), "filename must appear: {err}");
+    }
+
+    #[test]
+    fn test_headers_are_section_aware() {
+        // fontname: belongs to [Fonts], filename: to [Graphics].
+        let section = ["fontname: a.ttf", "15*$"];
+        assert!(parse_attachments(&section, AttachmentKind::Graphic, 0).is_err());
+        let section = ["filename: a.bmp", "15*$"];
+        assert!(parse_attachments(&section, AttachmentKind::Font, 0).is_err());
+        // Correct headers still parse in their sections.
+        let section = ["filename: a.bmp", "15*$"];
+        assert_eq!(
+            parse_attachments(&section, AttachmentKind::Graphic, 0)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

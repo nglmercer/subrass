@@ -14,15 +14,21 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # No `toolchain:` input: the toolchain version comes from
+      # rust-toolchain.toml (pinned), not a floating `stable` request.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Show pinned toolchain
+        run: rustc --version
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --all-features
+      - name: Tests (no default features)
+        run: cargo test --locked --no-default-features
       - name: WASM test target compiles
         run: cargo check --target wasm32-unknown-unknown --tests --locked
 
@@ -35,7 +41,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - name: Run wasm-bindgen tests in headless Chrome
         run: wasm-pack test --headless --chrome
 
@@ -46,9 +52,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit (fails on unacknowledged advisories)
-        run: cargo audit
+        run: cargo audit --deny warnings
 
   demo:
     name: Demo typecheck + tests
@@ -59,8 +65,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - name: Install wasm-pack
-        run: cargo install wasm-pack --locked
+        run: cargo install wasm-pack --version 0.15.0 --locked
       - name: Build WASM package (demo imports pkg/)
         run: wasm-pack build --target web --out-dir pkg
       - name: Install dependencies

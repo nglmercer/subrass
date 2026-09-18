@@ -39,6 +39,10 @@ impl Color {
     /// Build from components where `alpha` is ASS transparency
     /// (0 = opaque). Prefer [`Color::from_standard_rgba`] for
     /// conventional opacity-based input.
+    #[deprecated(
+        since = "0.1.0",
+        note = "misleading name: the fourth slot is ASS transparency, not opacity; use `Color::from_standard_rgba` (opacity) or `Color::new` (transparency)"
+    )]
     pub fn from_rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
         Self::new(alpha, red, green, blue)
     }
@@ -53,14 +57,17 @@ impl Color {
     ///
     /// NOTE: the fourth slot is ASS transparency, **not** standard RGBA
     /// opacity. Prefer [`Color::to_straight_rgba`] when opacity is meant.
+    #[deprecated(
+        since = "0.1.0",
+        note = "misleading name: the fourth slot is ASS transparency, not opacity; use `Color::to_ass_components` or `Color::to_straight_rgba`"
+    )]
     pub fn to_rgba(&self) -> [u8; 4] {
         [self.red, self.green, self.blue, self.alpha]
     }
 
     /// Raw ASS components `[red, green, blue, ass_transparency]`.
-    /// Same as [`Color::to_rgba`], with the meaning in the name.
     pub fn to_ass_components(&self) -> [u8; 4] {
-        self.to_rgba()
+        [self.red, self.green, self.blue, self.alpha]
     }
 
     /// Conventional straight-alpha `[red, green, blue, opacity]`
@@ -86,6 +93,10 @@ impl Color {
     }
 
     /// ASS transparency: 0 = opaque, 255 = transparent.
+    #[deprecated(
+        since = "0.1.0",
+        note = "misleading name: returns ASS transparency, not opacity; use `Color::transparency` or `Color::opacity`"
+    )]
     pub fn alpha(&self) -> u8 {
         self.alpha
     }
@@ -246,7 +257,7 @@ mod tests {
     #[test]
     fn test_parse_ass_color() {
         let color: Color = "&H00FFFFFF&".parse().unwrap();
-        assert_eq!(color.alpha(), 0);
+        assert_eq!(color.transparency(), 0);
         assert_eq!(color.red(), 255);
         assert_eq!(color.green(), 255);
         assert_eq!(color.blue(), 255);
@@ -255,7 +266,7 @@ mod tests {
     #[test]
     fn test_parse_ass_color_with_alpha() {
         let color: Color = "&H800000FF&".parse().unwrap();
-        assert_eq!(color.alpha(), 128);
+        assert_eq!(color.transparency(), 128);
         assert_eq!(color.red(), 255);
         assert_eq!(color.green(), 0);
         assert_eq!(color.blue(), 0);
@@ -283,9 +294,23 @@ mod tests {
     }
 
     #[test]
-    fn test_to_rgba() {
+    fn test_to_ass_components() {
         let color = Color::new(0, 255, 128, 0);
-        assert_eq!(color.to_rgba(), [255, 128, 0, 0]);
+        assert_eq!(color.to_ass_components(), [255, 128, 0, 0]);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_aliases_match_explicit_names() {
+        // Compatibility pin: the deprecated aliases keep working and mean
+        // exactly what the explicit names mean.
+        let color = Color::new(64, 10, 20, 30);
+        assert_eq!(color.alpha(), color.transparency());
+        assert_eq!(color.to_rgba(), color.to_ass_components());
+        assert_eq!(
+            Color::from_rgba(10, 20, 30, 64),
+            Color::from_standard_rgba(10, 20, 30, 191)
+        );
     }
 
     #[test]

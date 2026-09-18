@@ -50,7 +50,7 @@ src/
 2. **Filter** — Active *dialogue* events are selected for the current timestamp (comments never render)
 3. **Sort** — Events are stable-sorted by layer (equal layers keep source order)
 4. **Wrap** — Automatic word-wrapping per the effective wrap style (per-event `\q` or script `WrapStyle`)
-5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`, `\fad`) apply wherever they appear
+5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`/`\iclip` incl. vector, `\fad`/`\fade`) apply wherever they appear, and `\an`/`\q` lay out the whole line (last wins)
 6. **Layout** — Every segment is shaped/measured with its own style; alignment, positioning, rotation origins, and opaque boxes use these per-segment dimensions
 7. **Rasterize** — Glyphs are rasterized to coverage bitmaps (per-font cache; faux bold/italic only when the face lacks the style), then sheared/rotated
 8. **Effects** — Elliptical outline, offset shadow, blur, then rectangular/vector clipping
@@ -66,35 +66,36 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 | Position | `\pos`, `\move` (with/without timing), `\org` | | |
 | Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | | |
 | Font | `\fn`, `\fs`, `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
-| Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz`, `\fscx`, `\fscy`, `\fax`, `\fay` | Rotation uses a fixed perspective distance; shear is applied pre-rotation | |
+| Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz` (counterclockwise on screen), `\fscx`, `\fscy`, `\fax`, `\fay` (pre-rotation shear + `\fay` baseline slant, libass order) | Rotation uses a fixed perspective distance (see known limitations) | |
 | Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative), `\be`, `\blur` | | |
 | Clipping | `\clip`, `\iclip` (rectangular and vector) | | |
 | Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
 | Fade | `\fad`, `\fade` | `\fade` with degenerate timing saturates instead of dividing by zero | |
-| Karaoke | `\k` (secondary→primary at syllable start), `\K`/`\kf` (per-glyph sweep with edge glyph split), `\ko` (outline hidden from syllable start) | Sweep is per-glyph, not sub-glyph | |
-| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q` | Smart wrap (mode 0) balances lines via raggedness minimization — an approximation of VSFilter | |
+| Karaoke | `\k`, `\kt` (explicit syllable starts), `\K`/`\kf` (continuous sweep, split within glyph bitmaps), `\ko` (secondary fill + outline suppressed before start; primary + outline from start) | | |
+| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; mode 0 smart wrap (greedy fill + pairwise rebalance, libass algorithm); each line aligns independently | CJK/Unicode break opportunities are not used (spaces only) | |
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
 | Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear, clip, position | Unsupported inner tags are ignored | |
 | Alignment | `\an`, legacy `\a` (SSA numbering converted) | | |
 | Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` | `LayoutResX/Y`, `YCbCr Matrix` are parsed but unused (ASS-2 draft / RGB pipeline) | |
-| Attachments | | | `[Fonts]`/`[Graphics]` parsed, decoded, and exposed via `get_attachment_*`; the renderer does not auto-load them — call `load_font(name, data)` |
-| Misc | | | `Effect` field (Banner/Scroll not rendered); `Kerning`, `FontSizeMultiplier`, `HardLineBreak` exist as tag types but are not produced by the parser |
+| Attachments | `[Fonts]` parsed, decoded, and best-effort auto-loaded as fallback faces (failures surface via `warnings()`); `[Graphics]` parsed, decoded, exposed via `get_attachment_*`; manual `load_font(name, data)` | | |
+| Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter); `\fe` parsed/stored/reset (no charset remapping) | Unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
 
 Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur is applied **before** clipping so blurred pixels cannot bleed outside the clip region.
 
 ## Known Limitations
 
 - No complex text shaping: left-to-right `ab_glyph` shaping only (no HarfBuzz, no RTL, no ligature-aware caret mapping).
-- One face per text segment; per-glyph font fallback is not implemented.
+- Per-glyph font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); no system-font lookup.
+- Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
 - Rotation perspective distance is fixed (500 units); extreme angles degrade to empty glyphs rather than over-allocating.
-- `\r` preserves line-global state (position, clip, fades, drawing mode) by design; see `AUDIT_FIXES.md`.
-- Reference (libass pixel-comparison) tests and fuzz targets are not yet wired into CI; see `AUDIT_FIXES.md` for status.
+- `\r` preserves only line-global state (position, clip, fades) by design; drawing mode, fonts, colors, rotation, karaoke, and alignment reset.
+- Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz` and run outside CI.
 
 ## Build
 
 ```bash
-# Install wasm-pack (also done automatically by ./build.sh)
-cargo install wasm-pack
+# Install wasm-pack (also done automatically by ./build.sh; pinned to 0.15.0 everywhere)
+cargo install wasm-pack --version 0.15.0 --locked
 
 # Build for WebAssembly (output in pkg/)
 wasm-pack build --target web --out-dir pkg

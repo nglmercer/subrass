@@ -1,4 +1,4 @@
-use ab_glyph::FontArc;
+use ab_glyph::{Font, FontArc};
 use std::collections::HashMap;
 
 /// A resolved font with a stable identity and faux-style requirements.
@@ -7,8 +7,10 @@ pub struct FontMatch<'a> {
     /// Stable numeric identity of the loaded font (index in load order).
     pub id: usize,
     pub font: &'a FontArc,
-    /// True when bold was requested but the face is not bold: the
-    /// renderer must synthesize bold (dilation) instead of double-applying.
+    /// True when a bold-class weight (>= 700) was requested but the
+    /// selected face is not bold-class: the renderer must synthesize
+    /// bold (dilation). Never set when the face already has a suitable
+    /// bold weight, so real bold faces are never double-bolded.
     pub faux_bold: bool,
     /// True when italic was requested but the face is not italic.
     pub faux_italic: bool,
@@ -17,14 +19,17 @@ pub struct FontMatch<'a> {
 /// Font manager - loads, caches, and provides fonts for rendering
 pub struct FontManager {
     fonts: Vec<LoadedFont>,
-    name_index: HashMap<String, usize>,
+    /// Additional family names (from font metadata) mapping to a font.
+    aliases: HashMap<String, usize>,
     fallback_index: Option<usize>,
 }
 
 struct LoadedFont {
     name: String,
     font: FontArc,
-    is_bold: bool,
+    /// ASS font weight (400 = normal, 700 = bold), from OS/2
+    /// usWeightClass when available, else from the style flags.
+    weight: u16,
     is_italic: bool,
 }
 
@@ -32,12 +37,13 @@ impl FontManager {
     pub fn new() -> Self {
         Self {
             fonts: Vec::new(),
-            name_index: HashMap::new(),
+            aliases: HashMap::new(),
             fallback_index: None,
         }
     }
 
-    /// Load a font from bytes with explicit style flags.
+    /// Load a font from bytes with explicit style flags
+    /// (weight 700 for bold, 400 otherwise).
     pub fn load_font(
         &mut self,
         name: &str,
@@ -45,19 +51,39 @@ impl FontManager {
         is_bold: bool,
         is_italic: bool,
     ) -> Result<usize, String> {
+        self.load_font_with_weight(name, data, if is_bold { 700 } else { 400 }, is_italic)
+    }
+
+    /// Load a font from bytes with an explicit ASS weight and italic flag.
+    ///
+    /// Font collections (`.ttc`/`.otc`, `ttcf` magic) are rejected with
+    /// a clear error: only single-face `.ttf`/`.otf` files are
+    /// supported, and silently loading an arbitrary first face would
+    /// misreport family/weight metadata.
+    pub fn load_font_with_weight(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        weight: u16,
+        is_italic: bool,
+    ) -> Result<usize, String> {
+        if data.len() >= 4 && data[0..4] == *b"ttcf" {
+            return Err(format!(
+                "Font collections (.ttc/.otc) are not supported: '{}'; use a single-face .ttf/.otf",
+                name
+            ));
+        }
         let font = FontArc::try_from_vec(data.to_vec())
             .map_err(|e| format!("Failed to parse font '{}': {}", name, e))?;
 
+        let weight = weight.clamp(1, 1000);
         let idx = self.fonts.len();
         self.fonts.push(LoadedFont {
             name: name.to_lowercase(),
             font,
-            is_bold,
+            weight,
             is_italic,
         });
-
-        let key = style_key(&name.to_lowercase(), is_bold, is_italic);
-        self.name_index.insert(key, idx);
 
         // Set as fallback if it's the first font loaded
         if self.fallback_index.is_none() {
@@ -88,9 +114,14 @@ impl FontManager {
         };
         let is_bold = is_bold.unwrap_or(false);
         let is_italic = is_italic.unwrap_or(false);
+        let weight = meta
+            .as_ref()
+            .and_then(|m| m.weight)
+            .filter(|w| (1..=1000).contains(w))
+            .unwrap_or(if is_bold { 700 } else { 400 });
 
         let base_name = strip_style_words(name);
-        let idx = self.load_font(&base_name, data, is_bold, is_italic)?;
+        let idx = self.load_font_with_weight(&base_name, data, weight, is_italic)?;
 
         // Alias every declared family name to this font.
         if let Some(meta) = meta {
@@ -100,9 +131,7 @@ impl FontManager {
                     continue;
                 }
                 // First registration wins: deterministic, load-order precedence.
-                self.name_index
-                    .entry(style_key(&family, is_bold, is_italic))
-                    .or_insert(idx);
+                self.aliases.entry(family).or_insert(idx);
             }
         }
         Ok(idx)
@@ -116,37 +145,82 @@ impl FontManager {
     /// 3. normalized family match (substring either way)
     /// 4. fallback (first loaded) font
     pub fn find_font_with_match(&self, name: &str, bold: bool, italic: bool) -> FontMatch<'_> {
+        self.find_font_with_weight(name, if bold { 700 } else { 400 }, italic)
+    }
+
+    /// Find a font matching the requested name, ASS weight, and italic flag.
+    ///
+    /// Deterministic precedence (load order breaks ties):
+    /// 1. exact family + italic match, nearest weight
+    /// 2. exact family (any italic), nearest weight
+    /// 3. normalized family match (substring either way), nearest weight
+    /// 4. fallback (first loaded) font
+    pub fn find_font_with_weight(&self, name: &str, weight: u16, italic: bool) -> FontMatch<'_> {
         let lower = name.to_lowercase();
+        let weight = weight.clamp(1, 1000);
 
-        // 1. Exact family + exact style.
-        let key = style_key(&lower, bold, italic);
-        if let Some(&idx) = self.name_index.get(&key) {
-            return self.matched(idx, bold, italic);
+        // Family members: primary names plus metadata aliases, load order.
+        let mut members: Vec<usize> = self
+            .fonts
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name == lower)
+            .map(|(i, _)| i)
+            .collect();
+        if let Some(&alias_idx) = self.aliases.get(&lower) {
+            if !members.contains(&alias_idx) {
+                members.push(alias_idx);
+                members.sort_unstable();
+            }
+        }
+        // 1-2. Exact family (prefer italic match), nearest weight.
+        if !members.is_empty() {
+            let italic_members: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&i| self.fonts[i].is_italic == italic)
+                .collect();
+            let pool = if italic_members.is_empty() {
+                members
+            } else {
+                italic_members
+            };
+            if let Some(&idx) = pool
+                .iter()
+                .min_by_key(|&&i| weight_dist(self.fonts[i].weight, weight))
+            {
+                return self.matched(idx, weight, italic);
+            }
         }
 
-        // 2. Exact family, nearest style — scan in load order.
-        if let Some(idx) = self.fonts.iter().position(|f| f.name == lower) {
-            return self.matched(idx, bold, italic);
-        }
-
-        // 3. Normalized family match in load order (deterministic).
-        if let Some((idx, _)) = self.fonts.iter().enumerate().find(|(_, f)| {
-            !f.name.is_empty() && (lower.contains(&f.name) || f.name.contains(&lower))
-        }) {
-            return self.matched(idx, bold, italic);
+        // 3. Normalized family match (substring either way), nearest weight.
+        let fuzzy: Vec<usize> = self
+            .fonts
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                !f.name.is_empty() && (lower.contains(&f.name) || f.name.contains(&lower))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if let Some(&idx) = fuzzy
+            .iter()
+            .min_by_key(|&&i| weight_dist(self.fonts[i].weight, weight))
+        {
+            return self.matched(idx, weight, italic);
         }
 
         // 4. Deterministic fallback font.
         let idx = self.fallback_index.unwrap_or(0);
-        self.matched(idx, bold, italic)
+        self.matched(idx, weight, italic)
     }
 
-    fn matched(&self, idx: usize, bold: bool, italic: bool) -> FontMatch<'_> {
+    fn matched(&self, idx: usize, weight: u16, italic: bool) -> FontMatch<'_> {
         let loaded = &self.fonts[idx];
         FontMatch {
             id: idx,
             font: &loaded.font,
-            faux_bold: bold && !loaded.is_bold,
+            faux_bold: weight >= 700 && loaded.weight < 700,
             faux_italic: italic && !loaded.is_italic,
         }
     }
@@ -154,6 +228,44 @@ impl FontManager {
     /// Find a font matching the requested name and style (face only).
     pub fn find_font(&self, name: &str, bold: bool, italic: bool) -> &FontArc {
         self.find_font_with_match(name, bold, italic).font
+    }
+
+    /// ASS weight of a loaded font, if the index is valid.
+    pub fn font_weight(&self, index: usize) -> Option<u16> {
+        self.fonts.get(index).map(|f| f.weight)
+    }
+
+    /// True when the font contains a real glyph for `ch`
+    /// (glyph id 0 is .notdef). Unknown indices miss.
+    pub fn has_glyph(&self, index: usize, ch: char) -> bool {
+        self.fonts
+            .get(index)
+            .is_some_and(|f| f.font.glyph_id(ch).0 != 0)
+    }
+
+    /// Per-glyph fallback chain for a primary font: the primary id
+    /// first, then every other loaded font in load order. Always
+    /// non-empty when at least one font is loaded.
+    pub fn fallback_chain(&self, primary: usize) -> Vec<usize> {
+        let mut chain = Vec::with_capacity(self.fonts.len());
+        if primary < self.fonts.len() {
+            chain.push(primary);
+        }
+        chain.extend((0..self.fonts.len()).filter(|&i| i != primary));
+        chain
+    }
+
+    /// Faux-style requirements for rendering a glyph from font `index`
+    /// under the requested weight/italic: `(faux_bold, faux_italic)`.
+    /// Unknown indices conservatively require both syntheses.
+    pub fn faux_for(&self, index: usize, weight: u16, italic: bool) -> (bool, bool) {
+        match self.fonts.get(index) {
+            Some(loaded) => (
+                weight >= 700 && loaded.weight < 700,
+                italic && !loaded.is_italic,
+            ),
+            None => (weight >= 700, italic),
+        }
     }
 
     /// Get font at index
@@ -175,10 +287,27 @@ impl FontManager {
     pub fn font_names(&self) -> Vec<&str> {
         self.fonts.iter().map(|f| f.name.as_str()).collect()
     }
+
+    /// True when `name` resolves to a loaded family (exact, alias, or
+    /// the same substring fallback the matcher uses) rather than the
+    /// last-resort fallback font. Used for missing-font diagnostics.
+    pub fn has_family(&self, name: &str) -> bool {
+        let lower = name.to_lowercase();
+        if lower.is_empty() {
+            return false;
+        }
+        if self.fonts.iter().any(|f| f.name == lower) || self.aliases.contains_key(&lower) {
+            return true;
+        }
+        self.fonts
+            .iter()
+            .any(|f| !f.name.is_empty() && (lower.contains(&f.name) || f.name.contains(&lower)))
+    }
 }
 
-fn style_key(name: &str, bold: bool, italic: bool) -> String {
-    format!("{}:{}:{}", name, bold, italic)
+/// Absolute distance between a face weight and the requested weight.
+fn weight_dist(face: u16, requested: u16) -> u16 {
+    face.abs_diff(requested)
 }
 
 /// Filename-based style guess, used only when font metadata is absent.
@@ -229,6 +358,8 @@ pub fn get_fallback_font() -> &'static [u8] {
 struct FontMetadata {
     /// Declared family names (name IDs 1 and 16, plus full name 4).
     families: Vec<String>,
+    /// OS/2.usWeightClass (1..=1000) when the table parses.
+    weight: Option<u16>,
     is_bold: Option<bool>,
     is_italic: Option<bool>,
 }
@@ -249,12 +380,18 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
         meta.families = parse_name_table(name_table);
     }
 
-    // OS/2.fsSelection: bit 0 = italic, bit 5 = bold.
+    // OS/2.usWeightClass at offset 4; fsSelection at 62
+    // (bit 0 = italic, bit 5 = bold).
     if let Some(os2) = tables
         .iter()
         .find(|(tag, _, _)| tag == b"OS/2")
         .and_then(|(_, offset, len)| data.get(*offset..offset.saturating_add(*len)))
     {
+        if let Some(us_weight) = read_u16(os2, 4) {
+            if (1..=1000).contains(&us_weight) {
+                meta.weight = Some(us_weight);
+            }
+        }
         if let Some(fs_selection) = read_u16(os2, 62) {
             meta.is_italic = Some(fs_selection & 0x0001 != 0);
             meta.is_bold = Some(fs_selection & 0x0020 != 0);
@@ -279,15 +416,29 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
         }
     }
 
-    if meta.families.is_empty() && meta.is_bold.is_none() && meta.is_italic.is_none() {
+    if meta.families.is_empty()
+        && meta.is_bold.is_none()
+        && meta.is_italic.is_none()
+        && meta.weight.is_none()
+    {
         return None;
     }
     Some(meta)
 }
 
 /// Read the sfnt table directory: (tag, offset, length) triples.
+///
+/// Only single-face containers are accepted (`\0\1\0\0`, `OTTO`,
+/// `true`, `typ1`). Font collections (`ttcf`, i.e. .ttc/.otc) are
+/// rejected: their header is not a table directory, and silently
+/// misreading it would yield wrong family/weight metadata.
 fn read_sfnt_table_directory(data: &[u8]) -> Option<Vec<([u8; 4], usize, usize)>> {
     if data.len() < 12 {
+        return None;
+    }
+    let magic = data.get(0..4)?;
+    if magic != [0x00, 0x01, 0x00, 0x00] && magic != b"OTTO" && magic != b"true" && magic != b"typ1"
+    {
         return None;
     }
     let num_tables = read_u16(data, 4)? as usize;
@@ -451,5 +602,248 @@ mod tests {
             let m = fm.find_font_with_match("aaa font", false, false);
             assert_eq!(m.id, 0);
         }
+    }
+
+    #[test]
+    fn test_exact_family_beats_substring_regardless_of_order() {
+        // "Arial" must resolve to Arial even when "Arial Narrow" loaded
+        // first: exact normalized match outranks substring fallback.
+        let mut fm = FontManager::new();
+        fm.load_font("aaa font extended", get_fallback_font(), false, false)
+            .unwrap();
+        fm.load_font("aaa font", get_fallback_font(), false, false)
+            .unwrap();
+        assert_eq!(fm.find_font_with_match("aaa font", false, false).id, 1);
+        assert_eq!(
+            fm.find_font_with_match("aaa font extended", false, false)
+                .id,
+            0
+        );
+        // Case-insensitive exact still beats substring.
+        assert_eq!(fm.find_font_with_match("AAA FONT", false, false).id, 1);
+        // Genuine substring fallback still works when nothing is exact.
+        assert_eq!(fm.find_font_with_match("aaa", false, false).id, 0);
+    }
+
+    #[test]
+    fn test_weight_selection_picks_nearest() {
+        let mut fm = FontManager::new();
+        // Same bytes, three declared weights of one family.
+        fm.load_font_with_weight("Fam", get_fallback_font(), 400, false)
+            .unwrap();
+        fm.load_font_with_weight("Fam", get_fallback_font(), 700, false)
+            .unwrap();
+        fm.load_font_with_weight("Fam", get_fallback_font(), 900, false)
+            .unwrap();
+        assert_eq!(fm.find_font_with_weight("Fam", 800, false).id, 1);
+        assert_eq!(fm.find_font_with_weight("Fam", 500, false).id, 0);
+        assert_eq!(fm.find_font_with_weight("Fam", 950, false).id, 2);
+        assert_eq!(fm.find_font_with_weight("Fam", 100, false).id, 0);
+        // Exact tie (550 between 400 and 700): first loaded wins.
+        assert_eq!(fm.find_font_with_weight("Fam", 550, false).id, 0);
+    }
+
+    #[test]
+    fn test_faux_bold_only_without_bold_face() {
+        let mut fm = FontManager::new();
+        fm.load_font_with_weight("Fam", get_fallback_font(), 400, false)
+            .unwrap();
+        // Bold request on a regular face: synthesize.
+        assert!(fm.find_font_with_weight("Fam", 700, false).faux_bold);
+        // Normal request: never synthesize.
+        assert!(!fm.find_font_with_weight("Fam", 400, false).faux_bold);
+        // A real bold face must never be double-bolded, even when the
+        // request is heavier than the face.
+        fm.load_font_with_weight("FamBold", get_fallback_font(), 700, false)
+            .unwrap();
+        assert!(!fm.find_font_with_weight("FamBold", 700, false).faux_bold);
+        assert!(!fm.find_font_with_weight("FamBold", 900, false).faux_bold);
+    }
+
+    #[test]
+    fn test_has_glyph_chain_and_faux_for() {
+        let mut fm = FontManager::new();
+        fm.load_font("A", get_fallback_font(), false, false)
+            .unwrap();
+        fm.load_font("B", get_fallback_font(), true, false).unwrap();
+        fm.load_font("C", get_fallback_font(), false, true).unwrap();
+        assert!(fm.has_glyph(0, 'A'));
+        assert!(!fm.has_glyph(0, '\u{10FFFF}'));
+        assert!(!fm.has_glyph(99, 'A'));
+        // Chain: primary first, then load order.
+        assert_eq!(fm.fallback_chain(1), vec![1, 0, 2]);
+        assert_eq!(fm.fallback_chain(0), vec![0, 1, 2]);
+        // Per-face faux requirements under a bold+italic request.
+        assert_eq!(fm.faux_for(0, 700, true), (true, true));
+        assert_eq!(fm.faux_for(1, 700, true), (false, true));
+        assert_eq!(fm.faux_for(2, 700, true), (true, false));
+        assert_eq!(fm.faux_for(2, 400, false), (false, false));
+        assert_eq!(fm.faux_for(99, 700, true), (true, true));
+    }
+
+    #[test]
+    fn test_metadata_reports_us_weight_class() {
+        // DejaVu Sans Regular declares usWeightClass 400.
+        let meta = inspect_font_metadata(get_fallback_font()).unwrap();
+        assert_eq!(meta.weight, Some(400));
+        let mut fm = FontManager::new();
+        let idx = fm
+            .load_font_auto("DejaVuSans.ttf", get_fallback_font())
+            .unwrap();
+        assert_eq!(fm.font_weight(idx), Some(400));
+    }
+
+    /// Plan #55: full style matrix. All faces share the bundled bytes
+    /// (only one real font ships), so this locks selection-by-declared
+    /// weight/style plus faux-only-when-needed.
+    #[test]
+    fn test_style_matrix_selection_and_faux() {
+        let mut fm = FontManager::new();
+        let bytes = get_fallback_font();
+        // Regular Medium Semibold Bold Black Italic BoldItalic.
+        for (w, italic) in [
+            (400, false),
+            (500, false),
+            (600, false),
+            (700, false),
+            (900, false),
+            (400, true),
+            (700, true),
+        ] {
+            fm.load_font_with_weight("Fam", bytes, w, italic).unwrap();
+        }
+        // Each declared weight resolves to its own face, no synthesis.
+        for (w, id) in [(400, 0), (500, 1), (600, 2), (700, 3), (900, 4)] {
+            let m = fm.find_font_with_weight("Fam", w, false);
+            assert_eq!(m.id, id, "weight {w}");
+            assert!(!m.faux_bold && !m.faux_italic, "weight {w}");
+        }
+        // Italic requests resolve to the italic faces.
+        let m = fm.find_font_with_weight("Fam", 400, true);
+        assert_eq!(m.id, 5);
+        assert!(!m.faux_bold && !m.faux_italic);
+        let m = fm.find_font_with_weight("Fam", 700, true);
+        assert_eq!(m.id, 6);
+        assert!(!m.faux_bold && !m.faux_italic);
+        // In-between requests pick the nearest face.
+        assert_eq!(fm.find_font_with_weight("Fam", 550, false).id, 1);
+        assert_eq!(fm.find_font_with_weight("Fam", 650, false).id, 2);
+        assert_eq!(fm.find_font_with_weight("Fam", 800, false).id, 3);
+        // Request clamping: 0 -> 1 (nearest 400), huge -> 1000 (nearest 900).
+        assert_eq!(fm.find_font_with_weight("Fam", 0, false).id, 0);
+        assert_eq!(fm.find_font_with_weight("Fam", 2000, false).id, 4);
+    }
+
+    /// Plan #55: faux styling only when no suitable real face exists.
+    #[test]
+    fn test_faux_only_without_suitable_face() {
+        let mut fm = FontManager::new();
+        fm.load_font_with_weight("Fam", get_fallback_font(), 400, false)
+            .unwrap();
+        // Nothing bold/italic loaded: both synthesize.
+        let m = fm.find_font_with_weight("Fam", 700, true);
+        assert_eq!(m.id, 0);
+        assert!(m.faux_bold && m.faux_italic);
+        // Semibold request on a regular-only family: nearest face, and
+        // no faux bold (faux only applies to bold-class requests).
+        let m = fm.find_font_with_weight("Fam", 600, false);
+        assert_eq!(m.id, 0);
+        assert!(!m.faux_bold && !m.faux_italic);
+        // Adding a real italic face clears faux italic for that family.
+        fm.load_font_with_weight("Fam", get_fallback_font(), 400, true)
+            .unwrap();
+        let m = fm.find_font_with_weight("Fam", 400, true);
+        assert_eq!(m.id, 1);
+        assert!(!m.faux_italic);
+    }
+
+    /// Plan #56: the sfnt metadata reader never panics on hostile
+    /// input: truncations at every scale plus targeted corruptions of
+    /// the header, directory, name records, UTF-16, OS/2, and head.
+    #[test]
+    fn test_metadata_never_panics_on_hostile_input() {
+        let valid = get_fallback_font();
+        // Every truncation scale, coarse then fine near the header.
+        let mut lens: Vec<usize> = (0..64).collect();
+        lens.extend((0..=valid.len()).step_by(4096));
+        for len in lens {
+            let _ = inspect_font_metadata(&valid[..len.min(valid.len())]);
+        }
+        // Targeted corruptions over a valid copy.
+        let mut corrupt = valid.to_vec();
+        let poke = |buf: &mut [u8], off: usize, bytes: &[u8]| {
+            if off + bytes.len() <= buf.len() {
+                buf[off..off + bytes.len()].copy_from_slice(bytes);
+            }
+        };
+        // numTables extremes (offset 4).
+        for tables in [0u16, 1, 63, 64, 65, 100, 0xFFFF] {
+            let mut buf = valid.to_vec();
+            poke(&mut buf, 4, &tables.to_be_bytes());
+            let _ = inspect_font_metadata(&buf);
+        }
+        // Directory record extremes: first record at 12 (tag/offset/len).
+        for patch in [
+            (12usize, vec![0xFF, 0xFF, 0xFF, 0xFF]),
+            (20, vec![0xFF, 0xFF, 0xFF, 0xFF]),
+            (24, vec![0xFF, 0xFF, 0xFF, 0xFF]),
+            (20, vec![0x00, 0x00, 0x00, 0x00]),
+            (24, vec![0x00, 0x00, 0x00, 0x00]),
+        ] {
+            let mut buf = valid.to_vec();
+            poke(&mut buf, patch.0, &patch.1);
+            let _ = inspect_font_metadata(&buf);
+        }
+        // Header magic extremes.
+        for magic in [&b"ttcf"[..], b"wOFF", b"\0\0\0\0", b"AAAA"] {
+            let mut buf = valid.to_vec();
+            poke(&mut buf, 0, magic);
+            let _ = inspect_font_metadata(&buf);
+        }
+        // Blank the whole copy progressively (keeps magic valid).
+        for zeros in [16usize, 64, 256, 1024, 8192] {
+            corrupt.fill(0);
+            let keep = zeros.min(corrupt.len());
+            corrupt[..keep].copy_from_slice(&valid[..keep]);
+            let _ = inspect_font_metadata(&corrupt);
+        }
+        // UTF-16 edge cases directly.
+        assert!(decode_utf16_be(&[0x00]).is_none());
+        assert!(decode_utf16_be(&vec![0u8; 4098]).is_none());
+        assert!(decode_utf16_be(&[0xD8, 0x00]).is_none()); // lone surrogate
+        assert_eq!(decode_utf16_be(&[0x00, 0x41]).as_deref(), Some("A"));
+        // Name table with insane counts/string offsets.
+        assert!(parse_name_table(&[0, 1, 0xFF, 0xFF, 0xFF, 0xFF]).is_empty());
+        assert!(parse_name_table(&[0, 1, 0, 1, 0, 6, 0, 0]).is_empty());
+        // Readers reject out-of-bounds offsets without panicking.
+        assert!(read_u16(&[0x01], 0).is_none());
+        assert!(read_u16(&[0x01, 0x02], 1).is_none());
+        assert!(read_u32(&[0x01, 0x02, 0x03], 0).is_none());
+    }
+
+    /// Plan #57: font collections are rejected clearly, never silently
+    /// first-faced; metadata inspection refuses them too.
+    #[test]
+    fn test_font_collections_rejected() {
+        // Synthetic TTC header (magic + version + 1 face offset).
+        let mut ttc = vec![0u8; 64];
+        ttc[0..4].copy_from_slice(b"ttcf");
+        ttc[4..8].copy_from_slice(&0x00010000u32.to_be_bytes());
+        ttc[8..12].copy_from_slice(&1u32.to_be_bytes());
+        let mut fm = FontManager::new();
+        let err = fm
+            .load_font_with_weight("Fam", &ttc, 400, false)
+            .unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+        assert!(inspect_font_metadata(&ttc).is_none());
+        // A real font with TTC magic stamped on is also rejected.
+        let mut stamped = get_fallback_font().to_vec();
+        stamped[0..4].copy_from_slice(b"ttcf");
+        assert!(fm
+            .load_font_with_weight("Fam", &stamped, 400, false)
+            .is_err());
+        assert!(inspect_font_metadata(&stamped).is_none());
+        // Unknown (non-sfnt, non-TTC) magics yield no metadata.
+        assert!(inspect_font_metadata(b"wOF2garbage-payload........").is_none());
     }
 }

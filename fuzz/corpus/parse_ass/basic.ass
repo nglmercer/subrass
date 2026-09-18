@@ -1,0 +1,16 @@
+[Script Info]
+Title: seed-basic
+ScriptType: v4.00+
+PlayResX: 384
+PlayResY: 216
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,Hello {\k50}ka{\k50}ra{\c&H0000FF&}red{\r} ok
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\an7\pos(10,20)\frz30\fax0.5\blur1\clip(0,0,50,50)}Fx\Nline2

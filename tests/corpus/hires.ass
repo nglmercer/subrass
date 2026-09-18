@@ -1,0 +1,18 @@
+[Script Info]
+Title: corpus-hires-transform
+ScriptType: v4.00+
+PlayResX: 3840
+PlayResY: 2160
+WrapStyle: 2
+ScaledBorderAndShadow: no
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,DejaVu Sans,120,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,4,2,7,40,40,40,1
+Style: Box,DejaVu Sans,120,&H00FFFFFF,&H000000FF,&H004080FF,&H000000FF,0,0,0,0,100,100,0,0,3,8,0,5,40,40,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\frx60\fry30\frz15\org(1920,1080)\fax-0.3\fay0.4\bord6\xbord2\ybord9\shad5\xshad-3\yshad7\blur2\fscx120\fscy80\fsp6\q2}All dials at once, no wrapping of this long line at all
+Dialogue: 0,0:00:00.00,0:00:05.00,Box,,0,0,0,,Boxed 4k text\Nsecond line
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\pos(-5000,9000)}way offscreen

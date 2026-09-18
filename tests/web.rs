@@ -289,3 +289,145 @@ fn test_renderer_rejects_invalid_inputs() {
     assert!(renderer.render_frame(f64::NAN).is_err());
     assert!(renderer.render_frame(-1.0).is_err());
 }
+
+// Plan #78: stronger JS-visible behavior coverage.
+
+const TEST_ASS_WITH_ATTACHMENTS: &str = r#"[Script Info]
+Title: Test
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:04.00,Default,John,0,0,0,,Hello World!
+
+[Fonts]
+fontname: Test.ttf
+15*$
+
+[Graphics]
+filename: logo.bmp
+15*$
+"#;
+
+#[wasm_bindgen_test]
+fn test_renderer_rejects_invalid_times() {
+    let mut renderer = subrass::api::SubtitleRenderer::new(TEST_ASS).unwrap();
+    renderer.set_video_size(64, 64).unwrap();
+    assert!(renderer.render_frame(f64::INFINITY).is_err());
+    assert!(renderer.render_frame(f64::NEG_INFINITY).is_err());
+    // Beyond Number.MAX_SAFE_INTEGER.
+    assert!(renderer.render_frame(9_007_199_254_740_992.0).is_err());
+    assert!(renderer.render_frame(-0.5).is_err());
+    // Boundary values render fine.
+    assert!(renderer.render_frame(0.0).is_ok());
+    assert!(renderer.render_frame(9_007_199_254_740_991.0).is_ok());
+    // Times outside any event render an empty (fully transparent) frame.
+    renderer.render_frame(60_000.0).unwrap();
+    assert!(renderer.get_frame_data().chunks_exact(4).all(|p| p[3] == 0));
+}
+
+#[wasm_bindgen_test]
+fn test_renderer_rejects_invalid_dimensions() {
+    let mut renderer = subrass::api::SubtitleRenderer::new(TEST_ASS).unwrap();
+    renderer.set_video_size(64, 64).unwrap();
+    assert!(renderer.set_video_size(0, 0).is_err());
+    assert!(renderer.set_video_size(64, 0).is_err());
+    assert!(renderer.resize(0, 64).is_err());
+    assert!(renderer.set_video_size(u32::MAX, u32::MAX).is_err());
+    // Failed resizes leave the previous size untouched.
+    assert_eq!(renderer.get_frame_size(), vec![64, 64]);
+    assert_eq!(renderer.get_frame_data().len(), 64 * 64 * 4);
+}
+
+#[wasm_bindgen_test]
+fn test_resize_keeps_frame_consistent() {
+    let mut renderer = subrass::api::SubtitleRenderer::new(TEST_ASS).unwrap();
+    renderer.set_video_size(320, 180).unwrap();
+    renderer.render_frame(2000.0).unwrap();
+    assert_eq!(renderer.get_frame_data().len(), 320 * 180 * 4);
+    renderer.resize(160, 90).unwrap();
+    assert_eq!(renderer.get_frame_size(), vec![160, 90]);
+    assert_eq!(renderer.get_frame_data().len(), 160 * 90 * 4);
+    // Still renders after resize.
+    renderer.render_frame(2000.0).unwrap();
+    assert!(renderer.get_frame_data().chunks_exact(4).any(|p| p[3] > 0));
+}
+
+#[wasm_bindgen_test]
+fn test_attachment_access() {
+    let doc = subrass::api::AssDoc::new(TEST_ASS_WITH_ATTACHMENTS).unwrap();
+    assert_eq!(doc.get_attachment_count(), 2);
+    assert_eq!(doc.get_attachment_name(0).as_deref(), Some("Test.ttf"));
+    assert_eq!(doc.get_attachment_kind(0).as_deref(), Some("font"));
+    assert_eq!(
+        doc.get_attachment_data(0).as_deref(),
+        Some(b"ABC".as_slice())
+    );
+    assert_eq!(doc.get_attachment_name(1).as_deref(), Some("logo.bmp"));
+    assert_eq!(doc.get_attachment_kind(1).as_deref(), Some("graphic"));
+    assert_eq!(
+        doc.get_attachment_data(1).as_deref(),
+        Some(b"ABC".as_slice())
+    );
+    // Out-of-range indices are None (undefined in JS), never a throw.
+    assert_eq!(doc.get_attachment_name(2), None);
+    assert_eq!(doc.get_attachment_kind(2), None);
+    assert_eq!(doc.get_attachment_data(2), None);
+    assert_eq!(doc.get_attachment_name(usize::MAX), None);
+}
+
+#[wasm_bindgen_test]
+fn test_load_font_from_bytes() {
+    let mut renderer = subrass::api::SubtitleRenderer::new(TEST_ASS).unwrap();
+    let before = renderer.get_font_count();
+    assert!(before > 0);
+    // Garbage is rejected.
+    assert!(renderer.load_font("junk", b"not a font").is_err());
+    assert!(renderer.load_font("empty", b"").is_err());
+    assert_eq!(renderer.get_font_count(), before);
+    // A real embedded font registers and renders.
+    let dejavu = include_bytes!("../fonts/DejaVuSans.ttf");
+    renderer.load_font("DejaVu", dejavu).unwrap();
+    assert_eq!(renderer.get_font_count(), before + 1);
+    renderer.set_video_size(320, 180).unwrap();
+    renderer.render_frame(2000.0).unwrap();
+    assert!(renderer.get_frame_data().chunks_exact(4).any(|p| p[3] > 0));
+}
+
+#[wasm_bindgen_test]
+fn test_renderer_constructor_rejects_garbage() {
+    assert!(subrass::api::SubtitleRenderer::new("junk").is_err());
+    assert!(subrass::api::SubtitleRenderer::new("[Bogus]\nfoo").is_err());
+    // Empty content parses to an empty document (valid, zero events).
+    let empty = subrass::api::SubtitleRenderer::new("").unwrap();
+    assert_eq!(empty.get_event_count(), 0);
+    assert_eq!(empty.get_style_count(), 0);
+}
+
+#[wasm_bindgen_test]
+fn test_missing_lookups_return_null() {
+    let doc = subrass::api::AssDoc::new(TEST_ASS).unwrap();
+    assert!(doc.find_style("NoSuchStyle").unwrap().is_null());
+    assert!(doc.get_event(usize::MAX).unwrap().is_null());
+    assert!(doc.get_style(usize::MAX).unwrap().is_null());
+    assert!(doc.get_events_at_time(f64::INFINITY).is_err());
+}
+
+#[wasm_bindgen_test]
+fn test_event_serialization_shape() {
+    // Serialization round-trips the fields JS consumers need.
+    let doc = subrass::api::AssDoc::new(TEST_ASS).unwrap();
+    let events = as_array(&doc.get_events().unwrap());
+    assert_eq!(events.length(), 2);
+    let first = events.get(0);
+    assert_eq!(field_string(&first, "text"), "Hello World!");
+    assert_eq!(field_string(&first, "style"), "Default");
+    let event = doc.get_event(0).unwrap();
+    assert_eq!(field_string(&event, "text"), "Hello World!");
+}

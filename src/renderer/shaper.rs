@@ -66,14 +66,10 @@ impl TextShaper {
 
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
-                // Line break: advance y, reset x
-                max_x = max_x.max(x);
-
-                // Remove trailing spacing — width should reflect the visual extent
-                // of the glyphs, not include an extra spacing unit after the last one.
-                if !text.is_empty() {
-                    max_x -= spacing * scale_x;
-                }
+                // Line break: close this line (stripping its own trailing
+                // spacing unit), advance y, reset x.
+                let line_width = if x > 0.0 { x - spacing * scale_x } else { 0.0 };
+                max_x = max_x.max(line_width);
                 y += line_height;
                 x = 0.0;
                 continue;
@@ -104,7 +100,9 @@ impl TextShaper {
             x += (advance + spacing) * scale_x;
         }
 
-        max_x = max_x.max(x);
+        // Close the final line with the same trailing-spacing rule.
+        let line_width = if x > 0.0 { x - spacing * scale_x } else { 0.0 };
+        max_x = max_x.max(line_width);
 
         ShapedLine {
             glyphs,
@@ -114,26 +112,26 @@ impl TextShaper {
         }
     }
 
-    /// Measure text width without creating glyphs
+    /// Measure text width without creating glyphs. For multiline text,
+    /// returns the widest line (newlines are breaks, not skips).
     pub fn measure_text(text: &str, font: &FontArc, font_size: f64, spacing: f64) -> f64 {
         let scale = PxScale::from(font_size as f32);
         let scaled = font.as_scaled(scale);
-        let mut width = 0.0_f64;
-        let mut first = true;
-
-        for ch in text.chars() {
-            if ch == '\n' || ch == '\r' {
-                continue;
+        let mut widest = 0.0_f64;
+        for line in text.split(['\n', '\r']) {
+            let mut width = 0.0_f64;
+            let mut first = true;
+            for ch in line.chars() {
+                let glyph_id = font.glyph_id(ch);
+                if !first {
+                    width += spacing;
+                }
+                width += scaled.h_advance(glyph_id) as f64;
+                first = false;
             }
-            let glyph_id = font.glyph_id(ch);
-            if !first {
-                width += spacing;
-            }
-            width += scaled.h_advance(glyph_id) as f64;
-            first = false;
+            widest = widest.max(width);
         }
-
-        width
+        widest
     }
 
     /// Split text into lines based on max width

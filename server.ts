@@ -1,81 +1,161 @@
-// Dev server for the subrass demo.
-//
-// Serves the example pages with TypeScript transpiled on the fly (no build
-// step), plus the wasm-pack output in pkg/ and the sample subtitles:
-//
-//   wasm-pack build --target web   # once, to produce pkg/
-//   bun run server.ts              # http://localhost:3001
-//
-// Routes:
-//   /         landing page (demo/index.html)
-//   /basic    main-thread rendering example
-//   /worker   Web Worker rendering example
-//   /pkg/*    wasm-pack build output
-//   /*        everything else resolves under demo/
+import { watch } from "node:fs";
+import { extname, join, normalize, resolve, sep } from "node:path";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
 
-import { normalize, resolve } from "node:path";
+const PORT = Number(process.env.PORT ?? 8001);
+const DEMO_INDEX = "./demo/index.html";
 
-const ROOT = import.meta.dir;
-const DEMO = resolve(ROOT, "demo");
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".ts": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".ts": "text/javascript",
   ".wasm": "application/wasm",
   ".ass": "text/plain; charset=utf-8",
   ".ssa": "text/plain; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".webp": "image/webp",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
 };
 
-const transpiler = new Bun.Transpiler({ loader: "ts" });
+const EXAMPLE_PAGES = new Map([
+  ["/", DEMO_INDEX],
+  ["/basic", "./demo/basic/index.html"],
+  ["/worker", "./demo/worker/index.html"],
+]);
 
-/** Map a URL pathname to a file on disk, or null if outside the allowed roots. */
-function resolvePath(pathname: string): string | null {
-  if (pathname === "/") return resolve(DEMO, "index.html");
-  if (pathname === "/basic") return resolve(DEMO, "basic/index.html");
-  if (pathname === "/worker") return resolve(DEMO, "worker/index.html");
+const DEMO_ROOT = resolve("./demo");
+const PKG_ROOT = resolve("./pkg");
+const FONTS_ROOT = resolve("./fonts");
 
-  let decoded: string;
+/// Decode a URL path repeatedly (bounded) so double-encoded sequences
+/// cannot smuggle separators past the containment check below.
+export function decodePath(raw: string): string {
+  let decoded = raw;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded;
+}
+
+/// Resolve `requestPath` against `root`, returning null when the result
+/// escapes the root (path traversal) or is not a regular file.
+export function resolveContained(root: string, requestPath: string): string | null {
+  const rel = normalize(decodePath(requestPath)).replace(/^([/\\])+/, "");
+  const abs = resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + sep)) return null;
   try {
-    decoded = decodeURIComponent(pathname);
+    if (!existsSync(abs) || !statSync(abs).isFile()) return null;
   } catch {
     return null;
   }
-  const rel = normalize(decoded).replace(/^[/\\]+/, "");
-  if (rel === "" || rel.startsWith("..")) return null;
-
-  // The WASM package lives at the repo root; everything else under demo/.
-  if (rel.startsWith("pkg/") || rel.startsWith("fonts/")) return resolve(ROOT, rel);
-  return resolve(DEMO, rel);
+  return abs;
 }
 
-const server = Bun.serve({
-  port: 3001,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const file = resolvePath(url.pathname);
-    if (!file) return new Response("Not Found", { status: 404 });
+const server = createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    const pathname = url.pathname;
 
-    const ext = file.slice(file.lastIndexOf("."));
-    const contentType = MIME[ext];
-    if (!contentType) return new Response("Not Found", { status: 404 });
-
-    const handle = Bun.file(file);
-    if (!(await handle.exists())) return new Response("Not Found", { status: 404 });
-
-    const headers = {
-      "Content-Type": contentType,
-      "Cache-Control": "no-cache",
-    };
-    if (ext === ".ts") {
-      return new Response(transpiler.transformSync(await handle.text()), { headers });
+    // Serve files from pkg/ (compiled JS/WASM/text artifacts)
+    if (pathname.startsWith("/pkg/")) {
+      const filePath = resolveContained(PKG_ROOT, pathname.slice("/pkg/".length));
+      if (!filePath) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      const data = await readFile(filePath);
+      res.writeHead(200, { "Content-Type": MIME_TYPES[extname(filePath)] ?? "application/octet-stream" });
+      res.end(data);
+      return;
     }
-    return new Response(handle, { headers });
-  },
+
+    // Serve font files so demos can fetch the bundled fonts
+    if (pathname.startsWith("/fonts/")) {
+      const filePath = resolveContained(FONTS_ROOT, pathname.slice("/fonts/".length));
+      if (!filePath) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      const data = await readFile(filePath);
+      res.writeHead(200, { "Content-Type": MIME_TYPES[extname(filePath)] ?? "application/octet-stream" });
+      res.end(data);
+      return;
+    }
+
+    // Serve .ts example sources compiled on the fly by Bun
+    if (pathname.endsWith(".ts")) {
+      const filePath = resolveContained(DEMO_ROOT, pathname);
+      if (!filePath) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      const transpiler = new Bun.Transpiler({ loader: "ts" });
+      const source = await readFile(filePath, "utf-8");
+      const js = transpiler.transformSync(source);
+      res.writeHead(200, { "Content-Type": "text/javascript" });
+      res.end(js);
+      return;
+    }
+
+    // Subtitle sample
+    if (pathname === "/sample.ass") {
+      const data = await readFile("./demo/sample.ass");
+      res.writeHead(200, { "Content-Type": MIME_TYPES[".ass"] });
+      res.end(data);
+      return;
+    }
+
+    // Serve example pages
+    const examplePath = EXAMPLE_PAGES.get(pathname);
+    if (examplePath) {
+      const data = await readFile(examplePath, "utf-8");
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(data);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end("Not found");
+  } catch (error) {
+    console.error("Server error:", error);
+    res.writeHead(500);
+    res.end("Internal server error");
+  }
 });
 
-console.log(`subrass demo: http://localhost:${server.port}`);
+if (import.meta.main) {
+  server.listen(PORT, () => {
+    console.log(`Dev server running at http://localhost:${PORT}`);
+    console.log(`  / ........... ${DEMO_INDEX}`);
+    console.log(`  /basic ...... ./demo/basic/index.html`);
+    console.log(`  /worker ..... ./demo/worker/index.html`);
+  });
+}
+
+// Watch for changes and log them (Bun auto-restarts with --watch flag)
+if (process.env.BUN_WATCH === "1") {
+  watch("./demo", { recursive: true }, (_event, filename) => {
+    console.log(`File changed: ${filename}`);
+  });
+}

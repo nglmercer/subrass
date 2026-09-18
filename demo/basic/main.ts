@@ -3,19 +3,17 @@
 import { startDemo } from "../shared/app.ts";
 import { DirectBackend } from "../shared/direct-backend.ts";
 import { showError } from "../shared/ui.ts";
+import { dbg } from "../shared/debug.ts";
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:basic]", ...args);
-}
+const log = dbg("basic");
 
-dbg("entry", {
+log("entry", {
   href: location.href,
   importMetaUrl: import.meta.url,
   expectedPkg: new URL("../../pkg/subrass.js", import.meta.url).href,
 });
 
 startDemo(new DirectBackend()).catch((err) => {
-  dbg("startDemo rejected", err);
+  log("startDemo rejected", err);
   showError(`Demo failed to start: ${(err as Error).message}`);
 });

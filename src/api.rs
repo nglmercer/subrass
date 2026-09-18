@@ -4,6 +4,35 @@ use web_sys::HtmlCanvasElement;
 use crate::parser::AssDocument;
 use crate::renderer::SubtitleRenderer as InnerRenderer;
 
+/// Validate a millisecond timestamp coming from JavaScript.
+///
+/// Rejects NaN, infinities, negatives, and values outside the u64 range
+/// instead of silently casting them (where `as u64` maps NaN/negatives
+/// to 0 and infinity to u64::MAX).
+/// Plain-String validation so the logic is unit-testable on native
+/// targets (`JsError::new` requires wasm); the WASM boundary maps the
+/// message with `JsError::new`.
+fn validate_millis(value: f64) -> Result<u64, String> {
+    if !value.is_finite() {
+        return Err("Time must be a finite number of milliseconds".to_string());
+    }
+    if value < 0.0 {
+        return Err("Time must not be negative".to_string());
+    }
+    if value > u64::MAX as f64 {
+        return Err("Time exceeds the representable range".to_string());
+    }
+    Ok(value as u64)
+}
+
+fn to_js_millis(value: f64) -> Result<u64, JsError> {
+    validate_millis(value).map_err(|e| JsError::new(&e))
+}
+
+fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsError> {
+    serde_wasm_bindgen::to_value(value).map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// JavaScript-friendly ASS document wrapper
 #[wasm_bindgen]
 pub struct AssDoc {
@@ -20,36 +49,37 @@ impl AssDoc {
     }
 
     /// Get script information as a JavaScript object
-    pub fn get_script_info(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.inner.script_info).unwrap_or_default()
+    pub fn get_script_info(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.script_info)
     }
 
     /// Get all styles as a JavaScript array
-    pub fn get_styles(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.inner.styles).unwrap_or_default()
+    pub fn get_styles(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.styles)
     }
 
     /// Get all events as a JavaScript array
-    pub fn get_events(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.inner.events).unwrap_or_default()
+    pub fn get_events(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.events)
     }
 
     /// Get events active at a specific time (in milliseconds)
-    pub fn get_events_at_time(&self, time_ms: f64) -> JsValue {
-        let events = self.inner.get_events_at_time(time_ms as u64);
-        serde_wasm_bindgen::to_value(&events).unwrap_or_default()
+    pub fn get_events_at_time(&self, time_ms: f64) -> Result<JsValue, JsError> {
+        let time_ms = to_js_millis(time_ms)?;
+        let events = self.inner.get_events_at_time(time_ms);
+        to_js(&events)
     }
 
     /// Get only dialogue events (not comments)
-    pub fn get_dialogue_events(&self) -> JsValue {
+    pub fn get_dialogue_events(&self) -> Result<JsValue, JsError> {
         let events = self.inner.get_dialogue_events();
-        serde_wasm_bindgen::to_value(&events).unwrap_or_default()
+        to_js(&events)
     }
 
     /// Get only comment events
-    pub fn get_comment_events(&self) -> JsValue {
+    pub fn get_comment_events(&self) -> Result<JsValue, JsError> {
         let events = self.inner.get_comment_events();
-        serde_wasm_bindgen::to_value(&events).unwrap_or_default()
+        to_js(&events)
     }
 
     /// Get the number of events
@@ -63,18 +93,18 @@ impl AssDoc {
     }
 
     /// Find a style by name
-    pub fn find_style(&self, name: &str) -> JsValue {
+    pub fn find_style(&self, name: &str) -> Result<JsValue, JsError> {
         match self.inner.find_style(name) {
-            Some(style) => serde_wasm_bindgen::to_value(style).unwrap_or_default(),
-            None => JsValue::NULL,
+            Some(style) => to_js(style),
+            None => Ok(JsValue::NULL),
         }
     }
 
     /// Get the default style
-    pub fn get_default_style(&self) -> JsValue {
+    pub fn get_default_style(&self) -> Result<JsValue, JsError> {
         match self.inner.get_default_style() {
-            Some(style) => serde_wasm_bindgen::to_value(style).unwrap_or_default(),
-            None => JsValue::NULL,
+            Some(style) => to_js(style),
+            None => Ok(JsValue::NULL),
         }
     }
 
@@ -99,20 +129,20 @@ impl AssDoc {
     }
 
     /// Get event at index
-    pub fn get_event(&self, index: usize) -> JsValue {
+    pub fn get_event(&self, index: usize) -> Result<JsValue, JsError> {
         if index < self.inner.events.len() {
-            serde_wasm_bindgen::to_value(&self.inner.events[index]).unwrap_or_default()
+            to_js(&self.inner.events[index])
         } else {
-            JsValue::NULL
+            Ok(JsValue::NULL)
         }
     }
 
     /// Get style at index
-    pub fn get_style(&self, index: usize) -> JsValue {
+    pub fn get_style(&self, index: usize) -> Result<JsValue, JsError> {
         if index < self.inner.styles.len() {
-            serde_wasm_bindgen::to_value(&self.inner.styles[index]).unwrap_or_default()
+            to_js(&self.inner.styles[index])
         } else {
-            JsValue::NULL
+            Ok(JsValue::NULL)
         }
     }
 
@@ -149,7 +179,13 @@ pub fn parse_ass(content: &str) -> Result<AssDoc, JsError> {
     AssDoc::new(content)
 }
 
-/// Validate ASS content without returning the full document
+/// Validate ASS content without returning the full document.
+///
+/// Success means the document passed syntactic validation: sections,
+/// formats, styles, events, timestamps, and attachments all parsed
+/// without malformed values (malformed values are errors, not silent
+/// defaults). An empty document is valid; non-empty input without any
+/// recognized section is not.
 #[wasm_bindgen]
 pub fn validate_ass(content: &str) -> Result<bool, JsError> {
     AssDocument::parse(content)
@@ -188,7 +224,7 @@ pub fn get_ass_summary(content: &str) -> Result<JsValue, JsError> {
         style_names: doc.styles.iter().map(|s| s.name.clone()).collect(),
     };
 
-    serde_wasm_bindgen::to_value(&summary).map_err(|e| JsError::new(&e.to_string()))
+    to_js(&summary)
 }
 
 /// Helper function to convert ASS time to milliseconds
@@ -202,8 +238,9 @@ pub fn ass_time_to_ms(time_str: &str) -> Result<f64, JsError> {
 
 /// Helper function to convert milliseconds to ASS time
 #[wasm_bindgen]
-pub fn ms_to_ass_time(ms: f64) -> String {
-    crate::types::Time::from_millis(ms as u64).to_string()
+pub fn ms_to_ass_time(ms: f64) -> Result<String, JsError> {
+    let ms = to_js_millis(ms)?;
+    Ok(crate::types::Time::from_millis(ms).to_string())
 }
 
 /// WASM-exported subtitle renderer
@@ -235,20 +272,25 @@ impl SubtitleRenderer {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Set the video dimensions for scaling
-    pub fn set_video_size(&mut self, width: u32, height: u32) {
-        self.inner.set_video_size(width, height);
+    /// Set the video dimensions for scaling. Invalid dimensions throw.
+    pub fn set_video_size(&mut self, width: u32, height: u32) -> Result<(), JsError> {
+        self.inner
+            .set_video_size(width, height)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Resize the render buffer
-    pub fn resize(&mut self, width: u32, height: u32) {
-        self.inner.resize(width, height);
+    /// Resize the render buffer. Invalid dimensions throw.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), JsError> {
+        self.inner
+            .resize(width, height)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Render a single frame at the given time (in milliseconds)
     pub fn render_frame(&mut self, time_ms: f64) -> Result<(), JsError> {
+        let time_ms = to_js_millis(time_ms)?;
         self.inner
-            .render_frame(time_ms as u64)
+            .render_frame(time_ms)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -260,6 +302,10 @@ impl SubtitleRenderer {
 
     /// Get the last rendered frame as RGBA bytes (Uint8Array).
     /// Works without a canvas, for rendering in a Web Worker.
+    ///
+    /// Performance note: this copies the full frame on every call
+    /// (WASM→JS boundary). Callers that only need some frames should
+    /// coalesce render requests; see the worker backend.
     pub fn get_frame_data(&self) -> Vec<u8> {
         self.inner.frame_data().to_vec()
     }
@@ -283,5 +329,28 @@ impl SubtitleRenderer {
     /// Clear the glyph cache
     pub fn clear_cache(&mut self) {
         self.inner.clear_cache();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_millis_accepts_normal_values() {
+        assert_eq!(validate_millis(0.0).unwrap(), 0);
+        assert_eq!(validate_millis(1500.0).unwrap(), 1500);
+        // Fractional millis truncate toward zero like a cast
+        assert_eq!(validate_millis(1500.9).unwrap(), 1500);
+    }
+
+    #[test]
+    fn test_validate_millis_rejects_invalid() {
+        assert!(validate_millis(f64::NAN).is_err());
+        assert!(validate_millis(f64::INFINITY).is_err());
+        assert!(validate_millis(f64::NEG_INFINITY).is_err());
+        assert!(validate_millis(-1.0).is_err());
+        assert!(validate_millis(-0.5).is_err());
+        assert!(validate_millis(1e30).is_err());
     }
 }

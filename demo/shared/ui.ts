@@ -31,7 +31,12 @@ export class ActiveEventList {
   update(timeMs: number): void {
     const doc = this.getDoc();
     if (!doc) return;
-    const events = doc.get_events_at_time(timeMs) as AssEvent[];
+    let events: AssEvent[];
+    try {
+      events = doc.get_events_at_time(timeMs) as AssEvent[];
+    } catch {
+      return;
+    }
     if (events.length === 0) {
       this.el.innerHTML = '<div class="placeholder">No active events</div>';
       return;

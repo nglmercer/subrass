@@ -66,12 +66,14 @@ impl SubtitleRenderer {
 
         let play_res_x = doc.script_info.play_res_x;
         let play_res_y = doc.script_info.play_res_y;
+        let buffer = RenderBuffer::new(play_res_x, play_res_y)
+            .map_err(|e| format!("Invalid play resolution: {}", e))?;
 
         Ok(Self {
             doc,
             font_manager,
             compositor: Compositor::new(),
-            buffer: RenderBuffer::new(play_res_x, play_res_y),
+            buffer,
             canvas: None,
             ctx: None,
             video_width: play_res_x,
@@ -98,16 +100,22 @@ impl SubtitleRenderer {
         Ok(())
     }
 
-    /// Set the video dimensions for scaling
-    pub fn set_video_size(&mut self, width: u32, height: u32) {
-        self.video_width = width;
-        self.video_height = height;
-        self.buffer.resize(width, height);
+    /// Set the video dimensions for scaling. All state (video size,
+    /// buffer size, canvas transfer size) is updated together; invalid
+    /// dimensions are rejected and leave the old size untouched.
+    pub fn set_video_size(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.buffer
+            .resize(width, height)
+            .map_err(|e| format!("Invalid video size: {}", e))?;
+        self.video_width = self.buffer.width;
+        self.video_height = self.buffer.height;
+        Ok(())
     }
 
-    /// Resize the render buffer
-    pub fn resize(&mut self, width: u32, height: u32) {
-        self.buffer.resize(width, height);
+    /// Resize the render buffer (same as [`Self::set_video_size`]: the
+    /// buffer, video, and canvas dimensions stay consistent).
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.set_video_size(width, height)
     }
 
     /// Render a single frame at the given time
@@ -115,29 +123,29 @@ impl SubtitleRenderer {
         // Clear buffer
         self.buffer.clear();
 
-        // Get active events
-        let active_events: Vec<Event> = self
+        // Active dialogue events only: comments are never rendered, so
+        // filter them before any style resolution or allocation. Collect
+        // references (no per-frame event cloning) and stable-sort by
+        // layer so equal layers keep source order.
+        let mut active_events: Vec<&Event> = self
             .doc
             .events
             .iter()
-            .filter(|e| e.is_active_at(time_ms))
-            .cloned()
+            .filter(|e| e.is_dialogue() && e.is_active_at(time_ms))
             .collect();
-
-        // Sort by layer
-        let mut sorted_events = active_events;
-        sorted_events.sort_by_key(|a| a.layer);
+        active_events.sort_by_key(|a| a.layer);
 
         // Render each event
         let default_style = crate::types::Style::new("Default");
 
-        for event in &sorted_events {
+        for event in &active_events {
             let style = self
                 .doc
                 .find_style(&event.style)
                 .unwrap_or_else(|| self.doc.get_default_style().unwrap_or(&default_style));
 
-            let resolved = Compositor::resolve_style(style, event);
+            let mut resolved = Compositor::resolve_style(style, event);
+            resolved.scaled_border_and_shadow = self.doc.script_info.scaled_border_and_shadow;
 
             self.compositor.composite_event(
                 &mut self.buffer,
@@ -150,6 +158,7 @@ impl SubtitleRenderer {
                 self.video_width,
                 self.video_height,
                 self.doc.script_info.wrap_style as i32,
+                &self.doc.styles,
             );
         }
 
@@ -168,9 +177,9 @@ impl SubtitleRenderer {
         self.buffer.as_bytes()
     }
 
-    /// Dimensions of the render buffer
+    /// Dimensions of the render buffer (source of truth for frame size)
     pub fn frame_size(&self) -> (u32, u32) {
-        (self.video_width, self.video_height)
+        (self.buffer.width, self.buffer.height)
     }
 
     /// Transfer the render buffer to the canvas
@@ -230,9 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_keeps_state_consistent() {
+        let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hi";
+        let mut renderer = SubtitleRenderer::new(ass).unwrap();
+        renderer.resize(640, 360).unwrap();
+        assert_eq!(renderer.frame_size(), (640, 360));
+        assert_eq!(renderer.frame_data().len(), 640 * 360 * 4);
+        // Invalid resize rejected, old size kept
+        assert!(renderer.resize(0, 100).is_err());
+        assert!(renderer.set_video_size(u32::MAX, u32::MAX).is_err());
+        assert_eq!(renderer.frame_size(), (640, 360));
+        renderer.render_frame(2000).unwrap();
+    }
+
+    #[test]
     fn test_render_sample_feature_sections() {
         let mut renderer = SubtitleRenderer::new(include_str!("../../demo/sample.ass")).unwrap();
-        renderer.set_video_size(320, 180);
+        renderer.set_video_size(320, 180).unwrap();
 
         for time_ms in [
             11_000, 26_000, 41_000, 53_000, 66_000, 81_000, 96_000, 111_000, 126_000, 131_000,

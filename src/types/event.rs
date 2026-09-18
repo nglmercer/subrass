@@ -54,52 +54,122 @@ impl Event {
         }
     }
 
+    /// Parse with the canonical ASS field order.
     pub fn parse_from_line(line: &str) -> Result<Self, String> {
+        Self::parse_from_line_with_format(line, None)
+    }
+
+    /// Parse an event line using the section's `Format:` column declaration.
+    ///
+    /// `format` holds lowercased column names. When `None`, the canonical
+    /// ASS order (Layer, Start, End, Style, Name, MarginL, MarginR, MarginV,
+    /// Effect, Text) is assumed. The `Text` column must be last since it
+    /// may contain commas. Unknown columns are ignored; missing required
+    /// columns (Start, End, Style, Text, plus Layer or SSA Marked) are
+    /// errors. Numeric fields must parse — malformed values are errors,
+    /// never silent zeros.
+    pub fn parse_from_line_with_format(
+        line: &str,
+        format: Option<&[String]>,
+    ) -> Result<Self, String> {
         let line = line.trim();
 
-        let event_type = if line.starts_with("Dialogue:") {
-            EventType::Dialogue
-        } else if line.starts_with("Comment:") {
-            EventType::Comment
+        let (event_type, content) = if let Some(rest) = strip_prefix_ci(line, "Dialogue:") {
+            (EventType::Dialogue, rest)
+        } else if let Some(rest) = strip_prefix_ci(line, "Comment:") {
+            (EventType::Comment, rest)
         } else {
             return Err(format!("Invalid event type: {}", line));
         };
 
-        let content = match event_type {
-            EventType::Dialogue => line.strip_prefix("Dialogue:").unwrap(),
-            EventType::Comment => line.strip_prefix("Comment:").unwrap(),
+        let columns: Vec<String> = match format {
+            Some(cols) if !cols.is_empty() => cols.to_vec(),
+            _ => DEFAULT_EVENT_COLUMNS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         };
 
-        let fields: Vec<&str> = content.splitn(10, ',').collect();
-        if fields.len() < 10 {
-            return Err(format!("Expected 10 fields in event, got {}", fields.len()));
+        // Text must be last: it may contain commas.
+        if let Some(text_pos) = columns.iter().position(|c| c == "text") {
+            if text_pos != columns.len() - 1 {
+                return Err(format!(
+                    "Text column must be last in Events Format, got: {}",
+                    columns.join(", ")
+                ));
+            }
+        } else {
+            return Err("Events Format is missing the required Text column".to_string());
+        }
+        for required in ["start", "end", "style"] {
+            if !columns.iter().any(|c| c == required) {
+                return Err(format!(
+                    "Events Format is missing the required {} column",
+                    capitalize(required)
+                ));
+            }
+        }
+        if !columns.iter().any(|c| c == "layer" || c == "marked") {
+            return Err("Events Format is missing the required Layer column".to_string());
         }
 
-        let parse_i32 = |s: &str| -> i32 { s.trim().parse().unwrap_or(0) };
+        let fields: Vec<&str> = content.splitn(columns.len(), ',').collect();
+        if fields.len() < columns.len() {
+            return Err(format!(
+                "Expected {} fields in event, got {}",
+                columns.len(),
+                fields.len()
+            ));
+        }
 
-        let start: Time = fields[1]
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid start time: {}", fields[1]))?;
-        let end: Time = fields[2]
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid end time: {}", fields[2]))?;
+        let field = |name: &str| -> Option<&str> {
+            columns
+                .iter()
+                .position(|c| c == name)
+                .map(|i| fields[i].trim())
+        };
+        let parse_i32 = |name: &str, what: &str| -> Result<i32, String> {
+            match field(name) {
+                None | Some("") => Ok(0),
+                Some(v) => v
+                    .parse()
+                    .map_err(|_| format!("Invalid {} value: {}", what, v)),
+            }
+        };
 
-        let text = fields[9].to_string();
+        // SSA "Marked=N" carries no layer; ASS Layer parses strictly.
+        let layer = if columns.iter().any(|c| c == "layer") {
+            parse_i32("layer", "Layer")?
+        } else {
+            0
+        };
+
+        let start: Time = field("start").unwrap_or("").parse().map_err(|e| {
+            format!(
+                "Invalid Start value {:?}: {}",
+                field("start").unwrap_or(""),
+                e
+            )
+        })?;
+        let end: Time = field("end")
+            .unwrap_or("")
+            .parse()
+            .map_err(|e| format!("Invalid End value {:?}: {}", field("end").unwrap_or(""), e))?;
+
+        let text = field("text").unwrap_or("").to_string();
         let parsed_tags = OverrideTag::parse_from_text(&text);
 
         Ok(Self {
             event_type,
-            layer: parse_i32(fields[0]),
+            layer,
             start,
             end,
-            style: fields[3].trim().to_string(),
-            name: fields[4].trim().to_string(),
-            margin_l: parse_i32(fields[5]),
-            margin_r: parse_i32(fields[6]),
-            margin_v: parse_i32(fields[7]),
-            effect: fields[8].trim().to_string(),
+            style: field("style").unwrap_or("").to_string(),
+            name: field("name").unwrap_or("").to_string(),
+            margin_l: parse_i32("marginl", "MarginL")?,
+            margin_r: parse_i32("marginr", "MarginR")?,
+            margin_v: parse_i32("marginv", "MarginV")?,
+            effect: field("effect").unwrap_or("").to_string(),
             text,
             parsed_tags,
         })
@@ -147,6 +217,29 @@ impl Event {
 
 pub const DEFAULT_EVENT_FORMAT: &str =
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text";
+
+/// Canonical ASS event columns, lowercased.
+const DEFAULT_EVENT_COLUMNS: &[&str] = &[
+    "layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text",
+];
+
+/// Case-insensitive prefix strip (ASS keywords are matched case-insensitively
+/// for compatibility with real-world files).
+fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&line[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

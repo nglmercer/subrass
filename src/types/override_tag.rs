@@ -22,7 +22,8 @@ pub enum OverrideTag {
     FontSizeMultiplier(f64),
     LetterSpacing(f64),
     Kerning(bool),
-    Reset,
+    /// `\r` (reset to the event style) or `\rStyleName` (reset to a style).
+    Reset(Option<String>),
 
     // Colors and alpha
     PrimaryColor(Color),
@@ -76,9 +77,20 @@ pub enum OverrideTag {
     // Clipping
     Clip(i32, i32, i32, i32),
     InverseClip(i32, i32, i32, i32),
+    /// Vector clip: `\clip([scale,] drawing commands)`.
+    ClipVector {
+        scale: i32,
+        drawing: String,
+    },
+    InverseClipVector {
+        scale: i32,
+        drawing: String,
+    },
 
     // Drawing
     Drawing(i32),
+    /// Drawing baseline offset `\pbo<n>`.
+    DrawingBaseline(f64),
 
     // Wrapping
     WrapStyle(i32),
@@ -164,18 +176,90 @@ impl OverrideTag {
     pub fn is_animation(&self) -> bool {
         matches!(self, Self::Transform { .. })
     }
+
+    /// Line-global tags: line properties even when they appear textually
+    /// after the first visible segment (\pos, \move, \org, \clip, \iclip,
+    /// \fad, \fade). Segment style tags are everything else.
+    pub fn is_line_global(&self) -> bool {
+        matches!(
+            self,
+            Self::Position(..)
+                | Self::Move(..)
+                | Self::MoveWithTiming(..)
+                | Self::Origin(..)
+                | Self::Clip(..)
+                | Self::InverseClip(..)
+                | Self::ClipVector { .. }
+                | Self::InverseClipVector { .. }
+                | Self::Fade(..)
+                | Self::ComplexFade(..)
+        )
+    }
+
+    /// True when every numeric payload is finite (layout-safe).
+    fn all_finite(&self) -> bool {
+        let f = |v: f64| v.is_finite();
+        match self {
+            Self::FontSize(v)
+            | Self::FontSizeMultiplier(v)
+            | Self::LetterSpacing(v)
+            | Self::RotationX(v)
+            | Self::RotationY(v)
+            | Self::RotationZ(v)
+            | Self::ScaleX(v)
+            | Self::ScaleY(v)
+            | Self::ShearX(v)
+            | Self::ShearY(v)
+            | Self::Border(v)
+            | Self::BorderX(v)
+            | Self::BorderY(v)
+            | Self::Shadow(v)
+            | Self::ShadowX(v)
+            | Self::ShadowY(v)
+            | Self::EdgeBlur(v)
+            | Self::Blur(v)
+            | Self::DrawingBaseline(v) => f(*v),
+            Self::Position(x, y) | Self::Origin(x, y) => f(*x) && f(*y),
+            Self::Move(x1, y1, x2, y2) => f(*x1) && f(*y1) && f(*x2) && f(*y2),
+            Self::MoveWithTiming(x1, y1, x2, y2, ..) => f(*x1) && f(*y1) && f(*x2) && f(*y2),
+            Self::Transform { accel, tags, .. } => f(*accel) && tags.iter().all(|t| t.all_finite()),
+            _ => true,
+        }
+    }
 }
 
 /// Parse text into segments, each with its accumulated override tags.
 /// Text like `Hello {\c&H00FF00&}World` produces:
 /// - Segment("Hello ", [])
 /// - Segment("World", [PrimaryColor(green)])
+///
+/// `\N` is a hard line break; `\n` is a soft break (a space) unless the
+/// effective wrap style is 2, where it also breaks the line. Use
+/// [`parse_text_segments_with_wrap`] when the wrap style is known.
 pub fn parse_text_segments(text: &str) -> Vec<TextSegment> {
+    parse_text_segments_with_wrap(text, 0)
+}
+
+/// [`parse_text_segments`] with an explicit effective wrap style.
+pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSegment> {
+    let soft_breaks = wrap_style == 2;
     let mut segments = Vec::new();
     let mut accumulated_tags: Vec<OverrideTag> = Vec::new();
     let mut current_text = String::new();
     let mut chars = text.chars().peekable();
     let mut in_drawing_mode = false;
+
+    // Push a line break, attaching to the previous segment when the
+    // current text is empty (right after a tag group).
+    let push_break = |segments: &mut Vec<TextSegment>, current_text: &mut String, ch: char| {
+        if current_text.is_empty() {
+            if let Some(last) = segments.last_mut() {
+                last.text.push(ch);
+            }
+        } else {
+            current_text.push(ch);
+        }
+    };
 
     while let Some(&c) = chars.peek() {
         match c {
@@ -203,11 +287,9 @@ pub fn parse_text_segments(text: &str) -> Vec<TextSegment> {
 
                 // Parse tags
                 for tag in parse_tag_group(&tag_str) {
-                    // Track drawing mode
-                    match &tag {
-                        OverrideTag::Drawing(1) => in_drawing_mode = true,
-                        OverrideTag::Drawing(0) => in_drawing_mode = false,
-                        _ => {}
+                    // Track drawing mode: any \pN with N > 0 enables it.
+                    if let OverrideTag::Drawing(n) = &tag {
+                        in_drawing_mode = *n > 0;
                     }
                     accumulated_tags.push(tag);
                 }
@@ -216,18 +298,18 @@ pub fn parse_text_segments(text: &str) -> Vec<TextSegment> {
                 chars.next(); // consume '\\'
                 if let Some(&next) = chars.peek() {
                     match next {
-                        'N' | 'n' => {
+                        'N' => {
                             chars.next();
                             if !in_drawing_mode {
-                                // If current_text is empty (right after a tag group),
-                                // append line break to the previous segment
-                                if current_text.is_empty() {
-                                    if let Some(last) = segments.last_mut() {
-                                        last.text.push('\n');
-                                    }
-                                } else {
-                                    current_text.push('\n');
-                                }
+                                push_break(&mut segments, &mut current_text, '\n');
+                            }
+                        }
+                        'n' => {
+                            chars.next();
+                            if !in_drawing_mode {
+                                // Soft break: a space, unless wrap mode 2.
+                                let ch = if soft_breaks { '\n' } else { ' ' };
+                                push_break(&mut segments, &mut current_text, ch);
                             }
                         }
                         'h' => {
@@ -256,6 +338,13 @@ pub fn parse_text_segments(text: &str) -> Vec<TextSegment> {
     if !current_text.is_empty() {
         segments.push(TextSegment {
             text: current_text,
+            tags: accumulated_tags,
+        });
+    } else if accumulated_tags.len() > segments.last().map(|s| s.tags.len()).unwrap_or(0) {
+        // Trailing tag group with no following text: keep an empty carrier
+        // segment so line-global tags (and resets) are not silently lost.
+        segments.push(TextSegment {
+            text: String::new(),
             tags: accumulated_tags,
         });
     }
@@ -296,6 +385,11 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
                 continue;
             }
 
+            // The reader above is greedy (`\rAltStyle` reads as one run),
+            // so split a known tag prefix from a glued value: `\rAltStyle`
+            // is tag `r` with value `AltStyle`, `\fnArial` is `fn`+`Arial`.
+            let (tag_name, glued) = split_tag_name(&name);
+
             // Check for '(' -> read params with depth tracking
             if let Some(&'(') = chars.peek() {
                 chars.next(); // consume '('
@@ -315,8 +409,13 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
                     param_str.push(c);
                 }
 
-                if let Some(tag) = parse_tag_with_params(&name, Some(&param_str)) {
-                    tags.push(tag);
+                if glued.is_empty() {
+                    match parse_tag_with_params(tag_name, Some(&param_str)) {
+                        Some(tag) if tag.all_finite() => tags.push(tag),
+                        _ => tags.push(OverrideTag::Unknown(format!("{}({})", name, param_str))),
+                    }
+                } else {
+                    tags.push(OverrideTag::Unknown(format!("{}({})", name, param_str)));
                 }
             } else {
                 // Read value until next backslash, brace, or special char
@@ -329,13 +428,17 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
                     chars.next();
                 }
 
-                let params = if value.is_empty() {
+                let combined = format!("{}{}", glued, value);
+                let params = if combined.is_empty() {
                     None
                 } else {
-                    Some(value.as_str())
+                    Some(combined.as_str())
                 };
-                if let Some(tag) = parse_tag_with_params(&name, params) {
-                    tags.push(tag);
+                match parse_tag_with_params(tag_name, params) {
+                    Some(tag) if tag.all_finite() => tags.push(tag),
+                    // Malformed known tag: preserved as Unknown so it is
+                    // distinguishable from "no tag" and never half-applied.
+                    _ => tags.push(OverrideTag::Unknown(format!("{}{}", name, value))),
                 }
             }
         } else {
@@ -344,6 +447,82 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
     }
 
     tags
+}
+
+/// Whether `name` is a recognized override tag name.
+fn is_known_tag_name(name: &str) -> bool {
+    matches!(
+        name,
+        "b" | "i"
+            | "u"
+            | "s"
+            | "fn"
+            | "fs"
+            | "fsp"
+            | "r"
+            | "c"
+            | "1c"
+            | "2c"
+            | "3c"
+            | "4c"
+            | "alpha"
+            | "1a"
+            | "2a"
+            | "3a"
+            | "4a"
+            | "pos"
+            | "move"
+            | "org"
+            | "an"
+            | "a"
+            | "frx"
+            | "fry"
+            | "frz"
+            | "fr"
+            | "fscx"
+            | "fscy"
+            | "fax"
+            | "fay"
+            | "bord"
+            | "xbord"
+            | "ybord"
+            | "shad"
+            | "xshad"
+            | "yshad"
+            | "be"
+            | "blur"
+            | "fad"
+            | "fade"
+            | "t"
+            | "clip"
+            | "iclip"
+            | "p"
+            | "pbo"
+            | "q"
+            | "k"
+            | "K"
+            | "kf"
+            | "ko"
+    )
+}
+
+/// Split a greedily-read run into (known tag name, glued value).
+/// Exact and unknown names pass through; otherwise the longest known
+/// prefix wins (`rAltStyle` -> `r` + `AltStyle`).
+fn split_tag_name(raw: &str) -> (&str, &str) {
+    if is_known_tag_name(raw) {
+        return (raw, "");
+    }
+    for len in (1..raw.len()).rev() {
+        if !raw.is_char_boundary(len) {
+            continue;
+        }
+        let (head, tail) = raw.split_at(len);
+        if is_known_tag_name(head) {
+            return (head, tail);
+        }
+    }
+    (raw, "")
 }
 
 fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag> {
@@ -364,7 +543,7 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse::<i32>().ok()?;
             Some(OverrideTag::StrikeOut(val != 0))
         }
-        "fn" => Some(OverrideTag::FontName(params?.to_string())),
+        "fn" => Some(OverrideTag::FontName(params?.trim().to_string())),
         "fs" => {
             let val = params?.parse().ok()?;
             Some(OverrideTag::FontSize(val))
@@ -373,7 +552,12 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::LetterSpacing(val))
         }
-        "r" => Some(OverrideTag::Reset),
+        "r" => {
+            let name = params
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Some(OverrideTag::Reset(name))
+        }
         "c" | "1c" => {
             let color_str = params?;
             let color = parse_ass_color_tag(color_str)?;
@@ -464,9 +648,16 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
                 None
             }
         }
-        "an" | "a" => {
+        "an" => {
             let val = params?.parse::<i32>().ok()?;
             Some(OverrideTag::Alignment(val))
+        }
+        "a" => {
+            // Legacy SSA alignment numbering, converted to ASS numpad.
+            let val = params?.parse::<i32>().ok()?;
+            Some(OverrideTag::Alignment(super::style::ssa_alignment_to_ass(
+                val,
+            )))
         }
         "frx" => {
             let val = params?.parse().ok()?;
@@ -592,35 +783,15 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
                 tags,
             })
         }
-        "clip" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 4 {
-                let x1 = parts[0].parse().ok()?;
-                let y1 = parts[1].parse().ok()?;
-                let x2 = parts[2].parse().ok()?;
-                let y2 = parts[3].parse().ok()?;
-                Some(OverrideTag::Clip(x1, y1, x2, y2))
-            } else {
-                None
-            }
-        }
-        "iclip" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 4 {
-                let x1 = parts[0].parse().ok()?;
-                let y1 = parts[1].parse().ok()?;
-                let x2 = parts[2].parse().ok()?;
-                let y2 = parts[3].parse().ok()?;
-                Some(OverrideTag::InverseClip(x1, y1, x2, y2))
-            } else {
-                None
-            }
-        }
+        "clip" => parse_clip_params(params, false),
+        "iclip" => parse_clip_params(params, true),
         "p" => {
             let val = params?.parse().ok()?;
             Some(OverrideTag::Drawing(val))
+        }
+        "pbo" => {
+            let val = params?.parse().ok()?;
+            Some(OverrideTag::DrawingBaseline(val))
         }
         "q" => {
             let val = params?.parse().ok()?;
@@ -647,6 +818,55 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             Some(OverrideTag::Unknown(tag_str))
         }
     }
+}
+
+/// Parse `\clip` / `\iclip` params: rectangular `(x1,y1,x2,y2)` or
+/// vector `(drawing)` / `(scale,drawing)` form.
+fn parse_clip_params(params: Option<&str>, inverse: bool) -> Option<OverrideTag> {
+    let params = params?;
+    let parts: Vec<&str> = params.split(',').collect();
+    // Rectangular form: exactly four integers.
+    if parts.len() == 4 {
+        if let (Ok(x1), Ok(y1), Ok(x2), Ok(y2)) = (
+            parts[0].trim().parse::<i32>(),
+            parts[1].trim().parse::<i32>(),
+            parts[2].trim().parse::<i32>(),
+            parts[3].trim().parse::<i32>(),
+        ) {
+            return Some(if inverse {
+                OverrideTag::InverseClip(x1, y1, x2, y2)
+            } else {
+                OverrideTag::Clip(x1, y1, x2, y2)
+            });
+        }
+    }
+    // Vector form: [scale,] drawing commands. The drawing must contain
+    // at least one drawing command letter, otherwise this is a malformed
+    // rectangle (e.g. "1,2,3"), not a vector clip.
+    let (scale, drawing) = match params.split_once(',') {
+        Some((head, tail)) if !tail.trim().is_empty() => match head.trim().parse::<i32>() {
+            Ok(s) => (s, tail.trim().to_string()),
+            Err(_) => (1, params.trim().to_string()),
+        },
+        _ => (1, params.trim().to_string()),
+    };
+    if drawing.is_empty() || !drawing_contains_command(&drawing) {
+        return None;
+    }
+    Some(if inverse {
+        OverrideTag::InverseClipVector { scale, drawing }
+    } else {
+        OverrideTag::ClipVector { scale, drawing }
+    })
+}
+
+fn drawing_contains_command(drawing: &str) -> bool {
+    drawing.chars().any(|c| {
+        matches!(
+            c,
+            'm' | 'n' | 'l' | 'b' | 's' | 'p' | 'c' | 'M' | 'N' | 'L' | 'B' | 'S' | 'P' | 'C'
+        )
+    })
 }
 
 fn parse_ass_color_tag(s: &str) -> Option<Color> {
@@ -815,7 +1035,183 @@ mod tests {
     fn test_parse_reset_tag() {
         let tags = OverrideTag::parse_from_text("{\\r}");
         assert_eq!(tags.len(), 1);
-        assert!(matches!(tags[0], OverrideTag::Reset));
+        assert!(matches!(tags[0], OverrideTag::Reset(None)));
+    }
+
+    #[test]
+    fn test_parse_reset_to_style_tag() {
+        let tags = OverrideTag::parse_from_text("{\\rAltStyle}");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::Reset(Some(ref s)) if s == "AltStyle"));
+    }
+
+    #[test]
+    fn test_glued_tag_values_split() {
+        // Values glued to the tag name (no separator) still parse.
+        let tags = OverrideTag::parse_from_text("{\\fnArial}");
+        assert!(
+            matches!(tags[0], OverrideTag::FontName(ref s) if s == "Arial"),
+            "{:?}",
+            tags[0]
+        );
+        let tags = OverrideTag::parse_from_text("{\\fn Arial}");
+        assert!(
+            matches!(tags[0], OverrideTag::FontName(ref s) if s == "Arial"),
+            "{:?}",
+            tags[0]
+        );
+        let tags = OverrideTag::parse_from_text("{\\fs24}");
+        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == 24.0));
+    }
+
+    #[test]
+    fn test_legacy_a_alignment_conversion() {
+        // SSA 1-3 bottom, 5-7 top, 9-11 middle -> ASS numpad
+        for (legacy, numpad) in [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (5, 7),
+            (6, 8),
+            (7, 9),
+            (9, 4),
+            (10, 5),
+            (11, 6),
+        ] {
+            let tags = OverrideTag::parse_from_text(&format!("{{\\a{}}}", legacy));
+            assert_eq!(tags.len(), 1, "legacy {}", legacy);
+            assert!(
+                matches!(tags[0], OverrideTag::Alignment(a) if a == numpad),
+                "legacy {} -> {:?}, want {}",
+                legacy,
+                tags[0],
+                numpad
+            );
+        }
+        // \an passes through untouched
+        let tags = OverrideTag::parse_from_text("{\\an5}");
+        assert!(matches!(tags[0], OverrideTag::Alignment(5)));
+    }
+
+    #[test]
+    fn test_non_finite_numerics_become_unknown() {
+        // NaN/inf must never reach layout as live tags
+        for text in [
+            "{\\pos(NaN,10)}",
+            "{\\fsinf}",
+            "{\\fscx(NaN)}",
+            "{\\blur(-inf)}",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert_eq!(tags.len(), 1, "{}", text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{} -> {:?}",
+                text,
+                tags[0]
+            );
+        }
+        // Finite values still parse
+        let tags = OverrideTag::parse_from_text("{\\pos(1.5,-2.5)}");
+        assert!(matches!(tags[0], OverrideTag::Position(1.5, -2.5)));
+    }
+
+    #[test]
+    fn test_malformed_known_tag_preserved_as_unknown() {
+        let tags = OverrideTag::parse_from_text("{\\pos(1)}");
+        assert_eq!(tags.len(), 1);
+        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+    }
+
+    #[test]
+    fn test_vector_clip_forms() {
+        let tags = OverrideTag::parse_from_text("{\\clip(m 0 0 l 10 0 l 10 10)}");
+        assert!(
+            matches!(tags[0], OverrideTag::ClipVector { scale: 1, .. }),
+            "{:?}",
+            tags[0]
+        );
+        let tags = OverrideTag::parse_from_text("{\\clip(2, m 0 0 l 10 10)}");
+        assert!(
+            matches!(tags[0], OverrideTag::ClipVector { scale: 2, .. }),
+            "{:?}",
+            tags[0]
+        );
+        let tags = OverrideTag::parse_from_text("{\\iclip(m 0 0 l 5 5)}");
+        assert!(matches!(tags[0], OverrideTag::InverseClipVector { .. }));
+        // Rectangular form still wins for four integers
+        let tags = OverrideTag::parse_from_text("{\\clip(0, 0, 100, 100)}");
+        assert!(matches!(tags[0], OverrideTag::Clip(0, 0, 100, 100)));
+        // Three numbers are neither rect nor vector
+        let tags = OverrideTag::parse_from_text("{\\clip(1,2,3)}");
+        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+    }
+
+    #[test]
+    fn test_pbo_tag() {
+        let tags = OverrideTag::parse_from_text("{\\pbo10}");
+        assert!(matches!(tags[0], OverrideTag::DrawingBaseline(_)));
+    }
+
+    #[test]
+    fn test_soft_break_is_space_except_wrap2() {
+        let segs = parse_text_segments("a\\nb");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "a b");
+        let segs = parse_text_segments("a\\Nb");
+        assert_eq!(segs[0].text, "a\nb");
+        let segs = parse_text_segments_with_wrap("a\\nb", 2);
+        assert_eq!(segs[0].text, "a\nb");
+    }
+
+    #[test]
+    fn test_drawing_mode_any_positive_p() {
+        let segs = parse_text_segments("{\\p2}m 0 0{\\p0}text");
+        assert_eq!(segs.len(), 2);
+        // First segment carries the active \p2 drawing state with its
+        // coordinate text; the second returns to text mode.
+        assert_eq!(segs[0].text, "m 0 0");
+        assert!(segs[0]
+            .tags
+            .iter()
+            .any(|t| matches!(t, OverrideTag::Drawing(2))));
+        assert_eq!(segs[1].text, "text");
+        assert!(segs[1]
+            .tags
+            .iter()
+            .rfind(|t| matches!(t, OverrideTag::Drawing(_)))
+            .is_some_and(|t| matches!(t, OverrideTag::Drawing(0))));
+    }
+
+    #[test]
+    fn test_trailing_tag_group_kept_as_carrier() {
+        // A trailing group with no following text must not be lost.
+        let segs = parse_text_segments("Hi{\\pos(100,100)}");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].text, "Hi");
+        assert!(segs[0].tags.is_empty());
+        assert_eq!(segs[1].text, "");
+        assert!(segs[1]
+            .tags
+            .iter()
+            .any(|t| matches!(t, OverrideTag::Position(100.0, 100.0))));
+        // Group-only text: single carrier segment.
+        let segs = parse_text_segments("{\\pos(1,2)}");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "");
+        assert_eq!(segs[0].tags.len(), 1);
+        // No trailing group: unchanged behavior.
+        let segs = parse_text_segments("Hi");
+        assert_eq!(segs.len(), 1);
+    }
+
+    #[test]
+    fn test_line_global_classification() {
+        assert!(OverrideTag::Position(0.0, 0.0).is_line_global());
+        assert!(OverrideTag::Fade(0, 0).is_line_global());
+        assert!(OverrideTag::Clip(0, 0, 1, 1).is_line_global());
+        assert!(!OverrideTag::Bold(true).is_line_global());
+        assert!(!OverrideTag::FontSize(10.0).is_line_global());
     }
 
     #[test]

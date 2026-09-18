@@ -20,6 +20,8 @@ pub enum TimeError {
 }
 
 impl Time {
+    /// Normalizing constructor: out-of-range components are clamped.
+    /// Prefer [`Time::try_new`] for validating external input.
     pub fn new(hours: u32, minutes: u32, seconds: u32, centiseconds: u32) -> Self {
         Self {
             hours,
@@ -27,6 +29,40 @@ impl Time {
             seconds: seconds.min(59),
             centiseconds: centiseconds.min(99),
         }
+    }
+
+    /// Checked constructor: rejects minutes > 59, seconds > 59, and
+    /// centiseconds > 99 instead of silently clamping them.
+    pub fn try_new(
+        hours: u32,
+        minutes: u32,
+        seconds: u32,
+        centiseconds: u32,
+    ) -> Result<Self, TimeError> {
+        if minutes > 59 {
+            return Err(TimeError::InvalidComponent(format!(
+                "minutes out of range 0-59: {}",
+                minutes
+            )));
+        }
+        if seconds > 59 {
+            return Err(TimeError::InvalidComponent(format!(
+                "seconds out of range 0-59: {}",
+                seconds
+            )));
+        }
+        if centiseconds > 99 {
+            return Err(TimeError::InvalidComponent(format!(
+                "centiseconds out of range 0-99: {}",
+                centiseconds
+            )));
+        }
+        Ok(Self {
+            hours,
+            minutes,
+            seconds,
+            centiseconds,
+        })
     }
 
     pub fn from_millis(millis: u64) -> Self {
@@ -98,12 +134,12 @@ impl FromStr for Time {
                     TimeError::InvalidComponent(format!("centiseconds: {}", sec_parts[1]))
                 })?;
 
-                return Ok(Self::new(hours, minutes, seconds, centiseconds));
+                return Self::try_new(hours, minutes, seconds, centiseconds);
             } else if sec_parts.len() == 1 {
                 let seconds: u32 = sec_parts[0].parse().map_err(|_| {
                     TimeError::InvalidComponent(format!("seconds: {}", sec_parts[0]))
                 })?;
-                return Ok(Self::new(hours, minutes, seconds, 0));
+                return Self::try_new(hours, minutes, seconds, 0);
             }
         }
 
@@ -154,6 +190,26 @@ mod tests {
         assert!("invalid".parse::<Time>().is_err());
         assert!("not-a-time".parse::<Time>().is_err());
         assert!("".parse::<Time>().is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_out_of_range_components() {
+        // Must not silently clamp to 0:59:59.99
+        assert!("0:99:99.999".parse::<Time>().is_err());
+        assert!("0:99:00.00".parse::<Time>().is_err());
+        assert!("0:00:99.00".parse::<Time>().is_err());
+        assert!("0:00:00.999".parse::<Time>().is_err());
+        assert!("0:59:59.99".parse::<Time>().is_ok());
+    }
+
+    #[test]
+    fn test_try_new_validates() {
+        assert!(Time::try_new(0, 59, 59, 99).is_ok());
+        assert!(Time::try_new(0, 60, 0, 0).is_err());
+        assert!(Time::try_new(0, 0, 60, 0).is_err());
+        assert!(Time::try_new(0, 0, 0, 100).is_err());
+        // new() remains the normalizing helper
+        assert_eq!(Time::new(0, 99, 99, 999).minutes(), 59);
     }
 
     #[test]

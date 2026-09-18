@@ -2,9 +2,16 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// ASS color representation in &HAABBGGRR format
+/// ASS color representation in &HAABBGGRR format.
+///
+/// Invariant: `alpha` stores **ASS transparency** — 0 means fully opaque
+/// (visible) and 255 means fully transparent (invisible). This is the
+/// opposite of conventional RGBA opacity. Every conversion to opacity,
+/// coverage, or CSS form must go through the explicit helpers below so
+/// the direction of the conversion is visible at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Color {
+    /// ASS transparency: 0 = opaque, 255 = transparent.
     pub alpha: u8,
     pub blue: u8,
     pub green: u8,
@@ -29,18 +36,47 @@ impl Color {
         }
     }
 
+    /// Build from components where `alpha` is ASS transparency
+    /// (0 = opaque). Prefer [`Color::from_standard_rgba`] for
+    /// conventional opacity-based input.
     pub fn from_rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
         Self::new(alpha, red, green, blue)
     }
 
+    /// Build from conventional RGBA where `opacity` is 0 = transparent,
+    /// 255 = opaque.
+    pub fn from_standard_rgba(red: u8, green: u8, blue: u8, opacity: u8) -> Self {
+        Self::new(255 - opacity, red, green, blue)
+    }
+
+    /// Raw components `[red, green, blue, ass_transparency]`.
+    ///
+    /// NOTE: the fourth slot is ASS transparency, **not** standard RGBA
+    /// opacity. Prefer [`Color::to_straight_rgba`] when opacity is meant.
     pub fn to_rgba(&self) -> [u8; 4] {
         [self.red, self.green, self.blue, self.alpha]
     }
 
+    /// Raw ASS components `[red, green, blue, ass_transparency]`.
+    /// Same as [`Color::to_rgba`], with the meaning in the name.
+    pub fn to_ass_components(&self) -> [u8; 4] {
+        self.to_rgba()
+    }
+
+    /// Conventional straight-alpha `[red, green, blue, opacity]`
+    /// (0 = transparent, 255 = opaque).
+    pub fn to_straight_rgba(&self) -> [u8; 4] {
+        [self.red, self.green, self.blue, 255 - self.alpha]
+    }
+
+    /// CSS `#RRGGBBAA` with standard opacity in the `AA` slot.
     pub fn to_hex(&self) -> String {
         format!(
             "#{:02X}{:02X}{:02X}{:02X}",
-            self.red, self.green, self.blue, self.alpha
+            self.red,
+            self.green,
+            self.blue,
+            255 - self.alpha
         )
     }
 
@@ -49,8 +85,19 @@ impl Color {
         format!("rgba({}, {}, {}, {})", self.red, self.green, self.blue, a)
     }
 
+    /// ASS transparency: 0 = opaque, 255 = transparent.
     pub fn alpha(&self) -> u8 {
         self.alpha
+    }
+
+    /// ASS transparency: 0 = opaque, 255 = transparent.
+    pub fn transparency(&self) -> u8 {
+        self.alpha
+    }
+
+    /// Conventional opacity: 0 = transparent, 255 = opaque.
+    pub fn opacity(&self) -> u8 {
+        255 - self.alpha
     }
 
     pub fn red(&self) -> u8 {
@@ -145,17 +192,18 @@ fn parse_ass_hex_color(hex: &str) -> Result<Color, ColorError> {
 fn parse_css_hex_color(hex: &str) -> Result<Color, ColorError> {
     match hex.len() {
         8 => {
-            // #AARRGGBB format
-            let alpha = u8::from_str_radix(&hex[0..2], 16)
-                .map_err(|_| ColorError::InvalidComponent(format!("alpha: {}", &hex[0..2])))?;
-            let red = u8::from_str_radix(&hex[2..4], 16)
-                .map_err(|_| ColorError::InvalidComponent(format!("red: {}", &hex[2..4])))?;
-            let green = u8::from_str_radix(&hex[4..6], 16)
-                .map_err(|_| ColorError::InvalidComponent(format!("green: {}", &hex[4..6])))?;
-            let blue = u8::from_str_radix(&hex[6..8], 16)
-                .map_err(|_| ColorError::InvalidComponent(format!("blue: {}", &hex[6..8])))?;
+            // #RRGGBBAA format (CSS standard): AA is opacity, converted
+            // to ASS transparency.
+            let red = u8::from_str_radix(&hex[0..2], 16)
+                .map_err(|_| ColorError::InvalidComponent(format!("red: {}", &hex[0..2])))?;
+            let green = u8::from_str_radix(&hex[2..4], 16)
+                .map_err(|_| ColorError::InvalidComponent(format!("green: {}", &hex[2..4])))?;
+            let blue = u8::from_str_radix(&hex[4..6], 16)
+                .map_err(|_| ColorError::InvalidComponent(format!("blue: {}", &hex[4..6])))?;
+            let opacity = u8::from_str_radix(&hex[6..8], 16)
+                .map_err(|_| ColorError::InvalidComponent(format!("alpha: {}", &hex[6..8])))?;
 
-            Ok(Color::new(alpha, red, green, blue))
+            Ok(Color::from_standard_rgba(red, green, blue, opacity))
         }
         6 => {
             // #RRGGBB format
@@ -214,18 +262,37 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hex_color() {
+    fn test_parse_css_hex_color() {
+        // #RRGGBBAA: opaque red
         let color: Color = "#FF0000FF".parse().unwrap();
-        assert_eq!(color.alpha(), 255);
-        assert_eq!(color.red(), 0);
+        assert_eq!(color.red(), 255);
         assert_eq!(color.green(), 0);
-        assert_eq!(color.blue(), 255);
+        assert_eq!(color.blue(), 0);
+        assert_eq!(color.transparency(), 0);
+        assert_eq!(color.opacity(), 255);
+    }
+
+    #[test]
+    fn test_parse_css_hex_half_opacity() {
+        // #FF000080: red at ~50% opacity -> ~50% ASS transparency
+        let color: Color = "#FF000080".parse().unwrap();
+        assert_eq!(color.red(), 255);
+        assert_eq!(color.opacity(), 128);
+        assert_eq!(color.transparency(), 127);
+        assert_eq!(color.to_hex(), "#FF000080");
     }
 
     #[test]
     fn test_to_rgba() {
         let color = Color::new(0, 255, 128, 0);
         assert_eq!(color.to_rgba(), [255, 128, 0, 0]);
+    }
+
+    #[test]
+    fn test_straight_rgba_inverts_transparency() {
+        let color = Color::new(64, 10, 20, 30);
+        assert_eq!(color.to_straight_rgba(), [10, 20, 30, 191]);
+        assert_eq!(Color::from_standard_rgba(10, 20, 30, 191), color);
     }
 
     #[test]

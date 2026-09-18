@@ -4,7 +4,7 @@ use super::font::FontManager;
 use super::glyph_cache::GlyphCache;
 use super::shaper::TextShaper;
 use crate::types::color::Color;
-use crate::types::override_tag::{parse_text_segments, TextSegment};
+use crate::types::override_tag::{parse_text_segments, parse_text_segments_with_wrap, TextSegment};
 use crate::types::{Event, EventType, OverrideTag, Style};
 use crate::utils::Matrix3x3;
 use ab_glyph::FontArc;
@@ -33,7 +33,13 @@ pub struct ResolvedStyle {
     pub rotation_y: f64,
     pub border_style: i32,
     pub outline: f64,
+    pub outline_x: f64,
+    pub outline_y: f64,
     pub shadow: f64,
+    pub shadow_x: f64,
+    pub shadow_y: f64,
+    pub shear_x: f64,
+    pub shear_y: f64,
     pub alignment: i32,
     pub margin_l: i32,
     pub margin_r: i32,
@@ -43,11 +49,71 @@ pub struct ResolvedStyle {
     pub move_data: Option<MoveData>,
     pub clip: Option<(i32, i32, i32, i32)>,
     pub inverse_clip: Option<(i32, i32, i32, i32)>,
+    pub clip_vector: Option<VectorClip>,
+    pub inverse_clip_vector: Option<VectorClip>,
     pub fade_in: u64,
     pub fade_out: u64,
     pub complex_fade: Option<ComplexFade>,
     pub drawing_mode: i32,
+    pub drawing_baseline_offset: f64,
     pub blur: f64,
+    /// Script `ScaledBorderAndShadow` flag: when true (default), borders
+    /// and shadows scale with the script-to-video resolution ratio.
+    pub scaled_border_and_shadow: bool,
+}
+
+/// Vector clip shape in script coordinates with a drawing scale.
+#[derive(Debug, Clone)]
+pub struct VectorClip {
+    pub scale: i32,
+    pub drawing: String,
+}
+
+/// Line-global state preserved across `\r` resets.
+struct LineGlobalKeep {
+    position: Option<(f64, f64)>,
+    origin: Option<(f64, f64)>,
+    move_data: Option<MoveData>,
+    clip: Option<(i32, i32, i32, i32)>,
+    inverse_clip: Option<(i32, i32, i32, i32)>,
+    clip_vector: Option<VectorClip>,
+    inverse_clip_vector: Option<VectorClip>,
+    fade_in: u64,
+    fade_out: u64,
+    complex_fade: Option<ComplexFade>,
+    drawing_mode: i32,
+}
+
+impl LineGlobalKeep {
+    fn capture(resolved: &ResolvedStyle) -> Self {
+        Self {
+            position: resolved.position,
+            origin: resolved.origin,
+            move_data: resolved.move_data.clone(),
+            clip: resolved.clip,
+            inverse_clip: resolved.inverse_clip,
+            clip_vector: resolved.clip_vector.clone(),
+            inverse_clip_vector: resolved.inverse_clip_vector.clone(),
+            fade_in: resolved.fade_in,
+            fade_out: resolved.fade_out,
+            complex_fade: resolved.complex_fade.clone(),
+            drawing_mode: resolved.drawing_mode,
+        }
+    }
+
+    fn restore(self, resolved: &mut ResolvedStyle) {
+        resolved.position = self.position;
+        resolved.origin = self.origin;
+        resolved.move_data = self.move_data;
+        resolved.clip = self.clip;
+        resolved.inverse_clip = self.inverse_clip;
+        resolved.clip_vector = self.clip_vector;
+        resolved.inverse_clip_vector = self.inverse_clip_vector;
+        resolved.fade_in = self.fade_in;
+        resolved.fade_out = self.fade_out;
+        resolved.complex_fade = self.complex_fade;
+        resolved.drawing_mode = self.drawing_mode;
+    }
 }
 
 /// Move animation data
@@ -86,13 +152,15 @@ struct WrapWord {
 }
 
 /// Insert '\n' at word boundaries per the ASS wrap style:
-/// 0/1 = greedy fill (top line widest), 2 = no automatic wrapping,
-/// 3 = greedy fill from the bottom (bottom line widest).
+/// 0 = smart wrapping (balanced lines, top line widest),
+/// 1 = end-of-line greedy wrapping, 2 = no automatic wrapping,
+/// 3 = smart wrapping from the bottom (bottom line widest).
 ///
 /// Tag groups are opaque and travel with the word that follows them;
-/// explicit `\N`/`\n` breaks split the text into independently wrapped
-/// runs. Words wider than `max_width` stay on their own line (no
-/// character-level splitting).
+/// explicit `\N` breaks (and `\n` in mode 2) split the text into
+/// independently wrapped runs. `\n` elsewhere acts as a space. Drawing
+/// runs pass through verbatim and are never wrapped. Words wider than
+/// `max_width` stay on their own line (no character-level splitting).
 fn wrap_event_text(
     text: &str,
     wrap_style: i32,
@@ -103,6 +171,21 @@ fn wrap_event_text(
 ) -> String {
     if wrap_style == 2 || max_width <= 0.0 {
         return text.to_string();
+    }
+
+    /// Scan a `{...}` group for a `\pN` drawing-mode switch.
+    fn drawing_mode_in_group(group: &str) -> Option<i32> {
+        let mut rest = group;
+        while let Some(pos) = rest.find("\\p") {
+            rest = &rest[pos + 2..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                if let Ok(mode) = digits.parse::<i32>() {
+                    return Some(mode);
+                }
+            }
+        }
+        None
     }
 
     // Tokenize into words (with pending tag prefixes) and hard breaks.
@@ -137,24 +220,53 @@ fn wrap_event_text(
         };
 
     let mut chars = text.chars().peekable();
+    let mut in_drawing = false;
     while let Some(c) = chars.next() {
         match c {
             '{' => {
-                flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
-                prefix.push('{');
+                let mut group = String::from("{");
                 for gc in chars.by_ref() {
-                    prefix.push(gc);
+                    group.push(gc);
                     if gc == '}' {
                         break;
                     }
                 }
+                if in_drawing {
+                    // Verbatim: drawing runs are never wrapped or split.
+                    word.push_str(&group);
+                } else {
+                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                    prefix.push_str(&group);
+                }
+                if let Some(mode) = drawing_mode_in_group(&group) {
+                    in_drawing = mode > 0;
+                }
+            }
+            '\\' if in_drawing => {
+                word.push('\\');
+                if let Some(&n) = chars.peek() {
+                    word.push(n);
+                    chars.next();
+                }
             }
             '\\' => match chars.peek() {
-                Some('N') | Some('n') => {
+                Some('N') => {
                     chars.next();
                     flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
                     preceded_by_space = true;
                     run_starts.push(words.len());
+                }
+                Some('n') => {
+                    chars.next();
+                    // Soft break: a hard break only in mode 2, else a space.
+                    if wrap_style == 2 {
+                        flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                        preceded_by_space = true;
+                        run_starts.push(words.len());
+                    } else {
+                        flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                        preceded_by_space = true;
+                    }
                 }
                 Some('h') => {
                     chars.next();
@@ -168,8 +280,12 @@ fn wrap_event_text(
                 None => word.push('\\'),
             },
             ' ' | '\t' => {
-                flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
-                preceded_by_space = true;
+                if in_drawing {
+                    word.push(c);
+                } else {
+                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                    preceded_by_space = true;
+                }
             }
             _ => {
                 word.push(c);
@@ -188,7 +304,6 @@ fn wrap_event_text(
     }
 
     let space_width = TextShaper::measure_text(" ", font, font_size, spacing);
-    let bottom_wider = wrap_style == 3;
 
     // Wrap each explicit-line run independently, then rejoin with breaks.
     let mut out = String::with_capacity(text.len() + 16);
@@ -196,7 +311,7 @@ fn wrap_event_text(
     for start in run_starts.iter().skip(1) {
         render_wrapped_run(
             &words[run_begin..*start],
-            bottom_wider,
+            wrap_style,
             max_width,
             space_width,
             &mut out,
@@ -206,7 +321,7 @@ fn wrap_event_text(
     }
     render_wrapped_run(
         &words[run_begin..],
-        bottom_wider,
+        wrap_style,
         max_width,
         space_width,
         &mut out,
@@ -215,20 +330,15 @@ fn wrap_event_text(
     out
 }
 
-/// Greedy-wrap one run of words and append the result to `out`.
-fn render_wrapped_run(
+/// Greedy line grouping. Forward fill makes the top line the widest;
+/// filling from the end (style 3) makes the bottom the widest.
+/// Prefix-only entries ride along without consuming width budget.
+fn greedy_wrap_lines(
     words: &[WrapWord],
     bottom_wider: bool,
     max_width: f64,
     space_width: f64,
-    out: &mut String,
-) {
-    if words.is_empty() {
-        return;
-    }
-
-    // Group word indices into lines. Greedy fill makes the top line the
-    // widest; filling from the end (style 3) makes the bottom the widest.
+) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     let mut cur_w = 0.0_f64;
@@ -240,8 +350,6 @@ fn render_wrapped_run(
     for idx in order {
         let ww = words[idx].width;
         if ww == 0.0 && words[idx].text.is_empty() {
-            // Prefix-only entry (e.g. trailing tag group): attach to current
-            // line without consuming space budget — no space is emitted for it.
             cur.push(idx);
             continue;
         }
@@ -266,6 +374,104 @@ fn render_wrapped_run(
             line.reverse();
         }
     }
+    lines
+}
+
+/// Smart line grouping (wrap style 0): choose breaks to minimize total
+/// raggedness (squared leftover per line, last line free), which balances
+/// lines with the top line widest. Overlong single words keep their own
+/// line. Dynamic program over word count — subtitle runs are short.
+fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec<Vec<usize>> {
+    let n = words.len();
+    // Width of words[i..j] as one line (prefix-only entries are free).
+    let span_width = |i: usize, j: usize| -> f64 {
+        let mut w = 0.0_f64;
+        let mut text_words = 0usize;
+        for word in &words[i..j] {
+            if word.text.is_empty() && word.width == 0.0 {
+                continue;
+            }
+            if text_words > 0 {
+                w += space_width;
+            }
+            w += word.width;
+            text_words += 1;
+        }
+        w
+    };
+    // dp[j] = (min cost for words[0..j], best break point)
+    let mut dp: Vec<(f64, usize)> = vec![(f64::INFINITY, 0); n + 1];
+    dp[0] = (0.0, 0);
+    for j in 1..=n {
+        for i in 0..j {
+            if dp[i].0.is_infinite() {
+                continue;
+            }
+            let w = span_width(i, j);
+            let is_last = j == n;
+            let cost = if w <= max_width {
+                // Last line is free: ragged bottom is expected.
+                if is_last {
+                    dp[i].0
+                } else {
+                    let slack = max_width - w;
+                    dp[i].0 + slack * slack
+                }
+            } else if j - i == 1 {
+                // Single overlong word: allowed, penalized by overflow.
+                let over = w - max_width;
+                dp[i].0 + over * over + 1e12
+            } else {
+                continue;
+            };
+            // Strictly-less keeps the earliest (top-widest) break on ties.
+            if cost < dp[j].0 {
+                dp[j] = (cost, i);
+            }
+        }
+    }
+    // Fall back to greedy if nothing fit (should not happen: single
+    // words always fit), then reconstruct line breaks.
+    if dp[n].0.is_infinite() {
+        return greedy_wrap_lines(words, false, max_width, space_width);
+    }
+    let mut breaks = vec![n];
+    let mut j = n;
+    while j > 0 {
+        let i = dp[j].1;
+        breaks.push(i);
+        if i >= j {
+            break;
+        }
+        j = i;
+    }
+    breaks.reverse();
+    breaks
+        .windows(2)
+        .map(|w| (w[0]..w[1]).collect::<Vec<usize>>())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Wrap one run of words and append the result to `out`.
+fn render_wrapped_run(
+    words: &[WrapWord],
+    wrap_style: i32,
+    max_width: f64,
+    space_width: f64,
+    out: &mut String,
+) {
+    if words.is_empty() {
+        return;
+    }
+
+    // Style 0 balances lines (top widest); 1 fills greedily from the top;
+    // 3 fills greedily from the bottom (bottom widest).
+    let lines: Vec<Vec<usize>> = if wrap_style == 0 {
+        smart_wrap_lines(words, max_width, space_width)
+    } else {
+        greedy_wrap_lines(words, wrap_style == 3, max_width, space_width)
+    };
 
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -299,6 +505,33 @@ enum KaraokeKind {
     Outline,
 }
 
+/// Opacity (0.0 = invisible, 1.0 = fully visible) for
+/// `\fade(a1,a2,a3,t1,t2,t3,t4)` at `elapsed` ms into the event.
+///
+/// ASS alpha is transparency (0 = visible, 255 = transparent), so each
+/// phase value converts via `opacity = 1 - alpha/255`. Zero-length ramps
+/// are instant jumps; inverted ranges saturate instead of underflowing.
+fn complex_fade_opacity(cf: &ComplexFade, elapsed: u64) -> f64 {
+    fn lerp(a: u8, b: u8, num: u64, denom: u64) -> f64 {
+        if denom == 0 {
+            return b as f64;
+        }
+        a as f64 + (num as f64 / denom as f64) * (b as f64 - a as f64)
+    }
+    let ass_transparency = if elapsed < cf.t1 {
+        cf.a1 as f64
+    } else if elapsed < cf.t2 {
+        lerp(cf.a1, cf.a2, elapsed - cf.t1, cf.t2.saturating_sub(cf.t1))
+    } else if elapsed < cf.t3 {
+        cf.a2 as f64
+    } else if elapsed < cf.t4 {
+        lerp(cf.a2, cf.a3, elapsed - cf.t3, cf.t4.saturating_sub(cf.t3))
+    } else {
+        cf.a3 as f64
+    };
+    (1.0 - ass_transparency / 255.0).clamp(0.0, 1.0)
+}
+
 /// A karaoke syllable: timing relative to event start plus measured width
 #[derive(Debug, Clone)]
 struct KaraokeSyllable {
@@ -306,6 +539,18 @@ struct KaraokeSyllable {
     dur_ms: u64,
     kind: KaraokeKind,
     width: f64,
+}
+
+/// `\k` fill rule: secondary before the syllable starts, primary from the
+/// exact start instant (not at the end).
+fn karaoke_is_primary(syl: &KaraokeSyllable, elapsed_ms: u64) -> bool {
+    debug_assert_eq!(syl.kind, KaraokeKind::Hard);
+    elapsed_ms >= syl.start_ms
+}
+
+/// `\ko` outline rule: the outline is suppressed once the syllable begins.
+fn karaoke_outline_suppressed(elapsed_ms: u64, start_ms: u64) -> bool {
+    elapsed_ms >= start_ms
 }
 
 /// Build the karaoke syllable timeline for segmented event text.
@@ -363,6 +608,76 @@ fn build_karaoke_timeline(
     (syllables, seg_syllable)
 }
 
+/// Measured vector drawing for one segment, in video pixels.
+#[derive(Debug, Clone)]
+struct DrawingLayout {
+    mode: i32,
+    min_x: f64,
+    min_y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// One laid-out segment: resolved style, shaped glyphs, font identity,
+/// and optional drawing geometry.
+struct LayoutItem {
+    resolved: ResolvedStyle,
+    shaped: crate::renderer::shaper::ShapedLine,
+    font_id: usize,
+    faux_bold: bool,
+    faux_italic: bool,
+    drawing: Option<DrawingLayout>,
+    skipped: bool,
+}
+
+/// Whole-event layout: per-segment items plus block metrics.
+struct LayoutBlock {
+    items: Vec<LayoutItem>,
+    width: f64,
+    height: f64,
+    baseline: f64,
+}
+
+/// Video pixels per drawing unit for a `\pN` mode: higher modes pack
+/// more units per script pixel, so each unit renders smaller.
+fn drawing_unit_scale(scale_x: f64, scale_y: f64, mode: i32) -> f64 {
+    let res = (scale_x + scale_y) / 2.0;
+    if mode > 0 {
+        res / 2f64.powi(mode.saturating_sub(1).min(20))
+    } else {
+        res
+    }
+}
+
+/// Scale a script-coordinate clip rectangle to video pixels,
+/// saturating instead of overflowing on extreme coordinates.
+fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i32, i32, i32, i32) {
+    let conv = |v: i32, s: f64| -> i32 {
+        if !s.is_finite() {
+            return v;
+        }
+        (v as f64 * s).clamp(i32::MIN as f64, i32::MAX as f64) as i32
+    };
+    (
+        conv(rect.0, scale_x),
+        conv(rect.1, scale_y),
+        conv(rect.2, scale_x),
+        conv(rect.3, scale_y),
+    )
+}
+
+/// Active drawing mode for a segment: the last `\pN` in its tags,
+/// falling back to the event-level mode.
+fn segment_drawing_mode(tags: &[OverrideTag], event_mode: i32) -> i32 {
+    tags.iter()
+        .rev()
+        .find_map(|t| match t {
+            OverrideTag::Drawing(m) => Some(*m),
+            _ => None,
+        })
+        .unwrap_or(event_mode)
+}
+
 /// Compositor - composites resolved subtitle events into a buffer
 pub struct Compositor {
     glyph_cache: GlyphCache,
@@ -386,12 +701,22 @@ impl Compositor {
         }
     }
 
-    /// Apply accel function: t' = 1 - (1-t)^accel
+    /// Apply accel function: t' = t^accel (ASS semantics: accel = 1 is
+    /// linear, accel > 1 starts slow and finishes fast, accel < 1 starts
+    /// fast and finishes slow). Non-finite accel falls back to linear.
     fn apply_accel(t: f64, accel: f64) -> f64 {
-        if accel == 1.0 {
+        let t = t.clamp(0.0, 1.0);
+        if !accel.is_finite() || accel == 1.0 {
             t
+        } else if accel <= 0.0 {
+            // Degenerate: treat as instant jump at the end/start boundary.
+            if t >= 1.0 {
+                1.0
+            } else {
+                0.0
+            }
         } else {
-            1.0 - (1.0 - t).powf(accel)
+            t.powf(accel).clamp(0.0, 1.0)
         }
     }
 
@@ -409,11 +734,17 @@ impl Compositor {
                 }
                 OverrideTag::Border(b) => {
                     let from = resolved.outline;
-                    resolved.outline = from + (b - from) * progress;
+                    let v = from + (b - from) * progress;
+                    resolved.outline = v;
+                    resolved.outline_x = v;
+                    resolved.outline_y = v;
                 }
                 OverrideTag::Shadow(s) => {
                     let from = resolved.shadow;
-                    resolved.shadow = from + (s - from) * progress;
+                    let v = from + (s - from) * progress;
+                    resolved.shadow = v;
+                    resolved.shadow_x = v;
+                    resolved.shadow_y = v;
                 }
                 OverrideTag::PrimaryColor(c) => {
                     resolved.color = Self::interpolate_color(resolved.color, *c, progress);
@@ -485,12 +816,32 @@ impl Compositor {
                     resolved.spacing = from + (s - from) * progress;
                 }
                 OverrideTag::BorderX(b) => {
-                    let from = resolved.outline;
-                    resolved.outline = from + (b - from) * progress;
+                    let from = resolved.outline_x;
+                    resolved.outline_x = from + (b - from) * progress;
+                    resolved.outline = (resolved.outline_x + resolved.outline_y) / 2.0;
                 }
                 OverrideTag::BorderY(b) => {
-                    let from = resolved.outline;
-                    resolved.outline = from + (b - from) * progress;
+                    let from = resolved.outline_y;
+                    resolved.outline_y = from + (b - from) * progress;
+                    resolved.outline = (resolved.outline_x + resolved.outline_y) / 2.0;
+                }
+                OverrideTag::ShadowX(s) => {
+                    let from = resolved.shadow_x;
+                    resolved.shadow_x = from + (s - from) * progress;
+                    resolved.shadow = (resolved.shadow_x + resolved.shadow_y) / 2.0;
+                }
+                OverrideTag::ShadowY(s) => {
+                    let from = resolved.shadow_y;
+                    resolved.shadow_y = from + (s - from) * progress;
+                    resolved.shadow = (resolved.shadow_x + resolved.shadow_y) / 2.0;
+                }
+                OverrideTag::ShearX(s) => {
+                    let from = resolved.shear_x;
+                    resolved.shear_x = from + (s - from) * progress;
+                }
+                OverrideTag::ShearY(s) => {
+                    let from = resolved.shear_y;
+                    resolved.shear_y = from + (s - from) * progress;
                 }
                 OverrideTag::RotationZ(r) => {
                     let from = resolved.angle;
@@ -532,7 +883,13 @@ impl Compositor {
             rotation_y: 0.0,
             border_style: base_style.border_style,
             outline: base_style.outline,
+            outline_x: base_style.outline,
+            outline_y: base_style.outline,
             shadow: base_style.shadow,
+            shadow_x: base_style.shadow,
+            shadow_y: base_style.shadow,
+            shear_x: 0.0,
+            shear_y: 0.0,
             alignment: base_style.alignment,
             margin_l: base_style.margin_l,
             margin_r: base_style.margin_r,
@@ -542,11 +899,15 @@ impl Compositor {
             move_data: None,
             clip: None,
             inverse_clip: None,
+            clip_vector: None,
+            inverse_clip_vector: None,
             fade_in: 0,
             fade_out: 0,
             complex_fade: None,
             drawing_mode: 0,
+            drawing_baseline_offset: 0.0,
             blur: 0.0,
+            scaled_border_and_shadow: true,
         };
 
         // Apply override tags (skip Transform tags - they're handled separately)
@@ -629,12 +990,34 @@ impl Compositor {
             OverrideTag::RotationZ(r) => resolved.angle = *r,
             OverrideTag::RotationX(r) => resolved.rotation_x = *r,
             OverrideTag::RotationY(r) => resolved.rotation_y = *r,
-            OverrideTag::Border(b) => resolved.outline = *b,
-            OverrideTag::BorderX(b) => resolved.outline = *b,
-            OverrideTag::BorderY(b) => resolved.outline = *b,
-            OverrideTag::Shadow(s) => resolved.shadow = *s,
-            OverrideTag::ShadowX(s) => resolved.shadow = *s,
-            OverrideTag::ShadowY(s) => resolved.shadow = *s,
+            OverrideTag::Border(b) => {
+                resolved.outline = *b;
+                resolved.outline_x = *b;
+                resolved.outline_y = *b;
+            }
+            OverrideTag::BorderX(b) => {
+                resolved.outline_x = *b;
+                resolved.outline = (resolved.outline_x + resolved.outline_y) / 2.0;
+            }
+            OverrideTag::BorderY(b) => {
+                resolved.outline_y = *b;
+                resolved.outline = (resolved.outline_x + resolved.outline_y) / 2.0;
+            }
+            OverrideTag::Shadow(s) => {
+                resolved.shadow = *s;
+                resolved.shadow_x = *s;
+                resolved.shadow_y = *s;
+            }
+            OverrideTag::ShadowX(s) => {
+                resolved.shadow_x = *s;
+                resolved.shadow = (resolved.shadow_x + resolved.shadow_y) / 2.0;
+            }
+            OverrideTag::ShadowY(s) => {
+                resolved.shadow_y = *s;
+                resolved.shadow = (resolved.shadow_x + resolved.shadow_y) / 2.0;
+            }
+            OverrideTag::ShearX(s) => resolved.shear_x = *s,
+            OverrideTag::ShearY(s) => resolved.shear_y = *s,
             OverrideTag::Fade(fi, fo) => {
                 resolved.fade_in = *fi;
                 resolved.fade_out = *fo;
@@ -652,28 +1035,62 @@ impl Compositor {
             }
             OverrideTag::Clip(x1, y1, x2, y2) => {
                 resolved.clip = Some((*x1, *y1, *x2, *y2));
+                resolved.clip_vector = None;
             }
             OverrideTag::InverseClip(x1, y1, x2, y2) => {
                 resolved.inverse_clip = Some((*x1, *y1, *x2, *y2));
+                resolved.inverse_clip_vector = None;
+            }
+            OverrideTag::ClipVector { scale, drawing } => {
+                resolved.clip_vector = Some(VectorClip {
+                    scale: *scale,
+                    drawing: drawing.clone(),
+                });
+                resolved.clip = None;
+            }
+            OverrideTag::InverseClipVector { scale, drawing } => {
+                resolved.inverse_clip_vector = Some(VectorClip {
+                    scale: *scale,
+                    drawing: drawing.clone(),
+                });
+                resolved.inverse_clip = None;
             }
             OverrideTag::Blur(b) => resolved.blur = *b,
             OverrideTag::EdgeBlur(b) => resolved.blur = *b,
             OverrideTag::Drawing(mode) => resolved.drawing_mode = *mode,
+            OverrideTag::DrawingBaseline(pbo) => resolved.drawing_baseline_offset = *pbo,
             _ => {}
         }
     }
 
-    /// Resolve an event's style with all override tags applied (legacy method)
+    /// Resolve an event's style with all override tags applied.
+    ///
+    /// Segment style tags from the initial override groups establish the
+    /// defaults, but line-global tags (\pos, \move, \org, \clip, \iclip,
+    /// \fad, \fade) apply no matter where they appear textually: they are
+    /// scanned across all segments (last one wins), so `{\pos(100,100)}Hi`
+    /// and `Hi{\pos(100,100)}` resolve identically.
     pub fn resolve_style(base_style: &Style, event: &Event) -> ResolvedStyle {
-        // Override groups after the first visible text segment are
-        // segment-local. Only the initial groups establish event-wide
-        // positioning and style defaults.
-        let initial_segments = parse_text_segments(&event.text);
-        let initial_tags = initial_segments
+        let segments = parse_text_segments(&event.text);
+        let initial_tags = segments
             .first()
             .map(|segment| segment.tags.as_slice())
             .unwrap_or(&[]);
         let mut resolved = Self::resolve_base_style(base_style, initial_tags);
+
+        // Line-global tags apply regardless of textual placement.
+        // Segments carry accumulated tags, so only newly added tags per
+        // segment are considered; later ones overwrite earlier ones.
+        let mut prev_tag_count = 0usize;
+        for segment in &segments {
+            let from = prev_tag_count.min(segment.tags.len());
+            prev_tag_count = segment.tags.len();
+            for tag in &segment.tags[from..] {
+                if tag.is_line_global() {
+                    Self::apply_single_tag(&mut resolved, tag);
+                }
+            }
+        }
 
         // Apply event-level margin overrides
         if event.margin_l != 0 {
@@ -765,6 +1182,213 @@ impl Compositor {
         (x, top + baseline)
     }
 
+    /// Resolve one segment's style: base tags, `\r` resets against the
+    /// style table, event margins, and `\t` animations at `time_ms`.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_segment_style(
+        resolved: &ResolvedStyle,
+        segment: &TextSegment,
+        event: &Event,
+        styles: &[Style],
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> ResolvedStyle {
+        let mut segment_resolved = resolved.clone();
+        for tag in &segment.tags {
+            if let OverrideTag::Transform { .. } = tag {
+                continue;
+            }
+            if let OverrideTag::Reset(style_name) = tag {
+                let base = match style_name {
+                    Some(name) => styles
+                        .iter()
+                        .find(|s| s.name == *name)
+                        .unwrap_or(&segment_resolved.base_style)
+                        .clone(),
+                    None => segment_resolved.base_style.clone(),
+                };
+                let keep = LineGlobalKeep::capture(&segment_resolved);
+                segment_resolved = Self::resolve_base_style(&base, &[]);
+                segment_resolved.scaled_border_and_shadow = resolved.scaled_border_and_shadow;
+                keep.restore(&mut segment_resolved);
+                continue;
+            }
+            Self::apply_single_tag(&mut segment_resolved, tag);
+        }
+
+        if event.margin_l != 0 {
+            segment_resolved.margin_l = event.margin_l;
+        }
+        if event.margin_r != 0 {
+            segment_resolved.margin_r = event.margin_r;
+        }
+        if event.margin_v != 0 {
+            segment_resolved.margin_v = event.margin_v;
+        }
+
+        for tag in &segment.tags {
+            if let OverrideTag::Transform {
+                t1,
+                t2,
+                accel,
+                tags,
+            } = tag
+            {
+                let elapsed = time_ms.saturating_sub(start_ms);
+                if elapsed < *t1 {
+                    continue;
+                }
+                // t2 == 0 means "until the end of the event" (the spec
+                // default when \t omits its timing arguments)
+                let t2_eff = if *t2 == 0 {
+                    end_ms.saturating_sub(start_ms)
+                } else {
+                    *t2
+                };
+                let duration = t2_eff.saturating_sub(*t1);
+                let raw_progress = if elapsed >= t2_eff {
+                    1.0
+                } else if duration > 0 {
+                    (elapsed - *t1) as f64 / duration as f64
+                } else {
+                    1.0
+                };
+                let progress = Self::apply_accel(raw_progress, *accel);
+                Self::apply_transform_tags(&mut segment_resolved, tags, progress);
+            }
+        }
+
+        segment_resolved
+    }
+
+    /// Layout pass: resolve and measure every segment (text shaping or
+    /// drawing bounds) and accumulate block metrics with the same
+    /// line-break rules the render pass uses.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_segments(
+        segments: &[TextSegment],
+        event: &Event,
+        resolved: &ResolvedStyle,
+        font_manager: &FontManager,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+        play_res_x: u32,
+        play_res_y: u32,
+        video_width: u32,
+        video_height: u32,
+        styles: &[Style],
+    ) -> LayoutBlock {
+        let scale_x = video_width as f64 / play_res_x.max(1) as f64;
+        let scale_y = video_height as f64 / play_res_y.max(1) as f64;
+        let mut items = Vec::with_capacity(segments.len());
+
+        for segment in segments {
+            let skipped = segment.text.is_empty();
+            let seg_resolved = Self::resolve_segment_style(
+                resolved, segment, event, styles, time_ms, start_ms, end_ms,
+            );
+            let font_match = font_manager.find_font_with_match(
+                &seg_resolved.font_name,
+                seg_resolved.bold,
+                seg_resolved.italic,
+            );
+            let seg_font_size =
+                seg_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
+            let shaped = TextShaper::shape(
+                &segment.text,
+                font_match.font,
+                seg_font_size,
+                seg_resolved.scale_x / 100.0,
+                seg_resolved.scale_y / 100.0,
+                seg_resolved.bold,
+                seg_resolved.italic,
+                seg_resolved.spacing,
+                seg_resolved.color,
+                seg_resolved.outline_color,
+                seg_resolved.shadow_color,
+                seg_resolved.angle,
+            );
+            // Per-segment drawing state (mixed drawing/text supported).
+            let mode = segment_drawing_mode(&segment.tags, resolved.drawing_mode);
+            let drawing = if !skipped && mode > 0 {
+                let unit = drawing_unit_scale(scale_x, scale_y, mode);
+                super::drawing::DrawingParser::measure(&segment.text).map(|(min_x, min_y, w, h)| {
+                    DrawingLayout {
+                        mode,
+                        min_x: min_x * unit,
+                        min_y: min_y * unit,
+                        width: w * unit,
+                        height: h * unit,
+                    }
+                })
+            } else {
+                None
+            };
+            items.push(LayoutItem {
+                resolved: seg_resolved,
+                shaped,
+                font_id: font_match.id,
+                faux_bold: font_match.faux_bold,
+                faux_italic: font_match.faux_italic,
+                drawing,
+                skipped,
+            });
+        }
+
+        // Accumulate block metrics with render-pass line rules: segments
+        // ending in '\n' close the line; width is the widest line, height
+        // the sum of line heights, baseline the first line's baseline.
+        let mut block_width = 0.0_f64;
+        let mut block_height = 0.0_f64;
+        let mut baseline = 0.0_f64;
+        let mut line_width = 0.0_f64;
+        let mut line_height = 0.0_f64;
+        let mut line_baseline = 0.0_f64;
+        let mut first_line = true;
+        let mut any_content = false;
+
+        for (item, segment) in items.iter().zip(segments.iter()) {
+            if item.skipped {
+                continue;
+            }
+            any_content = true;
+            let (w, h, b) = match &item.drawing {
+                Some(d) => (d.width, d.height, d.height),
+                None => (item.shaped.width, item.shaped.height, item.shaped.baseline),
+            };
+            line_width += w;
+            line_height = line_height.max(h);
+            line_baseline = line_baseline.max(b);
+            if segment.text.ends_with('\n') {
+                block_width = block_width.max(line_width);
+                block_height += line_height;
+                if first_line {
+                    baseline = line_baseline;
+                    first_line = false;
+                }
+                line_width = 0.0;
+                line_height = 0.0;
+                line_baseline = 0.0;
+            }
+        }
+        if line_width > 0.0 || line_height > 0.0 || !any_content {
+            block_width = block_width.max(line_width);
+            block_height += line_height;
+            if first_line {
+                baseline = line_baseline;
+            }
+        }
+
+        LayoutBlock {
+            items,
+            width: block_width,
+            height: block_height,
+            baseline,
+        }
+    }
+
     /// Composite a single event into the buffer using per-segment rendering.
     /// Effects that clear or blur pixels are isolated to this event first.
     #[allow(clippy::too_many_arguments)]
@@ -780,6 +1404,7 @@ impl Compositor {
         video_width: u32,
         video_height: u32,
         script_wrap_style: i32,
+        styles: &[Style],
     ) {
         if event.event_type == EventType::Comment {
             return;
@@ -791,21 +1416,46 @@ impl Compositor {
             return;
         }
 
-        if resolved.clip.is_some() || resolved.inverse_clip.is_some() || resolved.blur > 0.0 {
-            let mut event_buffer = RenderBuffer::new(video_width, video_height);
-            self.composite_event_inner(
-                &mut event_buffer,
-                event,
-                resolved,
-                font_manager,
-                time_ms,
-                play_res_x,
-                play_res_y,
-                video_width,
-                video_height,
-                script_wrap_style,
-            );
-            buffer.blend_buffer(&event_buffer);
+        if resolved.clip.is_some()
+            || resolved.inverse_clip.is_some()
+            || resolved.clip_vector.is_some()
+            || resolved.inverse_clip_vector.is_some()
+            || resolved.blur > 0.0
+        {
+            match RenderBuffer::new(video_width, video_height) {
+                Ok(mut event_buffer) => {
+                    self.composite_event_inner(
+                        &mut event_buffer,
+                        event,
+                        resolved,
+                        font_manager,
+                        time_ms,
+                        play_res_x,
+                        play_res_y,
+                        video_width,
+                        video_height,
+                        script_wrap_style,
+                        styles,
+                    );
+                    buffer.blend_buffer(&event_buffer);
+                }
+                Err(_) => {
+                    // Degenerate dimensions: degrade to direct rendering.
+                    self.composite_event_inner(
+                        buffer,
+                        event,
+                        resolved,
+                        font_manager,
+                        time_ms,
+                        play_res_x,
+                        play_res_y,
+                        video_width,
+                        video_height,
+                        script_wrap_style,
+                        styles,
+                    );
+                }
+            }
         } else {
             self.composite_event_inner(
                 buffer,
@@ -818,6 +1468,7 @@ impl Compositor {
                 video_width,
                 video_height,
                 script_wrap_style,
+                styles,
             );
         }
     }
@@ -835,6 +1486,7 @@ impl Compositor {
         video_width: u32,
         video_height: u32,
         script_wrap_style: i32,
+        styles: &[Style],
     ) {
         if event.event_type == EventType::Comment {
             return;
@@ -863,19 +1515,7 @@ impl Compositor {
 
         if let Some(ref cf) = resolved.complex_fade {
             let elapsed = time_ms - start_ms;
-            alpha_mult = if elapsed < cf.t1 {
-                cf.a1 as f64 / 255.0
-            } else if elapsed < cf.t2 {
-                let t = (elapsed - cf.t1) as f64 / (cf.t2 - cf.t1) as f64;
-                cf.a1 as f64 / 255.0 + t * (cf.a2 as f64 / 255.0 - cf.a1 as f64 / 255.0)
-            } else if elapsed < cf.t3 {
-                cf.a2 as f64 / 255.0
-            } else if elapsed < cf.t4 {
-                let t = (elapsed - cf.t3) as f64 / (cf.t4 - cf.t3) as f64;
-                cf.a2 as f64 / 255.0 + t * (cf.a3 as f64 / 255.0 - cf.a2 as f64 / 255.0)
-            } else {
-                cf.a3 as f64 / 255.0
-            };
+            alpha_mult = complex_fade_opacity(cf, elapsed);
         }
 
         if alpha_mult <= 0.0 {
@@ -891,74 +1531,54 @@ impl Compositor {
         let scale_x = video_width as f64 / play_res_x as f64;
         let scale_y = video_height as f64 / play_res_y as f64;
 
-        // Automatic word wrapping (wrap styles 0-3). A per-event \q
-        // overrides the script-level WrapStyle. Drawing mode text is
-        // coordinate data and must never be wrapped.
-        let is_drawing_event = resolved.drawing_mode > 0
-            || event
-                .parsed_tags
-                .iter()
-                .any(|t| matches!(t, OverrideTag::Drawing(d) if *d > 0));
-        let wrapped_text = if is_drawing_event {
-            event.text.clone()
-        } else {
-            let wrap_style = event
-                .parsed_tags
-                .iter()
-                .rev()
-                .find_map(|tag| match tag {
-                    OverrideTag::WrapStyle(q) => Some(*q),
-                    _ => None,
-                })
-                .unwrap_or(script_wrap_style);
-            let wrap_width =
-                (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
-            wrap_event_text(
-                &event.text,
-                wrap_style,
-                wrap_width,
-                font,
-                font_size,
-                resolved.spacing,
-            )
-        };
-
-        // Parse text into segments for per-override rendering
-        let segments = parse_text_segments(&wrapped_text);
-
-        // Check if this is drawing mode (check first segment for \p1)
-        let is_drawing = segments
-            .first()
-            .map(|s| {
-                resolved.drawing_mode > 0
-                    || s.tags
-                        .iter()
-                        .any(|t| matches!(t, OverrideTag::Drawing(d) if *d > 0))
+        // Effective wrap style: a per-event \q overrides the script default.
+        let wrap_style = event
+            .parsed_tags
+            .iter()
+            .rev()
+            .find_map(|tag| match tag {
+                OverrideTag::WrapStyle(q) => Some(*q),
+                _ => None,
             })
-            .unwrap_or(false);
-
-        // Calculate position (always need text measurement for alignment offsets)
-        let (clean_text, _) = self.extract_clean_text(&wrapped_text);
-        let shaped_full = TextShaper::shape(
-            &clean_text,
+            .unwrap_or(script_wrap_style);
+        let wrap_width =
+            (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
+        // Drawing runs pass through the wrapper verbatim (never wrapped).
+        let wrapped_text = wrap_event_text(
+            &event.text,
+            wrap_style,
+            wrap_width,
             font,
             font_size,
-            resolved.scale_x / 100.0,
-            resolved.scale_y / 100.0,
-            resolved.bold,
-            resolved.italic,
             resolved.spacing,
-            resolved.color,
-            resolved.outline_color,
-            resolved.shadow_color,
-            resolved.angle,
+        );
+
+        // Parse text into segments for per-override rendering
+        let segments = parse_text_segments_with_wrap(&wrapped_text, wrap_style);
+
+        // Layout pass: resolve and shape every segment with its own style,
+        // so alignment, positioning, rotation origins, and boxes use the
+        // same per-segment dimensions as rendering.
+        let layout = Self::layout_segments(
+            &segments,
+            event,
+            resolved,
+            font_manager,
+            time_ms,
+            start_ms,
+            end_ms,
+            play_res_x,
+            play_res_y,
+            video_width,
+            video_height,
+            styles,
         );
 
         let (mut base_x, mut base_y) = Self::calculate_position(
             resolved,
-            shaped_full.width,
-            shaped_full.height,
-            shaped_full.baseline,
+            layout.width,
+            layout.height,
+            layout.baseline,
             play_res_x,
             play_res_y,
             video_width,
@@ -998,11 +1618,11 @@ impl Compositor {
                 resolved.alignment,
                 anchor_x,
                 anchor_y,
-                shaped_full.width,
-                shaped_full.height,
+                layout.width,
+                layout.height,
             );
             base_x = origin_x;
-            base_y = origin_top + shaped_full.baseline;
+            base_y = origin_top + layout.baseline;
         }
 
         // Rotation origin for 3D effects. The default origin follows a move;
@@ -1010,18 +1630,18 @@ impl Compositor {
         let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
             (ox * scale_x, oy * scale_y)
         } else {
-            let text_top = base_y - shaped_full.baseline;
+            let text_top = base_y - layout.baseline;
             let ax = match resolved.alignment {
                 1 | 4 | 7 => base_x,
-                2 | 5 | 8 => base_x + shaped_full.width / 2.0,
-                3 | 6 | 9 => base_x + shaped_full.width,
-                _ => base_x + shaped_full.width / 2.0,
+                2 | 5 | 8 => base_x + layout.width / 2.0,
+                3 | 6 | 9 => base_x + layout.width,
+                _ => base_x + layout.width / 2.0,
             };
             let ay = match resolved.alignment {
                 7..=9 => text_top,
-                4..=6 => text_top + shaped_full.height / 2.0,
-                1..=3 => text_top + shaped_full.height,
-                _ => text_top + shaped_full.height / 2.0,
+                4..=6 => text_top + layout.height / 2.0,
+                1..=3 => text_top + layout.height,
+                _ => text_top + layout.height / 2.0,
             };
             (ax, ay)
         };
@@ -1032,9 +1652,9 @@ impl Compositor {
             effects::apply_opaque_box(
                 buffer,
                 base_x as i32,
-                (base_y - shaped_full.baseline) as i32,
-                shaped_full.width.ceil() as i32,
-                shaped_full.height.ceil() as i32,
+                (base_y - layout.baseline) as i32,
+                layout.width.ceil() as i32,
+                layout.height.ceil() as i32,
                 (resolved.margin_l as f64 * scale_x).round() as i32,
                 (resolved.margin_r as f64 * scale_x).round() as i32,
                 (resolved.margin_v as f64 * scale_y).round() as i32,
@@ -1049,42 +1669,6 @@ impl Compositor {
             );
         }
 
-        // Drawing mode: render vector paths
-        if is_drawing {
-            let drawing_mode = segments
-                .first()
-                .and_then(|segment| {
-                    segment.tags.iter().find_map(|tag| match tag {
-                        OverrideTag::Drawing(mode) if *mode > 0 => Some(*mode),
-                        _ => None,
-                    })
-                })
-                .unwrap_or(resolved.drawing_mode);
-            let drawing_scale = if drawing_mode > 0 {
-                2.0_f64.powi(drawing_mode.saturating_sub(1))
-            } else {
-                1.0
-            };
-            let avg_scale = (scale_x + scale_y) / 2.0 * drawing_scale;
-            let color = resolved.color.to_rgba();
-            let color_alpha = 255 - color[3];
-
-            super::drawing::DrawingParser::render_drawing(
-                buffer,
-                &clean_text,
-                base_x,
-                base_y,
-                avg_scale,
-                [
-                    color[0],
-                    color[1],
-                    color[2],
-                    (color_alpha as f64 * alpha_mult) as u8,
-                ],
-            );
-            return;
-        }
-
         // Karaoke syllable timeline (empty when the event has no karaoke tags)
         let (karaoke_syllables, seg_syllable) =
             build_karaoke_timeline(&segments, font, font_size, resolved.spacing);
@@ -1096,86 +1680,13 @@ impl Compositor {
         let mut line_y_offset = 0.0_f64;
 
         for (seg_idx, segment) in segments.iter().enumerate() {
-            if segment.text.is_empty() {
+            let item = &layout.items[seg_idx];
+            if item.skipped {
                 continue;
             }
 
-            // Resolve segment style incrementally from parent (no heap allocation)
-            let mut segment_resolved = resolved.clone();
-            // Apply segment-level overrides (skip Transform tags)
-            for tag in &segment.tags {
-                if let OverrideTag::Transform { .. } = tag {
-                    continue;
-                }
-                if matches!(tag, OverrideTag::Reset) {
-                    let position = segment_resolved.position;
-                    let origin = segment_resolved.origin;
-                    let move_data = segment_resolved.move_data.clone();
-                    let clip = segment_resolved.clip;
-                    let inverse_clip = segment_resolved.inverse_clip;
-                    let fade_in = segment_resolved.fade_in;
-                    let fade_out = segment_resolved.fade_out;
-                    let complex_fade = segment_resolved.complex_fade.clone();
-                    let drawing_mode = segment_resolved.drawing_mode;
-                    segment_resolved = Self::resolve_base_style(&segment_resolved.base_style, &[]);
-                    segment_resolved.position = position;
-                    segment_resolved.origin = origin;
-                    segment_resolved.move_data = move_data;
-                    segment_resolved.clip = clip;
-                    segment_resolved.inverse_clip = inverse_clip;
-                    segment_resolved.fade_in = fade_in;
-                    segment_resolved.fade_out = fade_out;
-                    segment_resolved.complex_fade = complex_fade;
-                    segment_resolved.drawing_mode = drawing_mode;
-                    continue;
-                }
-                Self::apply_single_tag(&mut segment_resolved, tag);
-            }
-
-            // Apply event-level margin overrides
-            if event.margin_l != 0 {
-                segment_resolved.margin_l = event.margin_l;
-            }
-            if event.margin_r != 0 {
-                segment_resolved.margin_r = event.margin_r;
-            }
-            if event.margin_v != 0 {
-                segment_resolved.margin_v = event.margin_v;
-            }
-
-            // Apply \t animations - iterate all segments' transform tags directly
-            // (avoids allocating a Vec per frame)
-            for tag in &segment.tags {
-                if let OverrideTag::Transform {
-                    t1,
-                    t2,
-                    accel,
-                    tags,
-                } = tag
-                {
-                    let elapsed = time_ms.saturating_sub(start_ms);
-                    if elapsed < *t1 {
-                        continue;
-                    }
-                    // t2 == 0 means "until the end of the event" (the spec
-                    // default when \t omits its timing arguments)
-                    let t2_eff = if *t2 == 0 {
-                        end_ms.saturating_sub(start_ms)
-                    } else {
-                        *t2
-                    };
-                    let duration = t2_eff.saturating_sub(*t1);
-                    let raw_progress = if elapsed >= t2_eff {
-                        1.0
-                    } else if duration > 0 {
-                        (elapsed - *t1) as f64 / duration as f64
-                    } else {
-                        1.0
-                    };
-                    let progress = Self::apply_accel(raw_progress, *accel);
-                    Self::apply_transform_tags(&mut segment_resolved, tags, progress);
-                }
-            }
+            // Style/shape come from the layout pass; karaoke recolors here.
+            let mut segment_resolved = item.resolved.clone();
 
             // Apply karaoke highlighting for this segment's syllable.
             // sweep_boundary holds the sweep edge in segment-local x
@@ -1187,13 +1698,13 @@ impl Compositor {
                 let finished = elapsed_ms >= syl.start_ms.saturating_add(syl.dur_ms);
                 match syl.kind {
                     KaraokeKind::Hard => {
-                        if !finished {
+                        if !karaoke_is_primary(syl, elapsed_ms) {
                             segment_resolved.color = segment_resolved.secondary_color;
                         }
                     }
                     KaraokeKind::Outline => {
-                        if finished {
-                            // Hide the outline once the syllable has been sung
+                        if karaoke_outline_suppressed(elapsed_ms, syl.start_ms) {
+                            // Hide the outline once the syllable begins
                             segment_resolved.outline_color.alpha = 255;
                         }
                     }
@@ -1210,47 +1721,68 @@ impl Compositor {
                 }
             }
 
-            // Shape this segment's text
-            let segment_font = font_manager.find_font(
-                &segment_resolved.font_name,
-                segment_resolved.bold,
-                segment_resolved.italic,
-            );
+            // Drawing segments render vector paths at the pen position.
+            if let Some(drawing) = &item.drawing {
+                let unit = drawing_unit_scale(scale_x, scale_y, drawing.mode);
+                let color = segment_resolved.color.to_ass_components();
+                super::drawing::DrawingParser::render_drawing(
+                    buffer,
+                    &segment.text,
+                    base_x + x_offset - drawing.min_x,
+                    base_y + line_y_offset
+                        - drawing.min_y
+                        - segment_resolved.drawing_baseline_offset * unit,
+                    unit,
+                    [
+                        color[0],
+                        color[1],
+                        color[2],
+                        (segment_resolved.color.opacity() as f64 * alpha_mult) as u8,
+                    ],
+                );
+                if let Some(syl_idx) = seg_syllable[seg_idx] {
+                    syllable_consumed[syl_idx] += drawing.width;
+                }
+                if segment.text.ends_with('\n') {
+                    x_offset = 0.0;
+                    line_y_offset += drawing.height;
+                } else {
+                    x_offset += drawing.width;
+                }
+                continue;
+            }
 
+            // Text path: font, size, and shaping come from the layout pass.
+            let segment_font = font_manager.get_font(item.font_id).unwrap_or(font);
             let segment_font_size =
-                segment_resolved.font_size * (video_height as f64 / play_res_y as f64);
-            let shaped = TextShaper::shape(
-                &segment.text,
-                segment_font,
-                segment_font_size,
-                segment_resolved.scale_x / 100.0,
-                segment_resolved.scale_y / 100.0,
-                segment_resolved.bold,
-                segment_resolved.italic,
-                segment_resolved.spacing,
-                segment_resolved.color,
-                segment_resolved.outline_color,
-                segment_resolved.shadow_color,
-                segment_resolved.angle,
-            );
+                segment_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
+            let shaped = &item.shaped;
 
-            // Pre-compute effect parameters
-            let outline_active =
-                segment_resolved.border_style == 1 && segment_resolved.outline > 0.0;
-            let outline_scale = segment_resolved.outline
-                * (scale_x * segment_resolved.scale_x / 100.0
-                    + scale_y * segment_resolved.scale_y / 100.0)
-                / 2.0;
-            let outline_color_rgba = segment_resolved.outline_color.to_rgba();
-            let outline_alpha = (255 - outline_color_rgba[3] as u32) as u8;
+            // Pre-compute effect parameters. With ScaledBorderAndShadow,
+            // borders/shadows scale with the resolution ratio; otherwise
+            // script units map 1:1 to video pixels.
+            let (res_x, res_y) = if segment_resolved.scaled_border_and_shadow {
+                (scale_x, scale_y)
+            } else {
+                (1.0, 1.0)
+            };
+            let outline_active = segment_resolved.border_style == 1
+                && (segment_resolved.outline_x > 0.0 || segment_resolved.outline_y > 0.0);
+            let outline_scale_x =
+                segment_resolved.outline_x * res_x * segment_resolved.scale_x / 100.0;
+            let outline_scale_y =
+                segment_resolved.outline_y * res_y * segment_resolved.scale_y / 100.0;
+            let outline_color_rgba = segment_resolved.outline_color.to_ass_components();
+            let outline_alpha = segment_resolved.outline_color.opacity();
 
-            let shadow_active = segment_resolved.shadow > 0.0;
+            let shadow_active =
+                segment_resolved.shadow_x != 0.0 || segment_resolved.shadow_y != 0.0;
             let shadow_offset_x =
-                segment_resolved.shadow * scale_x * segment_resolved.scale_x / 100.0;
+                segment_resolved.shadow_x * res_x * segment_resolved.scale_x / 100.0;
             let shadow_offset_y =
-                segment_resolved.shadow * scale_y * segment_resolved.scale_y / 100.0;
-            let shadow_color_rgba = segment_resolved.shadow_color.to_rgba();
-            let shadow_alpha = (255 - shadow_color_rgba[3] as u32) as u8;
+                segment_resolved.shadow_y * res_y * segment_resolved.scale_y / 100.0;
+            let shadow_color_rgba = segment_resolved.shadow_color.to_ass_components();
+            let shadow_alpha = segment_resolved.shadow_color.opacity();
 
             // Single pass over glyphs: cache lookup once, render outline + shadow + fill
             for glyph in &shaped.glyphs {
@@ -1259,11 +1791,12 @@ impl Compositor {
                 }
 
                 let cached = self.glyph_cache.get_or_rasterize(
+                    item.font_id,
                     segment_font,
                     glyph.glyph_id,
                     segment_font_size,
-                    glyph.bold,
-                    glyph.italic,
+                    item.faux_bold,
+                    item.faux_italic,
                 );
 
                 if cached.width == 0 || cached.height == 0 {
@@ -1286,8 +1819,25 @@ impl Compositor {
                         .0,
                     )
                 };
-                let glyph_width = ((cached.width as f64 * glyph.scale_x).round() as u32).max(1);
-                let glyph_height = ((cached.height as f64 * glyph.scale_y).round() as u32).max(1);
+                let scaled_width = ((cached.width as f64 * glyph.scale_x).round() as u32).max(1);
+                let scaled_height = ((cached.height as f64 * glyph.scale_y).round() as u32).max(1);
+                // Shear (\fax/\fay) warps the coverage bitmap before rotation.
+                let (work_bitmap, glyph_width, glyph_height) =
+                    if segment_resolved.shear_x != 0.0 || segment_resolved.shear_y != 0.0 {
+                        let (sheared, w, h) = RenderBuffer::shear_coverage_bitmap(
+                            &scaled_bitmap,
+                            scaled_width,
+                            scaled_height,
+                            segment_resolved.shear_x,
+                            segment_resolved.shear_y,
+                        );
+                        if sheared.is_empty() {
+                            continue;
+                        }
+                        (Cow::Owned(sheared), w, h)
+                    } else {
+                        (scaled_bitmap, scaled_width, scaled_height)
+                    };
                 let bearing_x = cached.bearing_x as f64 * glyph.scale_x;
                 let bearing_y = cached.bearing_y as f64 * glyph.scale_y;
 
@@ -1317,7 +1867,7 @@ impl Compositor {
                 // Use projective transform for exact perspective warping
                 let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
                     RenderBuffer::projective_transform_coverage_bitmap(
-                        &scaled_bitmap,
+                        &work_bitmap,
                         glyph_width,
                         glyph_height,
                         &matrix,
@@ -1334,20 +1884,22 @@ impl Compositor {
                 let final_gy = (org_y + py + rot_oy as f64) as i32;
 
                 // Adjust effect scales by perspective factor
-                let current_outline_scale = outline_scale * scale_factor;
+                let current_outline_x = outline_scale_x * scale_factor;
+                let current_outline_y = outline_scale_y * scale_factor;
                 let current_shadow_x = shadow_offset_x * scale_factor;
                 let current_shadow_y = shadow_offset_y * scale_factor;
 
-                // Render outline
+                // Render outline (independent X/Y radii)
                 if outline_active {
-                    effects::apply_outline(
+                    effects::apply_outline_xy(
                         buffer,
                         &rot_bitmap,
                         rot_w,
                         rot_h,
                         final_gx,
                         final_gy,
-                        current_outline_scale,
+                        current_outline_x,
+                        current_outline_y,
                         [
                             outline_color_rgba[0],
                             outline_color_rgba[1],
@@ -1383,10 +1935,10 @@ impl Compositor {
                     Some(edge) if glyph.x + glyph.advance / 2.0 > edge => {
                         segment_resolved.secondary_color
                     }
-                    _ => glyph.color,
+                    _ => segment_resolved.color,
                 };
-                let color = fill_color.to_rgba();
-                let color_alpha = 255 - color[3];
+                let color = fill_color.to_ass_components();
+                let color_alpha = fill_color.opacity();
 
                 for py in 0..rot_h {
                     for px in 0..rot_w {
@@ -1464,36 +2016,52 @@ impl Compositor {
             }
         }
 
-        // Apply clipping (after all segments rendered)
-        if let Some(clip_rect) = resolved.clip {
-            let scaled_clip = (
-                (clip_rect.0 as f64 * scale_x) as i32,
-                (clip_rect.1 as f64 * scale_y) as i32,
-                (clip_rect.2 as f64 * scale_x) as i32,
-                (clip_rect.3 as f64 * scale_y) as i32,
-            );
-            effects::apply_clip(buffer, scaled_clip);
-        }
-
-        if let Some(clip_rect) = resolved.inverse_clip {
-            let scaled_clip = (
-                (clip_rect.0 as f64 * scale_x) as i32,
-                (clip_rect.1 as f64 * scale_y) as i32,
-                (clip_rect.2 as f64 * scale_x) as i32,
-                (clip_rect.3 as f64 * scale_y) as i32,
-            );
-            effects::apply_inverse_clip(buffer, scaled_clip);
-        }
-
-        // Apply blur
+        // Blur before clipping: blurring after a clip would bleed
+        // pixels outside the clip region.
         if resolved.blur > 0.0 {
             effects::apply_blur(buffer, resolved.blur);
         }
+
+        // Apply clipping (after all segments rendered)
+        if let Some(clip_rect) = resolved.clip {
+            effects::apply_clip(buffer, scale_clip_rect(clip_rect, scale_x, scale_y));
+        }
+
+        if let Some(clip_rect) = resolved.inverse_clip {
+            effects::apply_inverse_clip(buffer, scale_clip_rect(clip_rect, scale_x, scale_y));
+        }
+
+        if let Some(vector) = &resolved.clip_vector {
+            Self::apply_vector_clip(buffer, vector, scale_x, scale_y, false);
+        }
+        if let Some(vector) = &resolved.inverse_clip_vector {
+            Self::apply_vector_clip(buffer, vector, scale_x, scale_y, true);
+        }
+    }
+
+    /// Render a vector clip shape as an alpha mask over the event buffer
+    /// (script coordinates, drawing scale) and apply or invert it.
+    fn apply_vector_clip(
+        buffer: &mut RenderBuffer,
+        clip: &VectorClip,
+        scale_x: f64,
+        scale_y: f64,
+        inverse: bool,
+    ) {
+        let unit = drawing_unit_scale(scale_x, scale_y, clip.scale.max(1));
+        let mut mask = match RenderBuffer::new(buffer.width, buffer.height) {
+            Ok(mask) => mask,
+            Err(_) => return,
+        };
+        super::drawing::DrawingParser::render_mask(&mut mask, &clip.drawing, 0.0, 0.0, unit);
+        effects::apply_alpha_mask(buffer, &mask, inverse);
     }
 
     /// Extract clean text from event text (remove override tags)
-    /// Returns (clean_text, is_drawing_mode)
-    fn extract_clean_text(&self, text: &str) -> (String, bool) {
+    /// Returns (clean_text, is_drawing_mode). `\n` is a space unless
+    /// `wrap_style` is 2; any `\pN` with N > 0 enables drawing mode.
+    #[cfg(test)]
+    fn extract_clean_text(&self, text: &str, wrap_style: i32) -> (String, bool) {
         let mut result = String::new();
         let mut in_tag = false;
         let mut drawing_mode = false;
@@ -1506,10 +2074,20 @@ impl Compositor {
                 '\\' => {
                     if let Some(&next) = chars.peek() {
                         match next {
-                            'N' | 'n' => {
+                            'N' => {
                                 chars.next();
                                 if !drawing_mode {
                                     result.push('\n');
+                                } else {
+                                    result.push('\\');
+                                    result.push(next);
+                                }
+                            }
+                            'n' => {
+                                chars.next();
+                                if !drawing_mode {
+                                    // Soft break: space, unless wrap mode 2.
+                                    result.push(if wrap_style == 2 { '\n' } else { ' ' });
                                 } else {
                                     result.push('\\');
                                     result.push(next);
@@ -1526,14 +2104,17 @@ impl Compositor {
                             }
                             'p' => {
                                 chars.next();
-                                if let Some(&level) = chars.peek() {
-                                    if level == '1' {
+                                let mut digits = String::new();
+                                while let Some(&d) = chars.peek() {
+                                    if d.is_ascii_digit() {
+                                        digits.push(d);
                                         chars.next();
-                                        drawing_mode = true;
-                                    } else if level == '0' {
-                                        chars.next();
-                                        drawing_mode = false;
+                                    } else {
+                                        break;
                                     }
+                                }
+                                if let Ok(mode) = digits.parse::<i32>() {
+                                    drawing_mode = mode > 0;
                                 }
                             }
                             _ if in_tag => {}
@@ -1594,6 +2175,137 @@ mod tests {
     }
 
     #[test]
+    fn test_line_global_tag_applies_after_first_segment() {
+        let style = Style::new("Default");
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,Hi{\\pos(100,100)}",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&style, &event);
+        assert_eq!(resolved.position, Some((100.0, 100.0)));
+        // Same as the leading placement
+        let event2 = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\pos(100,100)}Hi",
+        )
+        .unwrap();
+        let resolved2 = Compositor::resolve_style(&style, &event2);
+        assert_eq!(resolved2.position, Some((100.0, 100.0)));
+    }
+
+    #[test]
+    fn test_reset_to_named_style_switches_base() {
+        let mut alt = Style::new("Alt");
+        alt.primary_color = Color::new(0, 255, 0, 0); // opaque red
+        let base = Style::new("Default"); // opaque white
+        let styles = vec![base.clone(), alt];
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\pos(5,5)}A{\\rAlt}B",
+        )
+        .unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        // \rAlt segment resolves to the Alt style…
+        let segments = parse_text_segments(&event.text);
+        let seg =
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &styles, 0, 0, 2000);
+        assert_eq!(seg.color, Color::new(0, 255, 0, 0));
+        assert_eq!(seg.base_style.name, "Alt");
+        // …while line-global position survives the reset.
+        assert_eq!(seg.position, Some((5.0, 5.0)));
+        // Unknown style names fall back to the event style.
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,A{\\rNope}B")
+                .unwrap();
+        let segments = parse_text_segments(&event.text);
+        let seg =
+            Compositor::resolve_segment_style(&resolved, &segments[1], &event, &styles, 0, 0, 2000);
+        assert_eq!(seg.base_style.name, "Default");
+    }
+
+    fn render_event_text(text: &str, scaled: bool) -> RenderBuffer {
+        let mut comp = Compositor::new();
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let event = Event::parse_from_line(&format!(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{}",
+            text
+        ))
+        .unwrap();
+        let style = Style::new("Default");
+        let mut resolved = Compositor::resolve_style(&style, &event);
+        resolved.scaled_border_and_shadow = scaled;
+        let mut buf = RenderBuffer::new(320, 100).unwrap();
+        comp.composite_event(
+            &mut buf,
+            &event,
+            &resolved,
+            &fm,
+            500,
+            640,
+            200,
+            320,
+            100,
+            0,
+            &[],
+        );
+        buf
+    }
+
+    fn painted_pixels(buf: &RenderBuffer) -> usize {
+        buf.as_bytes().chunks_exact(4).filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn test_scaled_border_flag_changes_output() {
+        // Video is half the play resolution: scaled borders render at
+        // half size, unscaled at full script size.
+        let scaled = render_event_text("Hi", true);
+        let unscaled = render_event_text("Hi", false);
+        assert_ne!(scaled.as_bytes(), unscaled.as_bytes());
+        assert!(painted_pixels(&scaled) > 0);
+        assert!(painted_pixels(&unscaled) > 0);
+    }
+
+    #[test]
+    fn test_mixed_drawing_and_text_renders() {
+        let buf = render_event_text("{\\p1}m 0 0 l 40 0 l 40 40 l 0 40{\\p0}Hi", true);
+        assert!(painted_pixels(&buf) > 50);
+        // Drawing-only still renders
+        let buf = render_event_text("{\\p1}m 0 0 l 40 0 l 40 40 l 0 40", true);
+        assert!(painted_pixels(&buf) > 50);
+    }
+
+    #[test]
+    fn test_vector_clip_masks_render() {
+        // Vector clip over the left quarter of the frame (script coords).
+        // Centered text sits outside it, so `clip` removes everything and
+        // `iclip` keeps everything.
+        let shape = "m 0 0 l 160 0 l 160 200 l 0 200";
+        let plain = render_event_text("Hello", true);
+        assert!(painted_pixels(&plain) > 100);
+        let clipped = render_event_text(&format!("{{\\clip({})}}Hello", shape), true);
+        assert_ne!(plain.as_bytes(), clipped.as_bytes());
+        assert_eq!(painted_pixels(&clipped), 0);
+        let iclipped = render_event_text(&format!("{{\\iclip({})}}Hello", shape), true);
+        assert_eq!(painted_pixels(&iclipped), painted_pixels(&plain));
+    }
+
+    #[test]
+    fn test_extract_clean_text_wrap_aware() {
+        let comp = Compositor::new();
+        // \N always breaks; \n is a space except in wrap mode 2.
+        assert_eq!(comp.extract_clean_text("a\\Nb", 0).0, "a\nb");
+        assert_eq!(comp.extract_clean_text("a\\nb", 0).0, "a b");
+        assert_eq!(comp.extract_clean_text("a\\nb", 2).0, "a\nb");
+        // Tags stripped; any \pN>0 tracks drawing mode.
+        let (text, drawing) = comp.extract_clean_text("{\\b1\\p2}m 0 0", 0);
+        assert!(drawing);
+        assert!(text.contains("m 0 0"));
+        let (_, drawing) = comp.extract_clean_text("{\\p2}x{\\p0}y", 0);
+        assert!(!drawing);
+    }
+
+    #[test]
     fn test_positioned_anchor_is_converted_to_text_origin() {
         let style = Style::new("Default");
         let event = Event::parse_from_line(
@@ -1604,6 +2316,60 @@ mod tests {
         let (x, y) =
             Compositor::calculate_position(&resolved, 40.0, 20.0, 15.0, 200, 100, 200, 100);
         assert_eq!((x, y), (80.0, 85.0));
+    }
+
+    #[test]
+    fn test_complex_fade_alpha_direction() {
+        // \fade(255,0,255,...): invisible -> visible -> invisible
+        let cf = ComplexFade {
+            a1: 255,
+            a2: 0,
+            a3: 255,
+            t1: 0,
+            t2: 500,
+            t3: 2000,
+            t4: 2200,
+        };
+        assert!((complex_fade_opacity(&cf, 0) - 0.0).abs() < 1e-9); // at t1: a1
+        assert!((complex_fade_opacity(&cf, 250) - 0.5).abs() < 0.01); // mid ramp
+        assert!((complex_fade_opacity(&cf, 500) - 1.0).abs() < 1e-9); // at t2: a2
+        assert!((complex_fade_opacity(&cf, 1000) - 1.0).abs() < 1e-9); // hold
+        assert!((complex_fade_opacity(&cf, 2000) - 1.0).abs() < 1e-9); // at t3
+        assert!((complex_fade_opacity(&cf, 2100) - 0.5).abs() < 0.01);
+        assert!((complex_fade_opacity(&cf, 2200) - 0.0).abs() < 1e-9); // at t4
+        assert!((complex_fade_opacity(&cf, 5000) - 0.0).abs() < 1e-9); // after
+    }
+
+    #[test]
+    fn test_complex_fade_degenerate_timing() {
+        // Zero-length and inverted ranges: no division by zero, no panic
+        let cf = ComplexFade {
+            a1: 0,
+            a2: 128,
+            a3: 255,
+            t1: 500,
+            t2: 500,
+            t3: 300,
+            t4: 300,
+        };
+        for t in [0, 299, 300, 499, 500, 501, 10000] {
+            let o = complex_fade_opacity(&cf, t);
+            assert!((0.0..=1.0).contains(&o), "t={}", t);
+        }
+    }
+
+    #[test]
+    fn test_transform_acceleration_direction() {
+        // accel = 1 linear; > 1 starts slow; < 1 starts fast
+        assert!((Compositor::apply_accel(0.25, 1.0) - 0.25).abs() < 1e-9);
+        assert!(Compositor::apply_accel(0.25, 2.0) < 0.25);
+        assert!((Compositor::apply_accel(0.25, 2.0) - 0.0625).abs() < 1e-9);
+        assert!(Compositor::apply_accel(0.25, 0.5) > 0.25);
+        assert!((Compositor::apply_accel(0.25, 0.5) - 0.5).abs() < 1e-9);
+        assert_eq!(Compositor::apply_accel(0.0, 2.0), 0.0);
+        assert_eq!(Compositor::apply_accel(1.0, 2.0), 1.0);
+        // Non-finite accel falls back to linear
+        assert!((Compositor::apply_accel(0.3, f64::NAN) - 0.3).abs() < 1e-9);
     }
 
     #[test]
@@ -1775,57 +2541,127 @@ mod tests {
 
         // At 100ms the second syllable is still highlighted (secondary
         // color); at 1500ms both syllables have been sung (primary color).
-        let mut early = RenderBuffer::new(320, 100);
+        let mut early = RenderBuffer::new(320, 100).unwrap();
         comp.composite_event(
-            &mut early, &event, &resolved, &fm, 100, 320, 100, 320, 100, 0,
+            &mut early,
+            &event,
+            &resolved,
+            &fm,
+            100,
+            320,
+            100,
+            320,
+            100,
+            0,
+            &[],
         );
 
-        let mut late = RenderBuffer::new(320, 100);
+        let mut late = RenderBuffer::new(320, 100).unwrap();
         comp.composite_event(
-            &mut late, &event, &resolved, &fm, 1500, 320, 100, 320, 100, 0,
+            &mut late,
+            &event,
+            &resolved,
+            &fm,
+            1500,
+            320,
+            100,
+            320,
+            100,
+            0,
+            &[],
         );
 
         assert_ne!(early.as_bytes(), late.as_bytes());
     }
 
     #[test]
-    fn test_first_karaoke_syllable_starts_with_secondary_colour() {
+    fn test_karaoke_hard_switches_at_syllable_start() {
+        // \k: secondary before the syllable starts, primary from the exact
+        // start instant (not at the end). Second syllable starts at 1000ms.
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,{\\k100}A{\\k100}B",
+        )
+        .unwrap();
+        let style = Style::new("Default");
+        let resolved = Compositor::resolve_style(&style, &event);
+        let segments = parse_text_segments("{\\k100}A{\\k100}B");
+        let font = fallback_font();
+        let (syllables, map) = build_karaoke_timeline(&segments, &font, 48.0, 0.0);
+
+        // First syllable at elapsed 0: started -> primary
+        assert!(karaoke_is_primary(&syllables[0], 0));
+        // Second syllable before/at boundaries
+        assert!(!karaoke_is_primary(&syllables[1], 999));
+        assert!(karaoke_is_primary(&syllables[1], 1000));
+        assert!(karaoke_is_primary(&syllables[1], 1500));
+        assert_eq!(map, vec![Some(0), Some(1)]);
+        let _ = resolved;
+    }
+
+    #[test]
+    fn test_karaoke_outline_suppressed_after_start() {
+        // \ko: outline hidden once the syllable begins, not at its end.
+        assert!(!karaoke_outline_suppressed(999, 1000));
+        assert!(karaoke_outline_suppressed(1000, 1000));
+        assert!(karaoke_outline_suppressed(1500, 1000));
+    }
+
+    #[test]
+    fn test_karaoke_render_second_syllable_secondary_before_start() {
         let mut comp = Compositor::new();
         let mut fm = FontManager::new();
         fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
             .unwrap();
 
-        let event =
-            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\k100}A")
-                .unwrap();
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,{\\k100}A{\\k100}B",
+        )
+        .unwrap();
         let style = Style::new("Default");
         let resolved = Compositor::resolve_style(&style, &event);
 
-        let mut before = RenderBuffer::new(320, 100);
+        // At 100ms: first syllable sung (primary white), second still
+        // secondary (green). Both colors present.
+        let mut early = RenderBuffer::new(320, 100).unwrap();
         comp.composite_event(
-            &mut before,
+            &mut early,
             &event,
             &resolved,
             &fm,
-            0,
-            320,
             100,
             320,
             100,
+            320,
+            100,
             0,
+            &[],
         );
-        assert!(before
+        let early_bytes = early.as_bytes();
+        assert!(early_bytes
+            .chunks_exact(4)
+            .any(|pixel| pixel[1] > 200 && pixel[0] < 50 && pixel[2] < 50 && pixel[3] > 0));
+        assert!(early_bytes
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200 && pixel[3] > 0));
+
+        // At 2500ms both syllables sung: only primary remains.
+        let mut late = RenderBuffer::new(320, 100).unwrap();
+        comp.composite_event(
+            &mut late,
+            &event,
+            &resolved,
+            &fm,
+            2500,
+            320,
+            100,
+            320,
+            100,
+            0,
+            &[],
+        );
+        assert!(!late
             .as_bytes()
             .chunks_exact(4)
             .any(|pixel| pixel[1] > 200 && pixel[0] < 50 && pixel[2] < 50 && pixel[3] > 0));
-
-        let mut after = RenderBuffer::new(320, 100);
-        comp.composite_event(
-            &mut after, &event, &resolved, &fm, 1_000, 320, 100, 320, 100, 0,
-        );
-        assert!(after
-            .as_bytes()
-            .chunks_exact(4)
-            .any(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200 && pixel[3] > 0));
     }
 }

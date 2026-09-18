@@ -3,11 +3,9 @@
 // use subrass — see the worker example for the off-thread variant.
 import init, { SubtitleRenderer } from "../../pkg/subrass.js";
 import type { RenderBackend, SubtitleSummary } from "./types.ts";
+import { dbg } from "./debug.ts";
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:direct-backend]", ...args);
-}
+const log = dbg("direct-backend");
 
 export class DirectBackend implements RenderBackend {
   readonly kind = "main-thread";
@@ -15,7 +13,7 @@ export class DirectBackend implements RenderBackend {
   private canvas: HTMLCanvasElement | null = null;
 
   async init(): Promise<void> {
-    dbg("init() begin", {
+    log("init() begin", {
       importMetaUrl: import.meta.url,
       // Default init() fetches subrass_bg.wasm next to the JS module.
       expectedWasmUrl: new URL("../../pkg/subrass_bg.wasm", import.meta.url).href,
@@ -23,25 +21,25 @@ export class DirectBackend implements RenderBackend {
     const t0 = performance.now();
     try {
       const exports = await init();
-      dbg("init() ok", {
+      log("init() ok", {
         ms: +(performance.now() - t0).toFixed(1),
         hasExports: !!exports,
         hasMalloc: typeof (exports as { __wbindgen_malloc?: unknown })?.__wbindgen_malloc,
       });
     } catch (err) {
-      dbg("init() FAILED", { ms: +(performance.now() - t0).toFixed(1), err });
+      log("init() FAILED", { ms: +(performance.now() - t0).toFixed(1), err });
       throw err;
     }
   }
 
   setFrameTarget(canvas: HTMLCanvasElement): void {
-    dbg("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
+    log("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
     this.canvas = canvas;
     this.renderer?.set_canvas(canvas);
   }
 
   async loadAss(content: string): Promise<SubtitleSummary> {
-    dbg("loadAss begin", { contentBytes: content.length, hasCanvas: !!this.canvas });
+    log("loadAss begin", { contentBytes: content.length, hasCanvas: !!this.canvas });
     if (!this.canvas) throw new Error("setFrameTarget() must be called before loadAss()");
     try {
       this.renderer = new SubtitleRenderer(content);
@@ -52,33 +50,45 @@ export class DirectBackend implements RenderBackend {
         styles: this.renderer.get_style_count(),
         events: this.renderer.get_event_count(),
       };
-      dbg("loadAss ok", summary);
+      log("loadAss ok", summary);
       return summary;
     } catch (err) {
-      dbg("loadAss FAILED (SubtitleRenderer needs initialized wasm)", err);
+      log("loadAss FAILED (SubtitleRenderer needs initialized wasm)", err);
       throw err;
     }
   }
 
   resize(width: number, height: number): void {
     if (width > 0 && height > 0) {
-      this.renderer?.set_video_size(width, height);
+      try {
+        this.renderer?.set_video_size(width, height);
+      } catch (err) {
+        log("set_video_size rejected", { width, height, err });
+      }
     }
   }
 
   loadFont(name: string, data: Uint8Array): void {
-    dbg("loadFont", { name, bytes: data.byteLength });
-    this.renderer?.load_font(name, data);
+    log("loadFont", { name, bytes: data.byteLength });
+    try {
+      this.renderer?.load_font(name, data);
+    } catch (err) {
+      log("load_font rejected", { name, err });
+    }
   }
 
   renderFrame(timeMs: number): void {
     if (this.renderer && this.canvas) {
-      this.renderer.render_frame(timeMs);
+      try {
+        this.renderer.render_frame(timeMs);
+      } catch (err) {
+        log("render_frame rejected", { timeMs, err });
+      }
     }
   }
 
   dispose(): void {
-    dbg("dispose");
+    log("dispose");
     this.renderer?.free();
     this.renderer = null;
   }

@@ -6,15 +6,13 @@ import type { AssEvent, RenderBackend, ScriptInfo, SubtitleSummary } from "./typ
 import { formatClock, lastEventEndMs } from "./ass.ts";
 import { Player } from "./player.ts";
 import { ActiveEventList, byId, showError, updateSummary } from "./ui.ts";
+import { dbg } from "./debug.ts";
 
 const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const END_SLACK_MS = 3000;
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:app]", ...args);
-}
+const log = dbg("app");
 
 export interface DemoOptions {
   /** Subtitle file fetched on startup. Defaults to the bundled sample. */
@@ -22,7 +20,7 @@ export interface DemoOptions {
 }
 
 export async function startDemo(backend: RenderBackend, options: DemoOptions = {}): Promise<void> {
-  dbg("startDemo begin", {
+  log("startDemo begin", {
     backendKind: backend.kind,
     sampleUrl: options.sampleUrl ?? "/sample.ass",
     href: typeof location !== "undefined" ? location.href : "(no location)",
@@ -53,10 +51,10 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     },
   });
 
-  dbg("calling backend.init() — this must initialize WASM for the renderer");
+  log("calling backend.init() — this must initialize WASM for the renderer");
   const initStarted = performance.now();
   await backend.init();
-  dbg("backend.init() done", {
+  log("backend.init() done", {
     ms: +(performance.now() - initStarted).toFixed(1),
     // AssDoc lives on the main thread and needs the module's init() to have
     // run on this thread. WorkerBackend.init() now calls init() for both the
@@ -68,32 +66,33 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   });
 
   backend.setFrameTarget(canvas);
-  dbg("setFrameTarget done", { canvasW: canvas.width, canvasH: canvas.height });
+  log("setFrameTarget done", { canvasW: canvas.width, canvasH: canvas.height });
 
   // --- Subtitle loading -----------------------------------------------------
 
   async function loadAss(content: string): Promise<void> {
-    dbg("loadAss begin", {
+    log("loadAss begin", {
       contentBytes: content.length,
       contentHead: content.slice(0, 40).replace(/\n/g, "\\n"),
     });
     doc?.free();
     try {
-      dbg("constructing AssDoc on main thread (requires wasm bindings)");
+      log("constructing AssDoc on main thread (requires wasm bindings)");
       doc = new AssDoc(content);
-      dbg("AssDoc constructed ok");
+      log("AssDoc constructed ok");
     } catch (err) {
-      dbg("AssDoc constructor FAILED — classic symptom: wasm is undefined", {
+      log("AssDoc constructor FAILED", {
         error: err,
         message: (err as Error)?.message,
         hint:
           "pkg/subrass.js keeps a module-level `wasm` set only by init()/initSync(). " +
-          "If backend.init() only ran inside a Worker, the main thread never set it.",
+          "Every backend init() runs it on the main thread; a failure here " +
+          "means init() threw or never completed.",
       });
       throw err;
     }
     summary = await backend.loadAss(content);
-    dbg("backend.loadAss done", { summary });
+    log("backend.loadAss done", { summary });
     loaded = true;
 
     const events = doc!.get_dialogue_events() as AssEvent[];
@@ -188,11 +187,14 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
 
   // --- File inputs --------------------------------------------------------------
 
+  let videoObjectUrl: string | null = null;
   byId<HTMLInputElement>("videoInput").addEventListener("change", (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     byId("videoName").textContent = file.name;
-    player.loadVideoUrl(URL.createObjectURL(file));
+    if (videoObjectUrl) URL.revokeObjectURL(videoObjectUrl);
+    videoObjectUrl = URL.createObjectURL(file);
+    player.loadVideoUrl(videoObjectUrl);
   });
 
   byId<HTMLInputElement>("assInput").addEventListener("change", async (e) => {
@@ -231,20 +233,20 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
 
   try {
     const sampleUrl = options.sampleUrl ?? "/sample.ass";
-    dbg("fetching sample", sampleUrl);
+    log("fetching sample", sampleUrl);
     const resp = await fetch(sampleUrl);
-    dbg("sample fetch", { ok: resp.ok, status: resp.status, url: resp.url });
+    log("sample fetch", { ok: resp.ok, status: resp.status, url: resp.url });
     if (resp.ok) {
       byId("assName").textContent = "sample.ass";
       await loadAss(await resp.text());
-      dbg("sample loadAss finished successfully");
+      log("sample loadAss finished successfully");
     } else {
-      dbg("sample not loaded (non-OK response)");
+      log("sample not loaded (non-OK response)");
     }
   } catch (err) {
-    dbg("sample auto-load failed", err);
+    log("sample auto-load failed", err);
     console.warn("Could not auto-load the sample subtitles:", err);
   }
 
-  dbg("startDemo complete", { loaded, hasDoc: !!doc, hasSummary: !!summary });
+  log("startDemo complete", { loaded, hasDoc: !!doc, hasSummary: !!summary });
 }

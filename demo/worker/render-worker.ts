@@ -1,115 +1,104 @@
-// The worker side of the worker example. Owns the WASM SubtitleRenderer
-// and answers render requests with RGBA frames, transferring the pixel
-// buffer instead of copying it.
-//
-// Protocol (mirrored by shared/worker-backend.ts):
-//   main  -> worker: init | load | font | resize | render{timeMs, seq}
-//   worker -> main:  ready | loaded{summary} | frame{seq, w, h, buffer} | error
+// Worker side of the render protocol: owns the WASM SubtitleRenderer,
+// renders frames off the main thread, and transfers RGBA buffers back.
+// Every response echoes the incoming `requestId`. Renderer failures are
+// reported as { kind: "error", requestId, error } instead of crashing
+// the worker.
 import init, { SubtitleRenderer } from "../../pkg/subrass.js";
+import { dbg } from "../shared/debug.ts";
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:render-worker]", ...args);
-}
-
-type MainMessage =
-  | { type: "init" }
-  | { type: "load"; content: string }
-  | { type: "font"; name: string; data: ArrayBuffer }
-  | { type: "resize"; w: number; h: number }
-  | { type: "render"; timeMs: number; seq: number };
-
-// Minimal structural typing for the worker scope, so this file does not
-// depend on the DOM/WebWorker lib split.
-const scope = self as unknown as {
-  onmessage: ((e: MessageEvent<MainMessage>) => void) | null;
-  postMessage(message: unknown, transfer?: Transferable[]): void;
-};
+const log = dbg("render-worker");
 
 let renderer: SubtitleRenderer | null = null;
-let frameW = 1920;
-let frameH = 1080;
+let frameW = 0;
+let frameH = 0;
 
-dbg("worker script loaded", {
-  importMetaUrl: import.meta.url,
-  expectedWasm: new URL("../../pkg/subrass_bg.wasm", import.meta.url).href,
-});
+interface InMessage {
+  kind: string;
+  requestId?: number;
+  content?: string;
+  timeMs?: number;
+  w?: number;
+  h?: number;
+  name?: string;
+  data?: ArrayBuffer;
+}
 
-scope.onmessage = async (e) => {
-  const msg = e.data;
-  try {
-    switch (msg.type) {
-      case "init": {
-        dbg("init: calling wasm init()");
-        const t0 = performance.now();
-        const exports = await init();
-        dbg("init: wasm ready", {
-          ms: +(performance.now() - t0).toFixed(1),
-          hasMalloc: typeof (exports as { __wbindgen_malloc?: unknown })?.__wbindgen_malloc,
-        });
-        scope.postMessage({ type: "ready" });
-        break;
+function fail(requestId: number | undefined, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  log("renderer call failed", { requestId, message });
+  self.postMessage({ kind: "error", requestId, error: message });
+}
+
+self.onmessage = async (event: MessageEvent<InMessage>) => {
+  const msg = event.data;
+  switch (msg.kind) {
+    case "init": {
+      try {
+        await init();
+        log("init ok, posting ready");
+        self.postMessage({ kind: "ready" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log("init FAILED", message);
+        self.postMessage({ kind: "fatal", error: message });
       }
-      case "load": {
-        dbg("load", { contentBytes: msg.content.length });
+      break;
+    }
+    case "loadAss": {
+      try {
         renderer?.free();
-        renderer = new SubtitleRenderer(msg.content);
-        const res = renderer.get_play_resolution();
-        frameW = res[0] || 1920;
-        frameH = res[1] || 1080;
-        renderer.set_video_size(frameW, frameH);
+        renderer = new SubtitleRenderer(msg.content ?? "");
+        if (frameW > 0 && frameH > 0) {
+          renderer.set_video_size(frameW, frameH);
+        }
+        const [w, h] = renderer.get_play_resolution();
         const summary = {
-          resolution: [frameW, frameH],
+          resolution: [w, h] as [number, number],
           styles: renderer.get_style_count(),
           events: renderer.get_event_count(),
         };
-        dbg("load ok", summary);
-        scope.postMessage({ type: "loaded", summary });
-        break;
+        log("loadAss ok", { requestId: msg.requestId, ...summary });
+        self.postMessage({ kind: "loaded", requestId: msg.requestId, summary });
+      } catch (err) {
+        fail(msg.requestId, err);
       }
-      case "font": {
-        dbg("font", { name: msg.name, bytes: msg.data.byteLength });
-        renderer?.load_font(msg.name, new Uint8Array(msg.data));
-        break;
+      break;
+    }
+    case "loadFont": {
+      try {
+        renderer?.load_font(msg.name ?? "font", new Uint8Array(msg.data ?? []));
+      } catch (err) {
+        fail(msg.requestId, err);
       }
-      case "resize": {
-        frameW = msg.w;
-        frameH = msg.h;
-        renderer?.set_video_size(msg.w, msg.h);
-        break;
+      break;
+    }
+    case "setVideoSize": {
+      try {
+        frameW = msg.w ?? 0;
+        frameH = msg.h ?? 0;
+        renderer?.set_video_size(frameW, frameH);
+      } catch (err) {
+        fail(msg.requestId, err);
       }
-      case "render": {
-        if (!renderer) break;
-        renderer.render_frame(msg.timeMs);
+      break;
+    }
+    case "render": {
+      try {
+        if (!renderer) throw new Error("No subtitle file loaded");
+        renderer.render_frame(msg.timeMs ?? 0);
         const size = renderer.get_frame_size();
         const bytes = renderer.get_frame_data();
-        const w = size[0] || frameW;
-        const h = size[1] || frameH;
-/*         dbg("render", {
-          timeMs: msg.timeMs,
-          seq: msg.seq,
-          w,
-          h,
-          bytesLen: bytes.byteLength,
-        }); */
-        scope.postMessage(
-          {
-            type: "frame",
-            seq: msg.seq,
-            w,
-            h,
-            buffer: bytes.buffer,
-          },
-          [bytes.buffer],
+        self.postMessage(
+          { kind: "frame", requestId: msg.requestId, w: size[0], h: size[1], bytes: bytes.buffer },
+          { transfer: [bytes.buffer] },
         );
-        break;
+      } catch (err) {
+        fail(msg.requestId, err);
       }
+      break;
     }
-  } catch (err) {
-    dbg("handler error", msg.type, err);
-    scope.postMessage({
-      type: "error",
-      message: String((err as Error | undefined)?.message ?? err),
-    });
+    default:
+      log("unknown message", msg);
+      break;
   }
 };

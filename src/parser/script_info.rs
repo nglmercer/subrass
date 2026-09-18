@@ -15,7 +15,8 @@ pub fn parse_script_info(lines: &[&str], start_line: usize) -> Result<ScriptInfo
 
         // Parse key:value pairs
         if let Some((key, value)) = parse_key_value(line) {
-            info.set_field(&key, &value);
+            info.set_field(&key, &value)
+                .map_err(|e| ParseError::line_error(start_line + i, e))?;
         } else {
             return Err(ParseError::line_error(
                 start_line + i,

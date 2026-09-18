@@ -1,3 +1,4 @@
+use crate::types::style::ssa_alignment_to_ass;
 use crate::types::Style;
 
 use super::errors::ParseError;
@@ -7,6 +8,9 @@ use super::errors::ParseError;
 const SSA_DEFAULT_FORMAT: &str = "Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, \
     TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, \
     MarginL, MarginR, MarginV, AlphaLevel, Encoding";
+
+/// Defensive cap on styles per file (untrusted subtitle input).
+pub const MAX_STYLES: usize = 10_000;
 
 pub fn parse_styles(
     lines: &[&str],
@@ -24,20 +28,34 @@ pub fn parse_styles(
             continue;
         }
 
-        // Parse format line
-        if let Some(fmt) = line.strip_prefix("Format:") {
+        // Parse format line (case-insensitive keyword)
+        if let Some(fmt) = strip_prefix_ci(line, "Format:") {
             format = Some(parse_format_columns(fmt));
             continue;
         }
 
-        // Parse style lines
-        if let Some(style_data) = line.strip_prefix("Style:") {
+        // Parse style lines (case-insensitive keyword)
+        if let Some(style_data) = strip_prefix_ci(line, "Style:") {
+            if styles.len() >= MAX_STYLES {
+                return Err(ParseError::line_error(
+                    start_line + i,
+                    format!("Too many styles (limit {MAX_STYLES})"),
+                ));
+            }
             let style = parse_style_line(style_data, &format, is_ssa, start_line + i)?;
             styles.push(style);
         }
     }
 
     Ok(styles)
+}
+
+fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&line[prefix.len()..])
+    } else {
+        None
+    }
 }
 
 fn parse_format_columns(fmt: &str) -> Vec<String> {
@@ -91,7 +109,7 @@ fn parse_style_by_columns(data: &str, columns: &[String]) -> Result<Style, Strin
         if column == "name" && !value.is_empty() {
             has_name = true;
         }
-        apply_style_field(&mut style, column, value);
+        apply_style_field(&mut style, column, value)?;
     }
 
     if !has_name {
@@ -101,60 +119,75 @@ fn parse_style_by_columns(data: &str, columns: &[String]) -> Result<Style, Strin
     Ok(style)
 }
 
-fn apply_style_field(style: &mut Style, column: &str, value: &str) {
+/// Strict field application: malformed non-empty values are errors.
+/// Empty values keep the style default (genuinely optional input).
+fn apply_style_field(style: &mut Style, column: &str, value: &str) -> Result<(), String> {
     let value = value.trim();
-    let as_bool = || value.parse::<i32>().map(|v| v != 0).unwrap_or(false);
-    let as_i32 = || value.parse::<i32>().unwrap_or(0);
-    let as_f64 = || value.parse::<f64>().unwrap_or(0.0);
+    if value.is_empty() {
+        return Ok(());
+    }
+    let as_bool = || {
+        value
+            .parse::<i32>()
+            .map(|v| v != 0)
+            .map_err(|_| format!("Invalid {} value: {}", column, value))
+    };
+    let as_i32 = || {
+        value
+            .parse::<i32>()
+            .map_err(|_| format!("Invalid {} value: {}", column, value))
+    };
+    let as_f64 = || {
+        let v: f64 = value
+            .parse()
+            .map_err(|_| format!("Invalid {} value: {}", column, value))?;
+        if !v.is_finite() {
+            return Err(format!("Invalid {} value (non-finite): {}", column, value));
+        }
+        Ok(v)
+    };
+    let as_color = || {
+        value
+            .parse()
+            .map_err(|e| format!("Invalid {} value {:?}: {}", column, value, e))
+    };
 
     match column {
         "name" => style.name = value.to_string(),
         "fontname" => style.font_name = value.to_string(),
-        "fontsize" => style.font_size = as_f64(),
-        "primarycolour" => style.primary_color = value.parse().unwrap_or_default(),
-        "secondarycolour" => style.secondary_color = value.parse().unwrap_or_default(),
+        "fontsize" => style.font_size = as_f64()?,
+        "primarycolour" => style.primary_color = as_color()?,
+        "secondarycolour" => style.secondary_color = as_color()?,
         // SSA's TertiaryColour fills the outline role
-        "outlinecolour" | "tertiarycolour" => {
-            style.outline_color = value.parse().unwrap_or_default()
-        }
-        "backcolour" => style.back_color = value.parse().unwrap_or_default(),
-        "bold" => style.bold = as_bool(),
-        "italic" => style.italic = as_bool(),
-        "underline" => style.underline = as_bool(),
-        "strikeout" => style.strike_out = as_bool(),
-        "scalex" => style.scale_x = as_f64(),
-        "scaley" => style.scale_y = as_f64(),
-        "spacing" => style.spacing = as_f64(),
-        "angle" => style.angle = as_f64(),
-        "borderstyle" => style.border_style = as_i32(),
-        "outline" => style.outline = as_f64(),
-        "shadow" => style.shadow = as_f64(),
-        "alignment" => style.alignment = as_i32(),
-        "marginl" => style.margin_l = as_i32(),
-        "marginr" => style.margin_r = as_i32(),
-        "marginv" => style.margin_v = as_i32(),
+        "outlinecolour" | "tertiarycolour" => style.outline_color = as_color()?,
+        "backcolour" => style.back_color = as_color()?,
+        "bold" => style.bold = as_bool()?,
+        "italic" => style.italic = as_bool()?,
+        "underline" => style.underline = as_bool()?,
+        "strikeout" => style.strike_out = as_bool()?,
+        "scalex" => style.scale_x = as_f64()?,
+        "scaley" => style.scale_y = as_f64()?,
+        "spacing" => style.spacing = as_f64()?,
+        "angle" => style.angle = as_f64()?,
+        "borderstyle" => style.border_style = as_i32()?,
+        "outline" => style.outline = as_f64()?,
+        "shadow" => style.shadow = as_f64()?,
+        "alignment" => style.alignment = as_i32()?,
+        "marginl" => style.margin_l = as_i32()?,
+        "marginr" => style.margin_r = as_i32()?,
+        "marginv" => style.margin_v = as_i32()?,
         "alphalevel" => {
             // SSA alpha level applies to the whole style (0 = opaque)
-            let alpha = as_i32().clamp(0, 255) as u8;
+            let alpha = as_i32()?.clamp(0, 255) as u8;
             style.primary_color.alpha = alpha;
             style.secondary_color.alpha = alpha;
             style.outline_color.alpha = alpha;
             style.back_color.alpha = alpha;
         }
-        "encoding" => style.encoding = as_i32(),
+        "encoding" => style.encoding = as_i32()?,
         _ => {}
     }
-}
-
-/// Convert legacy SSA alignment values to ASS numpad alignment:
-/// SSA 1-3 (bottom) stay, 5-7 (top) become 7-9, 9-11 (middle) become 4-6.
-fn ssa_alignment_to_ass(alignment: i32) -> i32 {
-    match alignment {
-        1..=3 => alignment,
-        5..=7 => alignment + 2,
-        9..=11 => alignment - 5,
-        _ => 2,
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -283,5 +316,32 @@ mod tests {
         assert_eq!(ssa_alignment_to_ass(6), 8);
         assert_eq!(ssa_alignment_to_ass(10), 5);
         assert_eq!(ssa_alignment_to_ass(99), 2);
+    }
+
+    #[test]
+    fn test_malformed_style_values_error() {
+        let fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, Bold, ScaleX, Outline, Alignment, MarginL, Encoding";
+        for bad in [
+            "Bad,Arial,xx,&H00FFFFFF&,-1,100,2,2,10,1",  // fontsize
+            "Bad,Arial,48,notacolor,-1,100,2,2,10,1",    // color
+            "Bad,Arial,48,&H00FFFFFF&,xx,100,2,2,10,1",  // bold
+            "Bad,Arial,48,&H00FFFFFF&,-1,NaN,2,2,10,1",  // non-finite
+            "Bad,Arial,48,&H00FFFFFF&,-1,100,2,xx,10,1", // alignment
+        ] {
+            let line = format!("Style: {}", bad);
+            let lines = vec![fmt, line.as_str()];
+            assert!(parse_styles(&lines, 0, false).is_err(), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn test_empty_style_values_keep_defaults() {
+        let lines = vec![
+            "Format: Name, Fontname, Fontsize, Bold",
+            "Style: Minimal,Verdana,,",
+        ];
+        let styles = parse_styles(&lines, 0, false).unwrap();
+        assert_eq!(styles[0].font_size, 48.0);
+        assert!(!styles[0].bold);
     }
 }

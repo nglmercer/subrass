@@ -1,10 +1,20 @@
 use crate::renderer::buffer::RenderBuffer;
 
+/// Defensive caps for untrusted drawing input.
+pub const MAX_DRAWING_COMMANDS: usize = 100_000;
+pub const MAX_DRAWING_POINTS: usize = 1_000_000;
+/// Subdivisions per spline span.
+const SPLINE_STEPS: usize = 8;
+
 #[derive(Debug, Clone)]
 enum DrawCommand {
+    /// Move to a point. `close_previous` distinguishes `m` (close the
+    /// previous outline into its own polygon) from `n` (move without
+    /// closing: the outline continues with a pen jump).
     MoveTo {
         x: f64,
         y: f64,
+        close_previous: bool,
     },
     LineTo {
         x: f64,
@@ -17,6 +27,11 @@ enum DrawCommand {
         y2: f64,
         x: f64,
         y: f64,
+    },
+    /// Cubic B-spline (`s`, extended by `p`, closed by `c`).
+    SplineTo {
+        points: Vec<(f64, f64)>,
+        closed: bool,
     },
     Close,
 }
@@ -32,14 +47,10 @@ impl DrawingParser {
         scale: f64,
         color: [u8; 4],
     ) {
-        let commands = Self::parse(text);
-        if commands.is_empty() {
+        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
             return;
         }
-
-        let polygons = Self::commands_to_polygons(&commands);
-
-        for polygon in &polygons {
+        for polygon in &Self::polygons(text) {
             if polygon.len() < 3 {
                 continue;
             }
@@ -47,26 +58,98 @@ impl DrawingParser {
         }
     }
 
+    /// Render a drawing as a white alpha mask (alpha 255 inside shapes).
+    pub fn render_mask(buffer: &mut RenderBuffer, text: &str, x: f64, y: f64, scale: f64) {
+        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        buffer.pixels.fill(0);
+        for polygon in &Self::polygons(text) {
+            if polygon.len() < 3 {
+                continue;
+            }
+            Self::fill_polygon_mask(buffer, polygon, x, y, scale);
+        }
+    }
+
+    /// Measure a drawing's bounding box in drawing units.
+    /// Returns (min_x, min_y, width, height), or None when empty.
+    pub fn measure(text: &str) -> Option<(f64, f64, f64, f64)> {
+        let polygons = Self::polygons(text);
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut any = false;
+        for polygon in &polygons {
+            for &(x, y) in polygon {
+                any = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        if !any {
+            return None;
+        }
+        Some((
+            min_x,
+            min_y,
+            (max_x - min_x).max(0.0),
+            (max_y - min_y).max(0.0),
+        ))
+    }
+
+    fn polygons(text: &str) -> Vec<Vec<(f64, f64)>> {
+        let commands = Self::parse(text);
+        Self::commands_to_polygons(&commands)
+    }
+
+    /// Parse ASS drawing commands:
+    /// m = move (close previous), n = move (no close), l = line,
+    /// b = cubic Bezier, s = cubic B-spline, p = extend spline,
+    /// c = close spline/outline.
     fn parse(text: &str) -> Vec<DrawCommand> {
         let mut commands = Vec::new();
         let mut chars = text.chars().peekable();
-        let mut start_x = 0.0_f64;
-        let mut start_y = 0.0_f64;
+
+        macro_rules! push {
+            ($cmd:expr) => {
+                if commands.len() < MAX_DRAWING_COMMANDS {
+                    commands.push($cmd);
+                } else {
+                    return commands;
+                }
+            };
+        }
 
         while let Some(&ch) = chars.peek() {
             match ch {
                 'm' | 'M' => {
                     chars.next();
                     while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
-                        start_x = x;
-                        start_y = y;
-                        commands.push(DrawCommand::MoveTo { x, y });
+                        push!(DrawCommand::MoveTo {
+                            x,
+                            y,
+                            close_previous: true
+                        });
+                    }
+                }
+                'n' | 'N' => {
+                    chars.next();
+                    while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
+                        push!(DrawCommand::MoveTo {
+                            x,
+                            y,
+                            close_previous: false
+                        });
                     }
                 }
                 'l' | 'L' => {
                     chars.next();
                     while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
-                        commands.push(DrawCommand::LineTo { x, y });
+                        push!(DrawCommand::LineTo { x, y });
                     }
                 }
                 'b' | 'B' => {
@@ -76,7 +159,7 @@ impl DrawingParser {
                         Self::next_coord_pair(&mut chars),
                         Self::next_coord_pair(&mut chars),
                     ) {
-                        commands.push(DrawCommand::CurveTo {
+                        push!(DrawCommand::CurveTo {
                             x1,
                             y1,
                             x2,
@@ -86,40 +169,57 @@ impl DrawingParser {
                         });
                     }
                 }
-                'n' | 'N' => {
+                's' | 'S' => {
                     chars.next();
-                    let mut prev_x = start_x;
-                    let mut prev_y = start_y;
-                    if let Some(cmd) = commands.last() {
-                        match cmd {
-                            DrawCommand::MoveTo { x, y }
-                            | DrawCommand::LineTo { x, y }
-                            | DrawCommand::CurveTo { x, y, .. } => {
-                                prev_x = *x;
-                                prev_y = *y;
-                            }
-                            DrawCommand::Close => {}
-                        }
+                    let mut points = Vec::new();
+                    while let Some(pt) = Self::next_coord_pair(&mut chars) {
+                        points.push(pt);
                     }
-                    while let (Some((x1, y1)), Some((x2, y2))) = (
-                        Self::next_coord_pair(&mut chars),
-                        Self::next_coord_pair(&mut chars),
-                    ) {
-                        commands.push(DrawCommand::CurveTo {
-                            x1: prev_x,
-                            y1: prev_y,
-                            x2: x1,
-                            y2: y1,
-                            x: x2,
-                            y: y2,
+                    if points.len() >= 2 {
+                        push!(DrawCommand::SplineTo {
+                            points,
+                            closed: false,
                         });
-                        prev_x = x2;
-                        prev_y = y2;
+                    } else if let Some(&(x, y)) = points.first() {
+                        push!(DrawCommand::LineTo { x, y });
+                    }
+                }
+                'p' | 'P' => {
+                    chars.next();
+                    let mut points = Vec::new();
+                    while let Some(pt) = Self::next_coord_pair(&mut chars) {
+                        points.push(pt);
+                    }
+                    if points.is_empty() {
+                        continue;
+                    }
+                    // Extend the open spline, or start one from the
+                    // current point when there is none.
+                    match commands.last_mut() {
+                        Some(DrawCommand::SplineTo {
+                            points: existing,
+                            closed: false,
+                        }) => existing.extend(points),
+                        _ => {
+                            if points.len() >= 2 {
+                                push!(DrawCommand::SplineTo {
+                                    points,
+                                    closed: false,
+                                });
+                            } else if let Some(&(x, y)) = points.first() {
+                                push!(DrawCommand::LineTo { x, y });
+                            }
+                        }
                     }
                 }
                 'c' | 'C' => {
                     chars.next();
-                    commands.push(DrawCommand::Close);
+                    // Close an open spline (connect end to start), then
+                    // close the outline.
+                    if let Some(DrawCommand::SplineTo { closed, .. }) = commands.last_mut() {
+                        *closed = true;
+                    }
+                    push!(DrawCommand::Close);
                 }
                 ' ' | ',' | '\n' | '\r' | '\t' => {
                     chars.next();
@@ -137,6 +237,9 @@ impl DrawingParser {
         Self::skip_whitespace(chars);
         let (x, _) = Self::parse_number(chars)?;
         let (y, _) = Self::parse_number(chars)?;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
         Some((x, y))
     }
 
@@ -205,20 +308,38 @@ impl DrawingParser {
         Some((sign * value, ()))
     }
 
+    fn push_point(polygon: &mut Vec<(f64, f64)>, pt: (f64, f64)) {
+        if polygon.len() < MAX_DRAWING_POINTS {
+            polygon.push(pt);
+        }
+    }
+
     fn commands_to_polygons(commands: &[DrawCommand]) -> Vec<Vec<(f64, f64)>> {
         let mut polygons = Vec::new();
         let mut current_polygon = Vec::new();
 
         for cmd in commands {
             match cmd {
-                DrawCommand::MoveTo { x, y } => {
-                    if current_polygon.len() >= 3 {
-                        polygons.push(std::mem::take(&mut current_polygon));
+                DrawCommand::MoveTo {
+                    x,
+                    y,
+                    close_previous,
+                } => {
+                    if *close_previous {
+                        if current_polygon.len() >= 3 {
+                            polygons.push(std::mem::take(&mut current_polygon));
+                        } else {
+                            current_polygon.clear();
+                        }
+                        current_polygon = vec![(*x, *y)];
+                    } else {
+                        // `n`: pen jump without closing; the outline
+                        // continues (the fill closes it implicitly).
+                        Self::push_point(&mut current_polygon, (*x, *y));
                     }
-                    current_polygon = vec![(*x, *y)];
                 }
                 DrawCommand::LineTo { x, y } => {
-                    current_polygon.push((*x, *y));
+                    Self::push_point(&mut current_polygon, (*x, *y));
                 }
                 DrawCommand::CurveTo {
                     x1,
@@ -229,7 +350,7 @@ impl DrawingParser {
                     y,
                 } => {
                     if let Some(&last) = current_polygon.last() {
-                        let steps = 8;
+                        let steps = SPLINE_STEPS;
                         for i in 1..=steps {
                             let t = i as f64 / steps as f64;
                             let mt = 1.0 - t;
@@ -241,8 +362,23 @@ impl DrawingParser {
                                 + 3.0 * mt.powi(2) * t * y1
                                 + 3.0 * mt * t.powi(2) * y2
                                 + t.powi(3) * y;
-                            current_polygon.push((px, py));
+                            Self::push_point(&mut current_polygon, (px, py));
                         }
+                    }
+                }
+                DrawCommand::SplineTo { points, closed } => {
+                    // Prepend the current point so the spline starts
+                    // where the pen is.
+                    let mut control: Vec<(f64, f64)> = Vec::with_capacity(points.len() + 1);
+                    if let Some(&last) = current_polygon.last() {
+                        control.push(last);
+                    }
+                    control.extend_from_slice(points);
+                    if control.len() < 2 {
+                        continue;
+                    }
+                    for pt in Self::eval_bspline(&control, *closed) {
+                        Self::push_point(&mut current_polygon, pt);
                     }
                 }
                 DrawCommand::Close => {
@@ -260,31 +396,85 @@ impl DrawingParser {
         polygons
     }
 
-    fn fill_polygon(
-        buffer: &mut RenderBuffer,
+    /// Evaluate a uniform cubic B-spline through `control` (clamped ends
+    /// unless `closed`, which wraps the control polygon).
+    fn eval_bspline(control: &[(f64, f64)], closed: bool) -> Vec<(f64, f64)> {
+        let mut pts: Vec<(f64, f64)> = control.to_vec();
+        if closed {
+            if pts.len() < 3 {
+                return pts;
+            }
+            // Wrap the first three points for a closed spline.
+            pts.push(pts[0]);
+            pts.push(pts[1]);
+            pts.push(pts[2]);
+        } else {
+            if pts.len() < 2 {
+                return pts;
+            }
+            // Clamp ends by duplicating them.
+            pts.insert(0, pts[0]);
+            pts.push(pts[pts.len() - 1]);
+        }
+        let mut out = Vec::new();
+        // Spans of 4 control points; skip the leading duplicate span.
+        let spans = pts.len().saturating_sub(3);
+        for s in 0..spans {
+            let (p0, p1, p2, p3) = (pts[s], pts[s + 1], pts[s + 2], pts[s + 3]);
+            for i in 1..=SPLINE_STEPS {
+                let t = i as f64 / SPLINE_STEPS as f64;
+                let mt = 1.0 - t;
+                // Uniform cubic B-spline basis.
+                let b0 = mt * mt * mt / 6.0;
+                let b1 = (3.0 * t * t * t - 6.0 * t * t + 4.0) / 6.0;
+                let b2 = (-3.0 * t * t * t + 3.0 * t * t + 3.0 * t + 1.0) / 6.0;
+                let b3 = t * t * t / 6.0;
+                out.push((
+                    b0 * p0.0 + b1 * p1.0 + b2 * p2.0 + b3 * p3.0,
+                    b0 * p0.1 + b1 * p1.1 + b2 * p2.1 + b3 * p3.1,
+                ));
+                if out.len() >= MAX_DRAWING_POINTS {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// Scanline raster core: calls `emit(x, y)` for covered pixels.
+    /// All coordinates are validated finite and clamped to the buffer
+    /// before any loop runs; intersections use total ordering (no
+    /// `partial_cmp().unwrap()` on potentially-NaN values).
+    fn scan_polygon(
+        buf_width: u32,
+        buf_height: u32,
         polygon: &[(f64, f64)],
         offset_x: f64,
         offset_y: f64,
         scale: f64,
-        color: [u8; 4],
+        mut emit: impl FnMut(i32, i32),
     ) {
-        if polygon.len() < 3 {
+        if polygon.len() < 3 || buf_width == 0 || buf_height == 0 {
             return;
         }
+        let w = buf_width as i64;
+        let h = buf_height as i64;
 
-        let mut min_y = f64::MAX;
-        let mut max_y = f64::MIN;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
         for &(_, py) in polygon {
             let screen_y = py * scale + offset_y;
+            if !screen_y.is_finite() {
+                return;
+            }
             min_y = min_y.min(screen_y);
             max_y = max_y.max(screen_y);
         }
 
-        let min_y = (min_y as i32).max(0);
-        let max_y = (max_y as i32).min(buffer.height as i32 - 1);
+        let min_y = (min_y.floor() as i64).max(0).min(h - 1);
+        let max_y = (max_y.ceil() as i64).max(0).min(h - 1);
 
-        // Reuse intersections Vec across scanlines
-        let mut intersections = Vec::with_capacity(polygon.len());
+        let mut intersections = Vec::with_capacity(polygon.len().min(1024));
 
         for scan_y in min_y..=max_y {
             intersections.clear();
@@ -298,37 +488,151 @@ impl DrawingParser {
                 let sy2 = y2 * scale + offset_y;
                 let sx1 = x1 * scale + offset_x;
                 let sx2 = x2 * scale + offset_x;
+                if !(sy1.is_finite() && sy2.is_finite() && sx1.is_finite() && sx2.is_finite()) {
+                    continue;
+                }
 
                 if (sy1 <= scan_y as f64 && sy2 > scan_y as f64)
                     || (sy2 <= scan_y as f64 && sy1 > scan_y as f64)
                 {
-                    let t = (scan_y as f64 - sy1) / (sy2 - sy1);
+                    let denom = sy2 - sy1;
+                    if denom.abs() < f64::EPSILON {
+                        continue;
+                    }
+                    let t = (scan_y as f64 - sy1) / denom;
                     let ix = sx1 + t * (sx2 - sx1);
-                    intersections.push(ix);
+                    if ix.is_finite() {
+                        intersections.push(ix);
+                    }
                 }
             }
 
-            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            intersections.sort_by(|a, b| a.total_cmp(b));
 
             let mut i = 0;
             while i + 1 < intersections.len() {
-                let x_start = intersections[i] as i32;
-                let x_end = intersections[i + 1] as i32;
-
+                // Clamp the span to the buffer before looping.
+                let x_start = (intersections[i].floor() as i64).max(0).min(w - 1);
+                let x_end = (intersections[i + 1].ceil() as i64).max(0).min(w - 1);
                 for px in x_start..=x_end {
-                    if px >= 0 && px < buffer.width as i32 {
-                        buffer.blend_pixel(
-                            px as u32,
-                            scan_y as u32,
-                            color[0],
-                            color[1],
-                            color[2],
-                            color[3],
-                        );
-                    }
+                    emit(px as i32, scan_y as i32);
                 }
                 i += 2;
             }
         }
+    }
+
+    fn fill_polygon(
+        buffer: &mut RenderBuffer,
+        polygon: &[(f64, f64)],
+        offset_x: f64,
+        offset_y: f64,
+        scale: f64,
+        color: [u8; 4],
+    ) {
+        let (w, h) = (buffer.width, buffer.height);
+        Self::scan_polygon(w, h, polygon, offset_x, offset_y, scale, |px, py| {
+            buffer.blend_pixel(px as u32, py as u32, color[0], color[1], color[2], color[3]);
+        });
+    }
+
+    fn fill_polygon_mask(
+        buffer: &mut RenderBuffer,
+        polygon: &[(f64, f64)],
+        offset_x: f64,
+        offset_y: f64,
+        scale: f64,
+    ) {
+        let (w, h) = (buffer.width, buffer.height);
+        Self::scan_polygon(w, h, polygon, offset_x, offset_y, scale, |px, py| {
+            let idx = ((py as u32 * w + px as u32) * 4) as usize;
+            if idx + 3 < buffer.pixels.len() {
+                buffer.pixels[idx + 3] = 255;
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered_pixels(text: &str, w: u32, h: u32, scale: f64) -> usize {
+        let mut buf = RenderBuffer::new(w, h).unwrap();
+        DrawingParser::render_drawing(&mut buf, text, 0.0, 0.0, scale, [255, 255, 255, 255]);
+        buf.pixels.chunks_exact(4).filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn test_move_line_close_triangle() {
+        assert!(rendered_pixels("m 10 10 l 50 10 l 30 40 c", 64, 64, 1.0) > 100);
+    }
+
+    #[test]
+    fn test_move_without_close_continues_outline() {
+        // `n` keeps one outline (jump edge); `m` splits into two.
+        let merged = DrawingParser::polygons("m 0 0 l 10 0 n 20 0 l 30 0 l 30 10");
+        assert_eq!(merged.len(), 1);
+        let split = DrawingParser::polygons("m 0 0 l 10 0 l 10 10 m 20 0 l 30 0 l 30 10");
+        assert_eq!(split.len(), 2);
+    }
+
+    #[test]
+    fn test_bezier_renders() {
+        assert!(rendered_pixels("m 10 30 b 10 10 50 10 50 30 l 50 50 l 10 50 c", 64, 64, 1.0) > 50);
+    }
+
+    #[test]
+    fn test_spline_extend_close() {
+        // `s` spline, `p` extension, `c` close
+        let n = rendered_pixels("m 10 30 s 20 10 40 10 50 30 p 55 40 50 50 c", 64, 64, 1.0);
+        assert!(n > 20, "spline pixels: {}", n);
+        let polys = DrawingParser::polygons("m 0 0 s 10 0 20 0 30 10 p 35 15 30 20 c");
+        assert_eq!(polys.len(), 1);
+        assert!(polys[0].len() > 8);
+    }
+
+    #[test]
+    fn test_measure_bbox() {
+        let (min_x, min_y, w, h) = DrawingParser::measure("m 10 20 l 50 20 l 50 60").unwrap();
+        assert_eq!((min_x, min_y), (10.0, 20.0));
+        assert_eq!((w, h), (40.0, 40.0));
+        assert!(DrawingParser::measure("").is_none());
+        assert!(DrawingParser::measure("m 0 0").is_none());
+    }
+
+    #[test]
+    fn test_mask_writes_alpha_only_inside() {
+        let mut buf = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_mask(&mut buf, "m 10 10 l 50 10 l 50 50 l 10 50", 0.0, 0.0, 1.0);
+        assert_eq!(buf.get_pixel(30, 30)[3], 255);
+        assert_eq!(buf.get_pixel(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn test_malicious_coordinates_bounded() {
+        // Extreme coordinates: terminates, no panic, no hang.
+        let mut buf = RenderBuffer::new(32, 32).unwrap();
+        DrawingParser::render_drawing(
+            &mut buf,
+            "m -1e18 -1e18 l 1e18 -1e18 l 1e18 1e18 l -1e18 1e18",
+            0.0,
+            0.0,
+            1.0,
+            [255, 255, 255, 255],
+        );
+        DrawingParser::render_drawing(&mut buf, "m 0 0 l NaN 5 l 5 5", 0.0, 0.0, 1.0, [255; 4]);
+        // Coordinates overflowing to infinity are rejected (no panic).
+        let huge = "9".repeat(400);
+        assert!(DrawingParser::measure(&format!("m 0 0 l {} 5 l 5 5", huge)).is_none());
+    }
+
+    #[test]
+    fn test_degenerate_inputs_safe() {
+        let mut buf = RenderBuffer::new(16, 16).unwrap();
+        DrawingParser::render_drawing(&mut buf, "m 5 5 l 6 6", 0.0, 0.0, f64::NAN, [255; 4]);
+        DrawingParser::render_drawing(&mut buf, "m 5 5 l 6 6", 0.0, 0.0, -1.0, [255; 4]);
+        DrawingParser::render_drawing(&mut buf, "", 0.0, 0.0, 1.0, [255; 4]);
+        assert!(buf.pixels.iter().all(|&p| p == 0));
     }
 }

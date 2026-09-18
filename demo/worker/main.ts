@@ -4,32 +4,29 @@
 import { startDemo } from "../shared/app.ts";
 import { WorkerBackend } from "../shared/worker-backend.ts";
 import { showError } from "../shared/ui.ts";
+import { dbg } from "../shared/debug.ts";
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:worker]", ...args);
-}
+const log = dbg("worker");
 
 const workerUrl = new URL("./render-worker.ts", import.meta.url);
-dbg("entry", {
+log("entry", {
   href: location.href,
   importMetaUrl: import.meta.url,
   workerUrl: workerUrl.href,
   expectedPkg: new URL("../../pkg/subrass.js", import.meta.url).href,
   note:
-    "AssDoc is used on the main thread in app.ts; WorkerBackend.init only " +
-    "initializes WASM inside the worker. That mismatch causes: " +
-    'TypeError: can\'t access property "__wbindgen_malloc", wasm is undefined',
+    "AssDoc runs on the main thread; WorkerBackend.init() initializes the " +
+    "WASM module on the main thread AND the worker initializes its own copy.",
 });
 
 const backend = new WorkerBackend(workerUrl, {
   onError: (message) => {
-    dbg("backend onError", message);
+    log("backend onError", message);
     showError(message);
   },
 });
 
 startDemo(backend).catch((err) => {
-  dbg("startDemo rejected", err);
+  log("startDemo rejected", err);
   showError(`Demo failed to start: ${(err as Error).message}`);
 });

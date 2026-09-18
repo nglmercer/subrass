@@ -124,46 +124,61 @@ impl ScriptInfo {
         Self::default()
     }
 
-    pub fn set_field(&mut self, key: &str, value: &str) {
+    /// Set a known field, validating the value. Unknown keys are stored
+    /// in `extra_fields`. Returns an error describing invalid known values
+    /// instead of silently keeping defaults.
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let parse_res = |what: &str, v: &str| -> Result<u32, String> {
+            let n: u32 = v
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid {} value: {}", what, v))?;
+            if n == 0 {
+                return Err(format!("Invalid {} value (must be positive): {}", what, v));
+            }
+            Ok(n)
+        };
         match key.to_lowercase().as_str() {
             "title" => self.title = Some(value.to_string()),
             "scripttype" => {
-                if let Ok(t) = value.parse() {
-                    self.script_type = t;
-                }
+                self.script_type = value.parse().map_err(|e: String| e)?;
             }
             "playresx" => {
-                if let Ok(v) = value.parse() {
-                    self.play_res_x = v;
-                }
+                self.play_res_x = parse_res("PlayResX", value)?;
             }
             "playresy" => {
-                if let Ok(v) = value.parse() {
-                    self.play_res_y = v;
-                }
+                self.play_res_y = parse_res("PlayResY", value)?;
             }
             "layoutresx" => {
-                if let Ok(v) = value.parse() {
-                    self.layout_res_x = Some(v);
-                }
+                self.layout_res_x = Some(parse_res("LayoutResX", value)?);
             }
             "layoutresy" => {
-                if let Ok(v) = value.parse() {
-                    self.layout_res_y = Some(v);
-                }
+                self.layout_res_y = Some(parse_res("LayoutResY", value)?);
             }
             "scaledborderandshadow" => {
-                self.scaled_border_and_shadow = value.trim().to_lowercase() == "yes";
+                self.scaled_border_and_shadow = match value.trim().to_lowercase().as_str() {
+                    "yes" | "true" | "1" => true,
+                    "no" | "false" | "0" => false,
+                    _ => {
+                        return Err(format!(
+                            "Invalid ScaledBorderAndShadow value (expected yes/no): {}",
+                            value
+                        ))
+                    }
+                };
             }
             "y cbcr matrix" | "ycbcr matrix" => {
-                if let Ok(m) = value.parse() {
-                    self.y_cb_cr_matrix = m;
-                }
+                self.y_cb_cr_matrix = value.parse().map_err(|e: String| e)?;
             }
             "wrapstyle" => {
-                if let Ok(v) = value.parse() {
-                    self.wrap_style = v;
+                let v: u32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("Invalid WrapStyle value: {}", value))?;
+                if v > 3 {
+                    return Err(format!("Invalid WrapStyle value (expected 0-3): {}", value));
                 }
+                self.wrap_style = v;
             }
             "original script" => self.original_script = Some(value.to_string()),
             "original translation" => self.original_translation = Some(value.to_string()),
@@ -177,6 +192,7 @@ impl ScriptInfo {
                 self.extra_fields.insert(key.to_string(), value.to_string());
             }
         }
+        Ok(())
     }
 }
 
@@ -208,12 +224,29 @@ mod tests {
     #[test]
     fn test_script_info_set_field() {
         let mut info = ScriptInfo::new();
-        info.set_field("Title", "Test Subtitle");
-        info.set_field("PlayResX", "1280");
-        info.set_field("PlayResY", "720");
+        info.set_field("Title", "Test Subtitle").unwrap();
+        info.set_field("PlayResX", "1280").unwrap();
+        info.set_field("PlayResY", "720").unwrap();
 
         assert_eq!(info.title.as_deref(), Some("Test Subtitle"));
         assert_eq!(info.play_res_x, 1280);
         assert_eq!(info.play_res_y, 720);
+    }
+
+    #[test]
+    fn test_set_field_rejects_invalid_known_values() {
+        let mut info = ScriptInfo::new();
+        assert!(info.set_field("PlayResX", "abc").is_err());
+        assert!(info.set_field("PlayResX", "0").is_err());
+        assert!(info.set_field("PlayResY", "-5").is_err());
+        assert!(info.set_field("WrapStyle", "9").is_err());
+        assert!(info.set_field("ScriptType", "v9").is_err());
+        assert!(info.set_field("YCbCr Matrix", "bogus").is_err());
+        assert!(info.set_field("ScaledBorderAndShadow", "maybe").is_err());
+        // Defaults preserved after rejected writes
+        assert_eq!(info.play_res_x, 1920);
+        // Unknown keys still accepted
+        assert!(info.set_field("CustomKey", "anything").is_ok());
+        assert_eq!(info.extra_fields.get("CustomKey").unwrap(), "anything");
     }
 }

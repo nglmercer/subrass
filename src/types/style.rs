@@ -68,34 +68,70 @@ impl Style {
             ));
         }
 
-        let parse_bool = |s: &str| -> bool { s.trim() == "-1" };
-        let parse_i32 = |s: &str| -> i32 { s.trim().parse().unwrap_or(0) };
-        let parse_f64 = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
+        // Strict: malformed non-empty values are errors, never silent zeros.
+        let parse_bool = |s: &str, what: &str| -> Result<bool, String> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(false);
+            }
+            s.parse::<i32>()
+                .map(|v| v != 0)
+                .map_err(|_| format!("Invalid {} value: {}", what, s))
+        };
+        let parse_i32 = |s: &str, what: &str| -> Result<i32, String> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(0);
+            }
+            s.parse()
+                .map_err(|_| format!("Invalid {} value: {}", what, s))
+        };
+        let parse_f64 = |s: &str, what: &str| -> Result<f64, String> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(0.0);
+            }
+            let v: f64 = s
+                .parse()
+                .map_err(|_| format!("Invalid {} value: {}", what, s))?;
+            if !v.is_finite() {
+                return Err(format!("Invalid {} value (non-finite): {}", what, s));
+            }
+            Ok(v)
+        };
+        let parse_color = |s: &str, what: &str| -> Result<Color, String> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(Color::default());
+            }
+            s.parse()
+                .map_err(|e| format!("Invalid {} value {:?}: {}", what, s, e))
+        };
 
         Ok(Self {
             name: fields[0].trim().to_string(),
             font_name: fields[1].trim().to_string(),
-            font_size: parse_f64(fields[2]),
-            primary_color: fields[3].trim().parse().unwrap_or_default(),
-            secondary_color: fields[4].trim().parse().unwrap_or_default(),
-            outline_color: fields[5].trim().parse().unwrap_or_default(),
-            back_color: fields[6].trim().parse().unwrap_or_default(),
-            bold: parse_bool(fields[7]),
-            italic: parse_bool(fields[8]),
-            underline: parse_bool(fields[9]),
-            strike_out: parse_bool(fields[10]),
-            scale_x: parse_f64(fields[11]),
-            scale_y: parse_f64(fields[12]),
-            spacing: parse_f64(fields[13]),
-            angle: parse_f64(fields[14]),
-            border_style: parse_i32(fields[15]),
-            outline: parse_f64(fields[16]),
-            shadow: parse_f64(fields[17]),
-            alignment: parse_i32(fields[18]),
-            margin_l: parse_i32(fields[19]),
-            margin_r: parse_i32(fields[20]),
-            margin_v: parse_i32(fields[21]),
-            encoding: parse_i32(fields[22]),
+            font_size: parse_f64(fields[2], "Fontsize")?,
+            primary_color: parse_color(fields[3], "PrimaryColour")?,
+            secondary_color: parse_color(fields[4], "SecondaryColour")?,
+            outline_color: parse_color(fields[5], "OutlineColour")?,
+            back_color: parse_color(fields[6], "BackColour")?,
+            bold: parse_bool(fields[7], "Bold")?,
+            italic: parse_bool(fields[8], "Italic")?,
+            underline: parse_bool(fields[9], "Underline")?,
+            strike_out: parse_bool(fields[10], "StrikeOut")?,
+            scale_x: parse_f64(fields[11], "ScaleX")?,
+            scale_y: parse_f64(fields[12], "ScaleY")?,
+            spacing: parse_f64(fields[13], "Spacing")?,
+            angle: parse_f64(fields[14], "Angle")?,
+            border_style: parse_i32(fields[15], "BorderStyle")?,
+            outline: parse_f64(fields[16], "Outline")?,
+            shadow: parse_f64(fields[17], "Shadow")?,
+            alignment: parse_i32(fields[18], "Alignment")?,
+            margin_l: parse_i32(fields[19], "MarginL")?,
+            margin_r: parse_i32(fields[20], "MarginR")?,
+            margin_v: parse_i32(fields[21], "MarginV")?,
+            encoding: parse_i32(fields[22], "Encoding")?,
         })
     }
 
@@ -132,6 +168,18 @@ impl Style {
 }
 
 pub const DEFAULT_STYLE_FORMAT: &str = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding";
+
+/// Convert legacy SSA alignment values to ASS numpad alignment:
+/// SSA 1-3 (bottom) stay, 5-7 (top) become 7-9, 9-11 (middle) become 4-6.
+/// Out-of-range values fall back to 2 (bottom-center), matching VSFilter.
+pub fn ssa_alignment_to_ass(alignment: i32) -> i32 {
+    match alignment {
+        1..=3 => alignment,
+        5..=7 => alignment + 2,
+        9..=11 => alignment - 5,
+        _ => 2,
+    }
+}
 
 #[cfg(test)]
 mod tests {

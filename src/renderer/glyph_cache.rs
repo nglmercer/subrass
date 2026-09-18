@@ -12,70 +12,102 @@ pub struct CachedGlyph {
     pub advance: f32,
 }
 
-/// Cache key for glyphs
+/// Cache key for glyphs. The font identity is part of the key: the same
+/// glyph ID has different geometry in different fonts.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct GlyphCacheKey {
+    font_id: usize,
     glyph_id: u32,
     font_size_bits: u32, // f32 to bits for exact match
-    bold: bool,
-    italic: bool,
+    faux_bold: bool,
+    faux_italic: bool,
 }
 
-/// Glyph rasterization cache
+/// Glyph rasterization cache with deterministic least-recently-used eviction.
 pub struct GlyphCache {
-    cache: HashMap<GlyphCacheKey, CachedGlyph>,
+    cache: HashMap<GlyphCacheKey, (CachedGlyph, u64)>,
     max_size: usize,
+    tick: u64,
 }
 
 impl GlyphCache {
     pub fn new(max_size: usize) -> Self {
         Self {
             cache: HashMap::with_capacity(max_size.min(1024)),
-            max_size,
+            max_size: max_size.max(1),
+            tick: 0,
         }
     }
 
-    /// Get or rasterize a glyph
+    /// Get or rasterize a glyph.
+    ///
+    /// `font_id` is the stable [`FontManager`](super::font::FontManager)
+    /// identity of `font`. `faux_bold`/`faux_italic` describe synthesis the
+    /// cache must apply (true only when the face lacks the style); they are
+    /// part of the key because they change rasterization.
     pub fn get_or_rasterize(
         &mut self,
+        font_id: usize,
         font: &FontArc,
         glyph_id: GlyphId,
         font_size: f64,
-        bold: bool,
-        italic: bool,
+        faux_bold: bool,
+        faux_italic: bool,
     ) -> &CachedGlyph {
         let key = GlyphCacheKey {
+            font_id,
             glyph_id: glyph_id.0 as u32,
             font_size_bits: (font_size as f32).to_bits(),
-            bold,
-            italic,
+            faux_bold,
+            faux_italic,
         };
 
-        if !self.cache.contains_key(&key) {
-            let glyph = self.rasterize(font, glyph_id, font_size, bold, italic);
-            self.cache.insert(key.clone(), glyph);
-
-            // Evict if too large
-            if self.cache.len() > self.max_size {
-                // Simple eviction: clear half
-                let keys: Vec<_> = self.cache.keys().take(self.max_size / 2).cloned().collect();
-                for k in keys {
-                    self.cache.remove(&k);
-                }
-            }
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        if let Some(entry) = self.cache.get_mut(&key) {
+            entry.1 = tick;
+        } else {
+            let glyph = Self::rasterize(font, glyph_id, font_size, faux_bold, faux_italic);
+            self.cache.insert(key.clone(), (glyph, tick));
+            self.evict_if_needed(&key);
         }
 
-        &self.cache[&key]
+        &self.cache[&key].0
     }
 
-    /// Rasterize a glyph to bitmap
+    /// Evict least-recently-used entries (deterministic: oldest tick first,
+    /// ties broken by key order). Never evicts the just-inserted key.
+    fn evict_if_needed(&mut self, protect: &GlyphCacheKey) {
+        if self.cache.len() <= self.max_size {
+            return;
+        }
+        let target = self.max_size / 2;
+        let mut entries: Vec<(GlyphCacheKey, u64)> = self
+            .cache
+            .iter()
+            .filter(|(k, _)| *k != protect)
+            .map(|(k, (_, t))| (k.clone(), *t))
+            .collect();
+        // Deterministic order: tick, then key debug form. No HashMap
+        // iteration order leaks into the eviction choice.
+        entries.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)))
+        });
+        let remove_count = self.cache.len().saturating_sub(target.max(1));
+        for (key, _) in entries.into_iter().take(remove_count) {
+            self.cache.remove(&key);
+        }
+    }
+
+    /// Rasterize a glyph to bitmap, applying faux bold (dilation) and faux
+    /// italic (horizontal shear) only when the corresponding flag is set.
     fn rasterize(
-        &self,
         font: &FontArc,
         glyph_id: GlyphId,
         font_size: f64,
-        bold: bool,
-        _italic: bool,
+        faux_bold: bool,
+        faux_italic: bool,
     ) -> CachedGlyph {
         let scale = PxScale::from(font_size as f32);
         let scaled = font.as_scaled(scale);
@@ -116,7 +148,7 @@ impl GlyphCache {
                 });
 
                 // Apply faux bold by dilating
-                if bold {
+                if faux_bold {
                     let mut bold_bitmap = bitmap.clone();
                     for y in 0..height as i32 {
                         for x in 0..width as i32 {
@@ -143,11 +175,32 @@ impl GlyphCache {
                     bitmap = bold_bitmap;
                 }
 
+                // Apply faux italic: shear top rows right by tan(12°) ≈ 0.21
+                // per row, widening the bitmap to fit.
+                let (bitmap, width, bearing_x) = if faux_italic {
+                    let shear = 0.2126_f32;
+                    let extra = (height as f32 * shear).ceil().max(1.0) as u32;
+                    let new_width = width + extra;
+                    let mut sheared = vec![0u8; (new_width * height) as usize];
+                    for y in 0..height {
+                        let shift = ((height - 1 - y) as f32 * shear).round() as u32;
+                        for x in 0..width {
+                            let v = bitmap[(y * width + x) as usize];
+                            if v > 0 {
+                                sheared[(y * new_width + x + shift) as usize] = v;
+                            }
+                        }
+                    }
+                    (sheared, new_width, bounds.min.x)
+                } else {
+                    (bitmap, width, bounds.min.x)
+                };
+
                 CachedGlyph {
                     bitmap,
                     width,
                     height,
-                    bearing_x: bounds.min.x,
+                    bearing_x,
                     bearing_y: bounds.min.y,
                     advance: scaled.h_advance(glyph_id),
                 }
@@ -185,5 +238,74 @@ impl GlyphCache {
 impl Default for GlyphCache {
     fn default() -> Self {
         Self::new(4096)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::font::{self, FontManager};
+
+    fn manager_with_two_fonts() -> FontManager {
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        // Second font with the same data but a distinct identity: the cache
+        // must still treat it as a different font (geometry may differ).
+        fm.load_font("Second Face", font::get_fallback_font(), false, false)
+            .unwrap();
+        fm
+    }
+
+    #[test]
+    fn test_cache_distinguishes_fonts() {
+        let fm = manager_with_two_fonts();
+        let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
+        let m1 = fm.find_font_with_match("Second Face", false, false);
+        assert_ne!(m0.id, m1.id);
+
+        let mut cache = GlyphCache::new(64);
+        let gid = m0.font.glyph_id('A');
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        assert_eq!(cache.len(), 1);
+        // Same glyph ID/size, different font: must be a second entry.
+        cache.get_or_rasterize(m1.id, m1.font, gid, 48.0, false, false);
+        assert_eq!(cache.len(), 2);
+        // Repeat lookup hits, no growth.
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_cache_distinguishes_faux_styles() {
+        let fm = manager_with_two_fonts();
+        let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
+        let mut cache = GlyphCache::new(64);
+        let gid = m0.font.glyph_id('A');
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, true, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, true);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_eviction_is_bounded_and_keeps_new_key() {
+        let fm = manager_with_two_fonts();
+        let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
+        let mut cache = GlyphCache::new(4);
+        for (i, ch) in "abcdefgh".chars().enumerate() {
+            let gid = m0.font.glyph_id(ch);
+            cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+            // The just-inserted glyph is always present
+            let key = GlyphCacheKey {
+                font_id: m0.id,
+                glyph_id: gid.0 as u32,
+                font_size_bits: (48.0f32).to_bits(),
+                faux_bold: false,
+                faux_italic: false,
+            };
+            assert!(cache.cache.contains_key(&key), "iteration {}", i);
+            assert!(cache.len() <= 4, "len {}", cache.len());
+        }
     }
 }

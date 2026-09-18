@@ -2,31 +2,61 @@ use crate::types::Event;
 
 use super::errors::ParseError;
 
+/// Defensive cap on events per file (untrusted subtitle input).
+pub const MAX_EVENTS: usize = 100_000;
+
 pub fn parse_events(lines: &[&str], start_line: usize) -> Result<Vec<Event>, ParseError> {
     let mut events = Vec::new();
+    let mut format: Option<Vec<String>> = None;
 
     for (i, line) in lines.iter().enumerate() {
         let line = line.trim();
 
-        // Skip empty lines
-        if line.is_empty() {
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with(';') {
             continue;
         }
 
-        // Skip format lines
-        if line.starts_with("Format:") {
+        // Track the Format declaration (case-insensitive keyword)
+        if let Some(fmt) = strip_prefix_ci(line, "Format:") {
+            format = Some(parse_format_columns(fmt));
             continue;
         }
 
-        // Parse dialogue and comment lines
-        if line.starts_with("Dialogue:") || line.starts_with("Comment:") {
-            let event = Event::parse_from_line(line)
+        // Parse dialogue and comment lines (case-insensitive keyword)
+        if starts_with_ci(line, "Dialogue:") || starts_with_ci(line, "Comment:") {
+            if events.len() >= MAX_EVENTS {
+                return Err(ParseError::line_error(
+                    start_line + i,
+                    format!("Too many events (limit {MAX_EVENTS})"),
+                ));
+            }
+            let event = Event::parse_from_line_with_format(line, format.as_deref())
                 .map_err(|e| ParseError::line_error(start_line + i, e))?;
             events.push(event);
         }
     }
 
     Ok(events)
+}
+
+fn parse_format_columns(fmt: &str) -> Vec<String> {
+    fmt.split(',')
+        .map(|c| c.trim().to_lowercase())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+fn starts_with_ci(line: &str, prefix: &str) -> bool {
+    line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    if starts_with_ci(line, prefix) {
+        Some(&line[prefix.len()..])
+    } else {
+        None
+    }
 }
 
 pub fn get_events_at_time(events: &[Event], time_ms: u64) -> Vec<&Event> {
@@ -41,6 +71,7 @@ pub fn get_comment_events(events: &[Event]) -> Vec<&Event> {
     events.iter().filter(|e| e.is_comment()).collect()
 }
 
+/// Stable sort by layer: equal layers keep source order (ASS behavior).
 pub fn sort_events_by_layer(events: &mut [Event]) {
     events.sort_by_key(|a| a.layer);
 }
@@ -66,6 +97,81 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, EventType::Dialogue);
         assert_eq!(events[1].event_type, EventType::Comment);
+    }
+
+    #[test]
+    fn test_reordered_format_columns() {
+        let lines = vec![
+            "Format: Start, End, Style, Text, Layer, Name, MarginL, MarginR, MarginV, Effect",
+            "Dialogue: 0:00:01.00,0:00:04.00,Default,Hello,2,John,1,2,3,",
+        ];
+        // Text is not last here, so this must be rejected, not misparsed
+        assert!(parse_events(&lines, 0).is_err());
+
+        let lines = vec![
+            "Format: Style, Layer, Start, End, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: Default,2,0:00:01.00,0:00:04.00,John,1,2,3,,Hello, with comma",
+        ];
+        let events = parse_events(&lines, 0).unwrap();
+        assert_eq!(events[0].layer, 2);
+        assert_eq!(events[0].style, "Default");
+        assert_eq!(events[0].margin_v, 3);
+        assert_eq!(events[0].text, "Hello, with comma");
+    }
+
+    #[test]
+    fn test_ssa_marked_format() {
+        let lines = vec![
+            "Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA",
+        ];
+        let events = parse_events(&lines, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].layer, 0);
+        assert_eq!(events[0].text, "Hello SSA");
+    }
+
+    #[test]
+    fn test_unknown_columns_ignored() {
+        let lines = vec![
+            "Format: Layer, Start, End, Style, Future, Text",
+            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,whatever,Hello",
+        ];
+        let events = parse_events(&lines, 0).unwrap();
+        assert_eq!(events[0].text, "Hello");
+    }
+
+    #[test]
+    fn test_missing_required_column_errors() {
+        let lines = vec![
+            "Format: Layer, Start, Style, Text",
+            "Dialogue: 0,0:00:01.00,Default,Hello",
+        ];
+        assert!(parse_events(&lines, 0).is_err());
+    }
+
+    #[test]
+    fn test_malformed_numbers_error() {
+        let lines = vec![
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: abc,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello",
+        ];
+        assert!(parse_events(&lines, 0).is_err());
+
+        let lines = vec![
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,xyz,0,0,,Hello",
+        ];
+        assert!(parse_events(&lines, 0).is_err());
+    }
+
+    #[test]
+    fn test_malformed_timestamp_errors() {
+        let lines = vec![
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+            "Dialogue: 0,0:99:99.99,0:00:04.00,Default,,0,0,0,,Hello",
+        ];
+        assert!(parse_events(&lines, 0).is_err());
     }
 
     #[test]
@@ -131,5 +237,19 @@ mod tests {
         assert_eq!(events[0].text, "Event 1");
         assert_eq!(events[1].text, "Event 2");
         assert_eq!(events[2].text, "Event 3");
+    }
+
+    #[test]
+    fn test_layer_sort_is_stable() {
+        let lines = vec![
+            "Dialogue: 1,0:00:01.00,0:00:04.00,Default,,0,0,0,,First",
+            "Dialogue: 1,0:00:01.00,0:00:04.00,Default,,0,0,0,,Second",
+            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Third",
+        ];
+        let mut events = parse_events(&lines, 0).unwrap();
+        sort_events_by_layer(&mut events);
+        assert_eq!(events[0].text, "Third");
+        assert_eq!(events[1].text, "First");
+        assert_eq!(events[2].text, "Second");
     }
 }

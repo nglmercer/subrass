@@ -1,28 +1,28 @@
-// Web Worker rendering backend. The WASM renderer lives in a dedicated
-// worker; this class mirrors the RenderBackend contract on the main
-// thread by proxying messages. Frames cross the boundary as transferred
-// ArrayBuffers (zero-copy) and are painted with putImageData.
+// Main-thread proxy for the render worker. The WASM renderer lives
+// inside the worker; frames come back as RGBA buffers and are painted
+// onto the visible canvas here.
 //
-// Protocol (see render-worker.ts in the worker example):
-//   main  -> worker: init | load | font | resize | render
-//   worker -> main:  ready | loaded | frame | error
-//
-// Render requests carry a sequence number and stale frames (seq older
-// than the last painted one) are dropped, so the canvas never shows an
-// older frame that happened to arrive late.
+// Protocol (every message carries a numeric `requestId` echoed by the
+// worker so responses route to the right waiter even out of order):
+//   main -> worker: { kind: "init" }
+//   worker -> main: { kind: "ready" } | { kind: "fatal", error }
+//   main -> worker: { kind: "loadAss", requestId, content }
+//   worker -> main: { kind: "loaded", requestId, summary }
+//                   | { kind: "error", requestId, error }
+//   main -> worker: { kind: "render", requestId, timeMs }
+//   worker -> main: { kind: "frame", requestId, w, h, bytes }
+//                   | { kind: "error", requestId, error }
+//   main -> worker: { kind: "setVideoSize", w, h } | { kind: "loadFont", name, data }
 import init from "../../pkg/subrass.js";
 import type { RenderBackend, SubtitleSummary } from "./types.ts";
+import { dbg } from "./debug.ts";
 
-const DEBUG = true;
-function dbg(...args: unknown[]): void {
-  if (DEBUG) console.log("[subrass:demo:worker-backend]", ...args);
+const log = dbg("worker-backend");
+
+interface LoadWaiter {
+  resolve: (summary: SubtitleSummary) => void;
+  reject: (err: Error) => void;
 }
-
-export type WorkerMessage =
-  | { type: "ready" }
-  | { type: "loaded"; summary: SubtitleSummary }
-  | { type: "frame"; seq: number; w: number; h: number; buffer: ArrayBuffer }
-  | { type: "error"; message: string };
 
 export interface WorkerBackendOptions {
   onError?: (message: string) => void;
@@ -30,118 +30,209 @@ export interface WorkerBackendOptions {
 
 export class WorkerBackend implements RenderBackend {
   readonly kind = "web-worker";
+  private worker: Worker | null = null;
+  private workerUrl: URL;
+  private options: WorkerBackendOptions;
 
-  private worker: Worker;
+  private readyPromise: Promise<void> | null = null;
+  private readyResolve: (() => void) | null = null;
+  private readyReject: ((err: Error) => void) | null = null;
+  private readySettled = false;
+
+  private nextRequestId = 1;
+  private loadWaiters = new Map<number, LoadWaiter>();
+
+  // Render coalescing: at most one render in flight; a newer request
+  // while one is in flight replaces the pending one (backpressure).
+  private renderInFlight: number | null = null;
+  private pendingRenderMs: number | null = null;
+
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
-  private onError: (message: string) => void;
-
-  private nextSeq = 1;
-  private lastPaintedSeq = 0;
-  private readyPromise: Promise<void>;
-  private loadResolvers: Array<(summary: SubtitleSummary) => void> = [];
+  private disposed = false;
 
   constructor(workerUrl: URL, options: WorkerBackendOptions = {}) {
-    this.onError = options.onError ?? (() => {});
-    dbg("constructor", {
-      workerUrl: workerUrl.href,
-      importMetaUrl: import.meta.url,
-      note:
-        "Worker WASM inits inside the worker; main-thread WASM inits in init() " +
-        "so AssDoc (used on the main thread in app.ts) has its bindings ready.",
-    });
-    this.worker = new Worker(workerUrl, { type: "module" });
-    this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.onMessage(e.data);
-    this.worker.onerror = (e) => {
-      dbg("worker onerror", e.message, e);
-      this.onError(`Worker failed: ${e.message}`);
-    };
-
-    this.readyPromise = new Promise<void>((resolve) => {
-      this.readyResolve = resolve;
-    });
-    dbg("postMessage init → worker");
-    this.worker.postMessage({ type: "init" });
+    this.workerUrl = workerUrl;
+    this.options = options;
   }
 
-  private readyResolve!: () => void;
-
   async init(): Promise<void> {
-    dbg("init() waiting for worker ready…");
-    const t0 = performance.now();
-    const [_ready, exports] = await Promise.all([this.readyPromise, init()]);
-    dbg("init() worker ready", { ms: +(performance.now() - t0).toFixed(1) });
-    dbg("init() main-thread wasm ready", {
-      hasMalloc: typeof (exports as { __wbindgen_malloc?: unknown })?.__wbindgen_malloc,
-    });
+    log("init() begin", { workerUrl: this.workerUrl.href });
+    if (!this.readyPromise) {
+      // init() on the main thread initializes this module's wasm bindings,
+      // which app.ts needs for AssDoc. The worker has its own module
+      // instance and initializes itself on the "init" message.
+      await init();
+      this.readyPromise = new Promise<void>((resolve, reject) => {
+        this.readyResolve = resolve;
+        this.readyReject = reject;
+      });
+      const worker = new Worker(this.workerUrl, { type: "module" });
+      this.worker = worker;
+      worker.onmessage = (event: MessageEvent) => this.handleMessage(event.data);
+      worker.onerror = (event) => {
+        this.fail(new Error(`Render worker error: ${event.message}`));
+      };
+      worker.onmessageerror = () => {
+        this.fail(new Error("Render worker message deserialization failed"));
+      };
+      worker.postMessage({ kind: "init" });
+    }
+    await this.readyPromise;
+    log("init() done — worker ready");
   }
 
   setFrameTarget(canvas: HTMLCanvasElement): void {
-    dbg("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
+    log("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
+    this.post({ kind: "setVideoSize", w: canvas.width, h: canvas.height });
   }
 
   loadAss(content: string): Promise<SubtitleSummary> {
-    dbg("loadAss → worker", { contentBytes: content.length, pending: this.loadResolvers.length });
-    return new Promise((resolve) => {
-      this.loadResolvers.push(resolve);
-      this.worker.postMessage({ type: "load", content });
+    const requestId = this.nextRequestId++;
+    log("loadAss begin", { requestId, contentBytes: content.length });
+    return new Promise<SubtitleSummary>((resolve, reject) => {
+      if (this.disposed || !this.worker) {
+        reject(new Error("Worker is not running"));
+        return;
+      }
+      this.loadWaiters.set(requestId, { resolve, reject });
+      this.post({ kind: "loadAss", requestId, content });
     });
   }
 
   resize(width: number, height: number): void {
     if (width > 0 && height > 0) {
-      this.worker.postMessage({ type: "resize", w: width, h: height });
+      this.post({ kind: "setVideoSize", w: width, h: height });
     }
   }
 
   loadFont(name: string, data: Uint8Array): void {
-    // Copy into a detached buffer so the caller keeps its Uint8Array usable.
-    const buffer = data.slice().buffer;
-    this.worker.postMessage({ type: "font", name, data: buffer }, [buffer]);
+    log("loadFont", { name, bytes: data.byteLength });
+    this.post({ kind: "loadFont", name, data }, [data.buffer]);
   }
 
   renderFrame(timeMs: number): void {
-    // dbg("renderFrame → worker", { timeMs, seq: this.nextSeq });
-    this.worker.postMessage({ type: "render", timeMs, seq: this.nextSeq++ });
+    if (this.disposed) return;
+    if (this.renderInFlight !== null) {
+      // A render is already in flight: remember only the newest
+      // request instead of queueing every animation frame.
+      this.pendingRenderMs = timeMs;
+      return;
+    }
+    this.sendRender(timeMs);
   }
 
   dispose(): void {
-    this.worker.terminate();
+    log("dispose");
+    this.disposed = true;
+    this.fail(new Error("Worker backend disposed"));
+    this.worker?.terminate();
+    this.worker = null;
   }
 
-  private onMessage(msg: WorkerMessage): void {
-    switch (msg.type) {
+  private sendRender(timeMs: number): void {
+    if (this.disposed || !this.worker) return;
+    const requestId = this.nextRequestId++;
+    this.renderInFlight = requestId;
+    this.post({ kind: "render", requestId, timeMs });
+  }
+
+  private post(message: unknown, transfer: Transferable[] = []): void {
+    if (this.disposed || !this.worker) return;
+    this.worker.postMessage(message, transfer);
+  }
+
+  private handleMessage(msg: {
+    kind: string;
+    requestId?: number;
+    error?: string;
+    summary?: SubtitleSummary;
+    timeMs?: number;
+    w?: number;
+    h?: number;
+    bytes?: ArrayBuffer;
+  }): void {
+    switch (msg.kind) {
       case "ready":
-        dbg("← worker ready (WASM inited in worker only)");
-        this.readyResolve();
+        log("worker ready (main-thread and worker wasm both initialized)");
+        this.settleReady(null);
+        break;
+      case "fatal":
+        this.fail(new Error(msg.error ?? "Worker failed to initialize"));
         break;
       case "loaded": {
-        dbg("← worker loaded", msg.summary);
-        const resolve = this.loadResolvers.shift();
-        resolve?.(msg.summary);
+        const waiter = msg.requestId !== undefined ? this.loadWaiters.get(msg.requestId) : undefined;
+        if (waiter && msg.summary) {
+          this.loadWaiters.delete(msg.requestId!);
+          log("loaded", { requestId: msg.requestId, summary: msg.summary });
+          waiter.resolve(msg.summary);
+        }
         break;
       }
-      case "frame":
-        this.paintFrame(msg);
+      case "frame": {
+        if (msg.requestId !== this.renderInFlight || msg.bytes === undefined) break;
+        this.renderInFlight = null;
+        const w = msg.w ?? 0;
+        const h = msg.h ?? 0;
+        if (this.ctx && w > 0 && h > 0) {
+          const image = new ImageData(new Uint8ClampedArray(msg.bytes), w, h);
+          this.ctx.putImageData(image, 0, 0);
+        }
+        // Flush a newer pending render, if any.
+        if (this.pendingRenderMs !== null) {
+          const timeMs = this.pendingRenderMs;
+          this.pendingRenderMs = null;
+          this.sendRender(timeMs);
+        }
         break;
-      case "error":
-        dbg("← worker error", msg.message);
-        this.onError(msg.message);
+      }
+      case "error": {
+        const err = new Error(msg.error ?? "Worker render error");
+        if (msg.requestId !== undefined) {
+          const waiter = this.loadWaiters.get(msg.requestId);
+          if (waiter) {
+            this.loadWaiters.delete(msg.requestId);
+            waiter.reject(err);
+            break;
+          }
+          if (msg.requestId === this.renderInFlight) {
+            this.renderInFlight = null;
+            this.options.onError?.(err.message);
+            if (this.pendingRenderMs !== null) {
+              const timeMs = this.pendingRenderMs;
+              this.pendingRenderMs = null;
+              this.sendRender(timeMs);
+            }
+            break;
+          }
+        }
+        this.options.onError?.(err.message);
+        break;
+      }
+      default:
+        log("unknown worker message", msg);
         break;
     }
   }
 
-  private paintFrame(msg: { seq: number; w: number; h: number; buffer: ArrayBuffer }): void {
-    if (msg.seq <= this.lastPaintedSeq) return; // stale frame
-    this.lastPaintedSeq = msg.seq;
-    if (!this.canvas || !this.ctx) return;
-    if (this.canvas.width !== msg.w || this.canvas.height !== msg.h) {
-      this.canvas.width = msg.w;
-      this.canvas.height = msg.h;
-    }
-    const pixels = new Uint8ClampedArray(msg.buffer);
-    this.ctx.putImageData(new ImageData(pixels, msg.w, msg.h), 0, 0);
+  private settleReady(err: Error | null): void {
+    if (this.readySettled) return;
+    this.readySettled = true;
+    if (err) this.readyReject?.(err);
+    else this.readyResolve?.();
+    this.readyResolve = null;
+    this.readyReject = null;
+  }
+
+  /** Reject every waiter and report through onError. */
+  private fail(err: Error): void {
+    this.settleReady(err);
+    for (const [, waiter] of this.loadWaiters) waiter.reject(err);
+    this.loadWaiters.clear();
+    this.renderInFlight = null;
+    this.pendingRenderMs = null;
+    if (!this.disposed) this.options.onError?.(err.message);
   }
 }

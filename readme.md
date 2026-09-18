@@ -5,10 +5,10 @@ A pure Rust ASS/SSA subtitle parser and renderer, compiled to WebAssembly. No li
 ## Features
 
 - **Pure Rust** — no C/C++ FFI, no libass. Full control over the rendering pipeline.
-- **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles (SSA), Events, override tags (~40 tag types)
-- **Native rendering** — glyph rasterization via `ab_glyph`, scanline fill for vector drawing, box blur, outline, shadow, clipping
-- **WebAssembly** — compiles to WASM, renders to HTML Canvas via `putImageData`
-- **Font management** — TTF/OTF loading, bold/italic matching, built-in fallback (DejaVu Sans)
+- **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles (SSA), Events, `[Fonts]`/`[Graphics]` attachments, override tags (see matrix below)
+- **Native rendering** — glyph rasterization via `ab_glyph`, per-segment layout, scanline fill for vector drawing, elliptical outlines, shadows, blur, rectangular and vector clipping
+- **WebAssembly** — compiles to WASM, renders to HTML Canvas via `putImageData`, or headlessly in a Web Worker
+- **Font management** — TTF/OTF loading with sfnt metadata detection, deterministic matching, faux bold/italic synthesis, built-in fallback (DejaVu Sans)
 
 ## Architecture
 
@@ -20,74 +20,89 @@ src/
 ├── parser/
 │   ├── mod.rs              # ASS document parser (section dispatch)
 │   ├── errors.rs           # Parse error types, section headers
+│   ├── attachment.rs       # [Fonts]/[Graphics] attachment parser
 │   ├── script_info.rs      # [Script Info] parser
-│   ├── style.rs            # [V4+ Styles] parser
+│   ├── style.rs            # [V4+ Styles]/[V4 Styles] parser
 │   └── event.rs            # [Events] parser
 ├── renderer/
 │   ├── mod.rs              # Main renderer orchestrator
-│   ├── font.rs             # Font loading and management (ab_glyph)
-│   ├── glyph_cache.rs      # Glyph rasterization cache
-│   ├── shaper.rs           # Text shaping, measurement, word-wrap
-│   ├── compositor.rs       # Style resolution, positioning, rendering
-│   ├── drawing.rs          # ASS vector drawing parser (m/l/b/n/c) + types
-│   ├── effects.rs          # Outline, shadow, blur, clipping
-│   └── buffer.rs           # RGBA pixel buffer with alpha compositing
+│   ├── font.rs             # Font loading, sfnt metadata, matching
+│   ├── glyph_cache.rs      # Glyph rasterization cache (per-font keys, LRU)
+│   ├── shaper.rs           # Text shaping and measurement
+│   ├── compositor.rs       # Layout, style resolution, positioning, rendering
+│   ├── drawing.rs          # ASS vector drawing (m/n/l/b/s/p/c) + masks
+│   ├── effects.rs          # Outline, shadow, blur, clipping, fades
+│   └── buffer.rs           # RGBA pixel buffer, safe allocation, warps
 └── types/
     ├── mod.rs              # Core type re-exports
+    ├── attachment.rs       # Embedded attachment types
     ├── event.rs            # ASS event types
     ├── style.rs            # ASS style types
     ├── script_info.rs      # Script info types
-    ├── override_tag.rs     # Override tag enum + parser (~40 tags)
+    ├── override_tag.rs     # Override tag enum + parser
     ├── color.rs            # ASS color (&HAABBGGRR&) type
     └── time.rs             # ASS timestamp type
 ```
 
 ## Rendering Pipeline
 
-1. **Parse** — ASS file is parsed into `AssDocument` with script info, styles, and events
-2. **Filter** — Active events are selected for the current timestamp
-3. **Sort** — Events are sorted by layer for correct compositing order
-4. **Resolve** — Base style is merged with per-event override tags into a `ResolvedStyle`
-5. **Shape** — Text is mapped to glyph IDs with spacing and line breaks
-6. **Rasterize** — Glyphs are rasterized to alpha bitmaps (faux bold via dilation)
-7. **Effects** — Outline, shadow, blur, and clipping are applied
-8. **Composite** — Glyphs are alpha-blended onto the RGBA buffer
-9. **Display** — Buffer is transferred to canvas via `putImageData`
+1. **Parse** — ASS file is parsed into `AssDocument` (script info, styles, events, attachments)
+2. **Filter** — Active *dialogue* events are selected for the current timestamp (comments never render)
+3. **Sort** — Events are stable-sorted by layer (equal layers keep source order)
+4. **Wrap** — Automatic word-wrapping per the effective wrap style (per-event `\q` or script `WrapStyle`)
+5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`, `\fad`) apply wherever they appear
+6. **Layout** — Every segment is shaped/measured with its own style; alignment, positioning, rotation origins, and opaque boxes use these per-segment dimensions
+7. **Rasterize** — Glyphs are rasterized to coverage bitmaps (per-font cache; faux bold/italic only when the face lacks the style), then sheared/rotated
+8. **Effects** — Elliptical outline, offset shadow, blur, then rectangular/vector clipping
+9. **Composite** — Segments are alpha-blended onto the RGBA buffer
+10. **Display** — Buffer is transferred to canvas via `putImageData`, or read back as bytes in a worker
 
-## Supported Override Tags
+## Override Tag Support Matrix
 
-| Category | Tags |
-|---|---|
-| Position | `\pos`, `\move`, `\org` |
-| Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` |
-| Font | `\fn`, `\fs`, `\b`, `\i`, `\u`, `\s` |
-| Transform | `\frx`, `\fry`, `\frz`, `\fscx`, `\fscy` |
-| Border/Shadow | `\bord`, `\shad`, `\be`, `\blur` |
-| Clipping | `\clip`, `\iclip` |
-| Drawing | `\p`, `\p1` vector paths |
-| Fade | `\fad`, `\fade` |
-| Karaoke | `\k`, `\K`/`\kf`, `\ko` |
-| Wrapping | `\N`, `\n` |
+Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered with documented limits; **Parsed** = parsed but not rendered; **—** = not recognized (kept as `Unknown`, ignored by the renderer).
 
-`\q` and script-level `WrapStyle` control automatic word-wrapping; explicit `\N`/`\n` breaks are also supported.
+| Category | Supported | Partial | Parsed |
+|---|---|---|---|
+| Position | `\pos`, `\move` (with/without timing), `\org` | | |
+| Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | | |
+| Font | `\fn`, `\fs`, `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
+| Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz`, `\fscx`, `\fscy`, `\fax`, `\fay` | Rotation uses a fixed perspective distance; shear is applied pre-rotation | |
+| Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative), `\be`, `\blur` | | |
+| Clipping | `\clip`, `\iclip` (rectangular and vector) | | |
+| Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
+| Fade | `\fad`, `\fade` | `\fade` with degenerate timing saturates instead of dividing by zero | |
+| Karaoke | `\k` (secondary→primary at syllable start), `\K`/`\kf` (per-glyph sweep with edge glyph split), `\ko` (outline hidden from syllable start) | Sweep is per-glyph, not sub-glyph | |
+| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q` | Smart wrap (mode 0) balances lines via raggedness minimization — an approximation of VSFilter | |
+| Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
+| Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear, clip, position | Unsupported inner tags are ignored | |
+| Alignment | `\an`, legacy `\a` (SSA numbering converted) | | |
+| Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` | `LayoutResX/Y`, `YCbCr Matrix` are parsed but unused (ASS-2 draft / RGB pipeline) | |
+| Attachments | | | `[Fonts]`/`[Graphics]` parsed, decoded, and exposed via `get_attachment_*`; the renderer does not auto-load them — call `load_font(name, data)` |
+| Misc | | | `Effect` field (Banner/Scroll not rendered); `Kerning`, `FontSizeMultiplier`, `HardLineBreak` exist as tag types but are not produced by the parser |
 
-Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is inverted (`00` opaque, `FF` transparent). `\2c` is the karaoke secondary color and is visible while a karaoke syllable is not yet complete; `\4c` controls the shadow/back-color channel.
+Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur is applied **before** clipping so blurred pixels cannot bleed outside the clip region.
+
+## Known Limitations
+
+- No complex text shaping: left-to-right `ab_glyph` shaping only (no HarfBuzz, no RTL, no ligature-aware caret mapping).
+- One face per text segment; per-glyph font fallback is not implemented.
+- Rotation perspective distance is fixed (500 units); extreme angles degrade to empty glyphs rather than over-allocating.
+- `\r` preserves line-global state (position, clip, fades, drawing mode) by design; see `AUDIT_FIXES.md`.
+- Reference (libass pixel-comparison) tests and fuzz targets are not yet wired into CI; see `AUDIT_FIXES.md` for status.
 
 ## Build
 
 ```bash
-# Install wasm-pack
+# Install wasm-pack (also done automatically by ./build.sh)
 cargo install wasm-pack
 
-# Build for WebAssembly
-wasm-pack build --target web
-
-# Output will be in pkg/
+# Build for WebAssembly (output in pkg/)
+wasm-pack build --target web --out-dir pkg
 ```
 
 ## Usage
 
-Exported methods keep their Rust snake_case names (no `js_name` remapping).
+Exported methods keep their Rust snake_case names. Methods that take timestamps or sizes validate their inputs and throw on invalid values (non-finite, negative, zero, or unreasonably large); serialization of document queries also throws instead of returning defaults.
 
 ```html
 <script type="module">
@@ -114,45 +129,31 @@ The demo loads the built WASM module from `pkg/` and must be served over HTTP (E
 
 ```bash
 # 1. Build the WASM package (output in pkg/)
-./build.sh                  # or: wasm-pack build --target web
+./build.sh                  # or: wasm-pack build --target web --out-dir pkg
 
 # 2. Serve the repo root
-bun server.ts               # bundled dev server → http://localhost:3001
-# …or any static server, e.g.: python -m http.server 8080
+bun run start               # bundled dev server → http://localhost:8001
 ```
 
-Then open the served `demo/` page and select a video file and an ASS subtitle file. If you load only subtitles, the demo plays them on a virtual timeline.
+Then open `/` (`demo/` landing page, `/basic` for main-thread rendering, `/worker` for worker rendering) and select a video file and an ASS subtitle file. If you load only subtitles, the demo plays them on a virtual timeline. Append `?debug` to enable demo logging.
 
 A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all major features: karaoke (hard swap, sweep, outline), V4+ and V4 (SSA) styles, transforms, movement, clipping, vector drawing, multi-layer compositing, and fade effects.
 
+## Development
+
+```bash
+cargo test                    # Rust unit + integration tests (native)
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+bun install && bun run typecheck   # demo + server typecheck (needs pkg/ built)
+wasm-pack test --headless --chrome # browser WASM tests
+```
+
+CI runs fmt, clippy, native tests, the wasm32 compile check, browser tests, `cargo audit`, and the demo typecheck.
+
 ## Status
 
-### Working
-- ASS/SSA parsing (Script Info, Styles, Events)
-- Override tag parsing (~40 tags)
-- Font loading and management
-- Glyph rasterization with faux bold
-- Basic positioning (numpad alignment 1–9)
-- Automatic word-wrapping (wrap styles 0–3 and per-event `\q`)
-- `\pos`, `\move`, `\org`
-- Outline, Shadow effects
-- Fade (`\fad`, `\fade`, `\1a`–`\4a`)
-- Animated overrides (`\t` with accel, timing args optional)
-- Rotation (`\frz` 2D, `\frx`/`\fry` projective 3D)
-- Karaoke (`\k` hard swap, `\K`/`\kf` per-glyph sweep, `\ko` outline, combined with borders/blur/italic)
-- SSA v4.00 `[V4 Styles]` (format-aware column mapping, alignment conversion, `AlphaLevel`, TertiaryColour)
-- `\clip` / `\iclip`
-- Drawing mode (`\p1` vector paths)
-- Box blur (`\be`, `\blur`)
-- Bold/Italic/Underline/Strikeout
-- WebAssembly bindings
-- Canvas rendering
-
-### Not Yet Implemented
-- HarfBuzz/OpenType complex shaping
-- `[Fonts]` section embedding
-- `[Graphics]` section
-- SIMD optimizations
+See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the full remediation log: every fixed issue, the files changed, the tests added, and the compatibility differences that intentionally remain.
 
 ## License
 

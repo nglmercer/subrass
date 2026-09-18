@@ -41,9 +41,10 @@ impl AssDocument {
 
             // Check for section headers
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                // Process previous section
+                // Process previous section. Content starts on the line
+                // after the header, so error line numbers add one.
                 if let Some(section) = current_section {
-                    process_section(&mut doc, section, &section_lines, section_start_line)?;
+                    process_section(&mut doc, section, &section_lines, section_start_line + 1)?;
                 }
 
                 // Start new section
@@ -64,7 +65,7 @@ impl AssDocument {
 
         // Process last section
         if let Some(section) = current_section {
-            process_section(&mut doc, section, &section_lines, section_start_line)?;
+            process_section(&mut doc, section, &section_lines, section_start_line + 1)?;
         }
 
         // Reject non-empty input that contains no recognizable ASS sections
@@ -124,30 +125,38 @@ fn process_section(
     doc: &mut AssDocument,
     section: Section,
     lines: &[&str],
-    start_line: usize,
+    first_content_line: usize,
 ) -> Result<(), ParseError> {
     match section {
         Section::ScriptInfo => {
-            doc.script_info = script_info::parse_script_info(lines, start_line)?;
+            doc.script_info = script_info::parse_script_info(lines, first_content_line)?;
         }
+        // Repeated style/event sections append: earlier data is kept.
         Section::V4PlusStyles => {
-            doc.styles = style::parse_styles(lines, start_line, false)?;
+            doc.styles
+                .extend(style::parse_styles(lines, first_content_line, false)?);
         }
         Section::V4Styles => {
-            doc.styles = style::parse_styles(lines, start_line, true)?;
+            doc.styles
+                .extend(style::parse_styles(lines, first_content_line, true)?);
         }
         Section::Events => {
-            doc.events = event::parse_events(lines, start_line)?;
+            doc.events
+                .extend(event::parse_events(lines, first_content_line)?);
         }
         Section::Fonts => {
-            doc.attachments
-                .extend(attachment::parse_attachments(lines, AttachmentKind::Font));
+            doc.attachments.extend(attachment::parse_attachments(
+                lines,
+                AttachmentKind::Font,
+                first_content_line,
+            )?);
         }
         Section::Graphics => {
             doc.attachments.extend(attachment::parse_attachments(
                 lines,
                 AttachmentKind::Graphic,
-            ));
+                first_content_line,
+            )?);
         }
     }
     Ok(())
@@ -303,5 +312,38 @@ Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
         let doc = AssDocument::parse(TEST_ASS).unwrap();
         let comments = doc.get_comment_events();
         assert_eq!(comments.len(), 1);
+    }
+
+    #[test]
+    fn test_error_line_numbers_are_exact() {
+        let ass = "[Script Info]\nTitle: x\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,ok\nDialogue: BROKEN LINE\n";
+        let err = AssDocument::parse(ass).unwrap_err();
+        // The broken line is source line 7
+        assert!(err.to_string().contains("line 7"), "{}", err);
+    }
+
+    #[test]
+    fn test_duplicate_sections_append() {
+        let ass = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,one\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,two\n";
+        let doc = AssDocument::parse(ass).unwrap();
+        assert_eq!(doc.events.len(), 2);
+        assert_eq!(doc.events[1].text, "two");
+    }
+
+    #[test]
+    fn test_unknown_section_does_not_leak() {
+        // Lines under an unknown section must not attach to Events,
+        // and Events parsing must resume afterwards.
+        let ass = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,one\n\n[Bogus]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,ghost\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,two\n";
+        let doc = AssDocument::parse(ass).unwrap();
+        assert_eq!(doc.events.len(), 2);
+        assert!(!doc.events.iter().any(|e| e.text == "ghost"));
+    }
+
+    #[test]
+    fn test_script_info_only_document() {
+        // Valid: metadata with no styles/events renders nothing.
+        let doc = AssDocument::parse("[Script Info]\nTitle: empty\n").unwrap();
+        assert!(doc.styles.is_empty() && doc.events.is_empty());
     }
 }

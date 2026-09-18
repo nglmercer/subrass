@@ -21,5 +21,12 @@
   "mixed-sizes": {"time_ms": 1000},
   "effect-banner": {"time_ms": 1500},
   "effect-scroll": {"time_ms": 1500},
-  "layers": {"time_ms": 1000}
+  "layers": {"time_ms": 1000},
+  "relative-fs": {"time_ms": 1000},
+  "shear-rotation": {"time_ms": 1000},
+  "karaoke-kf-frz": {"time_ms": 1500},
+  "karaoke-kf-frx": {"time_ms": 1500},
+  "karaoke-kf-fax": {"time_ms": 1500},
+  "karaoke-kf-fay": {"time_ms": 1500},
+  "opaque-box-multiline": {"time_ms": 1000}
 }}

@@ -54,7 +54,7 @@ $prov = [ordered]@{
     video          = @(256, 144)
     background     = 'black (ass composited over opaque black)'
     generated_utc  = (Get-Date).ToUniversalTime().ToString('o')
-    note           = 'effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent)'
+    note           = 'effect-banner, effect-scroll, font-fallback and opaque-box-multiline are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent; multiline opaque boxes are per-line in libass, whole-block here)'
 }
 $prov | ConvertTo-Json | Set-Content 'tests/reference/provenance.json'
 Write-Host 'wrote tests/reference/provenance.json'

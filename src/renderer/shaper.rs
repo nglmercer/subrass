@@ -114,8 +114,10 @@ impl TextShaper {
             baseline: 0.0,
             missing_glyphs: 0,
         };
-        // Degenerate sizes (e.g. `\fs-5`, `\fs0`, NaN) shape to nothing
-        // instead of feeding ab_glyph invalid scales.
+        // Raw degenerate sizes (<= 0, NaN) shape to nothing instead
+        // of feeding ab_glyph invalid scales. (At the override level,
+        // `\fs0` and non-positive results reset to the style size per
+        // libass; this guard covers direct callers and style data.)
         if !font_size.is_finite() || font_size <= 0.0 {
             return empty;
         }

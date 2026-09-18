@@ -61,7 +61,14 @@ detection on top.
 
 Known-divergent (measured, not gated): `effect-banner`, `effect-scroll`
 (libass ignores legacy effects and renders static text), `font-fallback`
-(fontconfig fallback is environment-dependent).
+(fontconfig fallback is environment-dependent), `opaque-box-multiline`
+(whole-block box here vs per-line boxes in libass; reference pending).
+
+Pending libass frames (golden-covered; gate once generated with
+`tests/reference/gen_references.ps1`): `relative-fs`, `shear-rotation`,
+`karaoke-kf-frz`, `karaoke-kf-frx`, `karaoke-kf-fax`, `karaoke-kf-fay`,
+`opaque-box-multiline`. The harness reports these as pending, never as
+passes, until their `.rgba` files exist.
 
 ## Feature matrix
 
@@ -72,23 +79,23 @@ Known-divergent (measured, not gated): `effect-banner`, `effect-scroll`
 |---|---|---|---|---|
 | `\pos`, `\move` (+timing), `\org` | ✓ | ✓ | position/move G+L | Supported |
 | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | ✓ | ✓ | reset/transform G+L | Supported |
-| `\fn`, `\fs` (absolute), `\fsp`, `\b` (numeric weights), `\i`, `\u`, `\s` | ✓ | ✓ | mixed-sizes G+L | Supported |
+| `\fn`, `\fs` (absolute, relative `\fs+N/-N`, bare reset, `\t` progress), `\fsp`, `\b` (numeric weights), `\i`, `\u`, `\s` | ✓ | `test_relative_fs_*`, `test_fs_relative_parsing_matches_libass` | mixed-sizes/relative-fs G+L | Supported |
 | `\b` weight selection incl. faux-only-if-needed | ✓ | ✓ | — | Supported |
 | `\fr`, `\frx`, `\fry`, `\frz` (CCW+, libass order/signs) | ✓ | `test_frz_positive_runs_counterclockwise` | rotation/transform G+L | Supported |
 | `\fscx`, `\fscy` | ✓ | ✓ | mixed-sizes/transform G+L | Supported |
-| `\fax`, `\fay` pre-rotation shear + `\fay` baseline slant | ✓ | `test_shear_applies_to_rotated_text_at_render`, `test_fay_baseline_shear_*` | shear G+L (IoU 0.972) | Supported |
+| `\fax`, `\fay` pre-rotation shear + `\fay` baseline slant | ✓ | `test_shear_applies_to_rotated_text_at_render`, `test_fay_baseline_shear_*` | shear G+L (IoU 0.972), shear-rotation G (L pending) | Supported |
 | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad`, `\be`, `\blur` | ✓ | `test_scaled_*` | border-shadow G+L | Supported |
 | `ScaledBorderAndShadow` yes/no | ✓ | `test_scaled_*` | — | Supported |
 | `\clip`, `\iclip` rect + vector | ✓ | ✓ | clip/vector-clip G+L | Supported |
 | Drawings `\pN`, `\pbo`, `m n l b s p c` | ✓ | ✓ | drawing G+L (IoU 0.828) | Supported (B-splines subdivided) |
 | `\fad`, `\fade` | ✓ | ✓ | fade G+L | Supported |
-| `\k`, `\kt`, `\K`/`\kf` within-glyph sweep, `\ko` | ✓ | `test_kf_sweep_splits_within_glyph`, `test_karaoke_outline_suppressed_before_start` | karaoke* G+L | Supported |
+| `\k`, `\kt`, `\K`/`\kf` within-glyph sweep, `\ko` | ✓ | `test_kf_sweep_splits_within_glyph`, `test_karaoke_outline_suppressed_before_start` | karaoke* G+L, karaoke-kf-{frz,frx,fax,fay} G (L pending) | Supported (sweep edge is proportional across the transformed bitmap under rotation/perspective; unrotated is exact) |
 | `\N`, `\n`, `\h`, `\q`; wrap styles 0/1/2/3 | ✓ | `test_wrap_style_0_balances_lines`, … | wrap G+L (IoU 0.985) | Supported (spaces-only breaks, no CJK opportunities) |
 | Per-line alignment (1–9) | — | `test_multiline_centers_each_line`, `*_right_aligns_*`, `*_left_aligns_*` | wrap/alignment G+L | Supported |
 | `\r`, `\rStyleName` (line-global preserve) | ✓ | reset tests | reset G+L | Supported |
 | `\t` animation (colors/alpha/size/scales/spacing/rotation/border/shadow/shear/clip/pos) | ✓ | ✓ | transform G+L | Supported; unsupported inner tags ignored (documented) |
 | `\an`, legacy `\a` | ✓ | ✓ | alignment G+L | Supported |
-| `BorderStyle=3` opaque box (Outline colour, outline padding) | — | opaque-box tests | opaque-box G+L (IoU 0.992) | Supported single-line; multi-line covers whole block (libass: per-line) |
+| `BorderStyle=3` opaque box (Outline colour, outline padding) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G (L: known-divergent) | Supported single-line; multi-line covers whole block (libass: per-line) |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
 | `\fe` (parsed/stored/reset, no charset remap) | ✓ | `test_fe_resolve_and_reset` | — | Partial |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |

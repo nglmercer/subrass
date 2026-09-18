@@ -88,11 +88,19 @@ fn negative_and_zero_geometry_is_safe() {
         let bytes = render(text).expect("degenerate geometry must not error");
         assert_eq!(bytes.len(), 256 * 144 * 4);
     }
-    // Zero-size text leaves (almost) no ink but a valid frame.
+    // libass: \fs0 resets to the style size, rendering like plain text.
     let bytes = render(r"{\fs0}zero").expect("renders");
+    let plain = render("zero").expect("renders");
+    assert_eq!(
+        ink_pixels(&bytes),
+        ink_pixels(&plain),
+        "\\fs0 must reset to the style size"
+    );
+    // Zero scale still degrades to (almost) no ink, safely.
+    let bytes = render(r"{\fscx0\fscy0}zero").expect("renders");
     assert!(
         ink_pixels(&bytes) < 10,
-        "zero font size must be ~invisible, got {} ink px",
+        "zero scale must be ~invisible, got {} ink px",
         ink_pixels(&bytes)
     );
 }

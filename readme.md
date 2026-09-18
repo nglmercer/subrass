@@ -65,7 +65,7 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 |---|---|---|---|
 | Position | `\pos`, `\move` (with/without timing), `\org` | | |
 | Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | | |
-| Font | `\fn`, `\fs`, `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
+| Font | `\fn`, `\fs` (absolute, relative `\fs+N/-N`, bare reset), `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
 | Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz` (counterclockwise on screen), `\fscx`, `\fscy`, `\fax`, `\fay` (pre-rotation shear + `\fay` baseline slant, libass order) | Rotation uses a fixed perspective distance (see known limitations) | |
 | Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative), `\be`, `\blur` | | |
 | Clipping | `\clip`, `\iclip` (rectangular and vector) | | |
@@ -89,7 +89,7 @@ Position tags use the event's alignment as their anchor: for example, `\an5\pos(
 - Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
 - Rotation perspective distance is fixed (500 units); extreme angles degrade to empty glyphs rather than over-allocating.
 - `\r` preserves only line-global state (position, clip, fades) by design; drawing mode, fonts, colors, rotation, karaoke, and alignment reset.
-- Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz` and run outside CI.
+- Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz`; short smoke runs are CI-gated, longer sessions run locally.
 
 ## Build
 

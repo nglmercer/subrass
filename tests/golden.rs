@@ -149,6 +149,49 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             ],
             1000,
         ),
+        (
+            // Relative sizes chain off the *current* size: 36 -> 54
+            // (\fs+5) -> 27 (\fs-5 of 54), proving relativity; the
+            // second event animates \fs+10 to progress 0.5 at 1000ms.
+            "relative-fs".to_string(),
+            vec![
+                ev(0, "Default", "", "S{\\fs+5}M{\\fs-5}S"),
+                ev(0, "Default", "", "{\\an7\\t(0,2000,\\fs+10)}Grow"),
+            ],
+            1000,
+        ),
+        (
+            "shear-rotation".to_string(),
+            one("Default", "{\\fax0.3\\fay-0.2\\frz30\\frx20}ShearRot"),
+            1000,
+        ),
+        // Centered so the transformed sweep stays fully on-frame
+        // (bottom alignment clips the slanted/rotated syllable).
+        (
+            "karaoke-kf-frz".to_string(),
+            one("Default", "{\\an5\\frz30\\kf100}Swe{\\kf100}ep"),
+            1500,
+        ),
+        (
+            "karaoke-kf-frx".to_string(),
+            one("Default", "{\\an5\\frx30\\kf100}Swe{\\kf100}ep"),
+            1500,
+        ),
+        (
+            "karaoke-kf-fax".to_string(),
+            one("Default", "{\\an5\\fax0.5\\kf100}Swe{\\kf100}ep"),
+            1500,
+        ),
+        (
+            "karaoke-kf-fay".to_string(),
+            one("Default", "{\\an5\\fay0.5\\kf100}Swe{\\kf100}ep"),
+            1500,
+        ),
+        (
+            "opaque-box-multiline".to_string(),
+            one("Box", "{\\an5}First line\\NSecond longer line"),
+            1000,
+        ),
     ]
 }
 

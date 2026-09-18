@@ -18,6 +18,8 @@ Targets:
   (extreme positions/clips/rotations/shears/blurs/dimensions degrade to
   empty output or errors, never panic).
 
-These need nightly libfuzzer and run outside CI. A stable-toolchain,
-no-panic smoke over hostile values lives in `tests/robustness.rs`, and a
-parse corpus without panics in `tests/corpus.rs`.
+Short smoke runs (build + 20s per target) are CI-gated
+(`fuzz-smoke` job); run longer sessions locally for real coverage.
+A stable-toolchain, no-panic smoke over hostile values lives in
+`tests/robustness.rs`, and a parse corpus without panics in
+`tests/corpus.rs`.

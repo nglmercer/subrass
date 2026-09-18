@@ -871,7 +871,8 @@ impl Compositor {
     ///
     /// ```text
     /// animated:  \c \1c \2c \3c \4c \alpha \1a \2a \3a \4a
-    ///            \fs \fscx \fscy \fsp
+    ///            \fs (absolute lerps; \fs+N/-N scales by 1+p*d/10)
+    ///            \fscx \fscy \fsp
     ///            \fr \frx \fry \frz \fax \fay
     ///            \bord \xbord \ybord \shad \xshad \yshad
     ///            \be \blur
@@ -973,9 +974,29 @@ impl Compositor {
                     let from = resolved.scale_y;
                     resolved.scale_y = from + (s - from) * progress;
                 }
+                // libass `\t` + `\fs`: absolute targets interpolate
+                // linearly; relative deltas scale the current size by
+                // (1 + p * d / 10). Non-positive results reset to style.
                 OverrideTag::FontSize(s) => {
                     let from = resolved.font_size;
-                    resolved.font_size = from + (s - from) * progress;
+                    let next = from + (s - from) * progress;
+                    if next.is_finite() && next > 0.0 {
+                        resolved.font_size = next;
+                    } else {
+                        resolved.font_size = resolved.base_style.font_size;
+                    }
+                }
+                OverrideTag::FontSizeRelative(delta) => {
+                    let from = resolved.font_size;
+                    let next = from * (1.0 + progress * delta / 10.0);
+                    if next.is_finite() && next > 0.0 {
+                        resolved.font_size = next;
+                    } else {
+                        resolved.font_size = resolved.base_style.font_size;
+                    }
+                }
+                OverrideTag::FontSizeReset => {
+                    resolved.font_size = resolved.base_style.font_size;
                 }
                 OverrideTag::LetterSpacing(s) => {
                     let from = resolved.spacing;
@@ -1097,7 +1118,27 @@ impl Compositor {
             OverrideTag::Underline(v) => resolved.underline = *v,
             OverrideTag::StrikeOut(v) => resolved.strike_out = *v,
             OverrideTag::FontName(name) => resolved.font_name = name.clone(),
-            OverrideTag::FontSize(size) => resolved.font_size = *size,
+            // libass `ass_parse.c` (`\fs` branch): absolute sizes assign;
+            // a computed size <= 0 (or non-finite) resets to the style.
+            OverrideTag::FontSize(size) => {
+                if size.is_finite() && *size > 0.0 {
+                    resolved.font_size = *size;
+                } else {
+                    resolved.font_size = resolved.base_style.font_size;
+                }
+            }
+            // Relative `\fs+N/-N`: scale the current size by (1 + d/10).
+            OverrideTag::FontSizeRelative(delta) => {
+                let next = resolved.font_size * (1.0 + delta / 10.0);
+                if next.is_finite() && next > 0.0 {
+                    resolved.font_size = next;
+                } else {
+                    resolved.font_size = resolved.base_style.font_size;
+                }
+            }
+            OverrideTag::FontSizeReset => {
+                resolved.font_size = resolved.base_style.font_size;
+            }
             OverrideTag::FontEncoding(enc) => resolved.font_encoding = *enc,
             OverrideTag::LetterSpacing(sp) => resolved.spacing = *sp,
             OverrideTag::PrimaryColor(c) => resolved.color = *c,
@@ -3808,6 +3849,65 @@ mod tests {
     }
 
     #[test]
+    fn test_relative_fs_scales_current_size() {
+        // libass: \fs+10 doubles, \fs-5 halves the *current* size.
+        let base = Style::new("Default"); // 48.0
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let size_of = |text: &str| {
+            let segments = parse_text_segments(text);
+            Compositor::resolve_segment_style(&resolved, &segments[0], &event, &[], 1000, 0, 10_000)
+                .font_size
+        };
+        assert!((size_of(r"{\fs+10}x") - 96.0).abs() < 1e-9);
+        assert!((size_of(r"{\fs-5}x") - 24.0).abs() < 1e-9);
+        // Relative applies to earlier tags in the same group (chained).
+        assert!((size_of(r"{\fs24\fs+10}x") - 48.0).abs() < 1e-9);
+        assert!((size_of(r"{\fs+10\fs+10}x") - 192.0).abs() < 1e-9);
+        // Absolute still assigns.
+        assert_eq!(size_of(r"{\fs24}x"), 24.0);
+        // Bare \fs and non-positive results reset to the style size.
+        assert_eq!(size_of(r"{\fs24\fs}x"), base.font_size);
+        assert_eq!(size_of(r"{\fs0}x"), base.font_size);
+        assert_eq!(size_of(r"{\fs-10}x"), base.font_size);
+        assert_eq!(
+            size_of(r"{\t(1000,2000,\fs+10)}x"),
+            base.font_size,
+            "transform window not started"
+        );
+    }
+
+    #[test]
+    fn test_relative_fs_inside_transform_uses_progress() {
+        // libass: inside \t, relative \fs scales by (1 + p*d/10).
+        let base = Style::new("Default"); // 48.0
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let size_at = |text: &str, time_ms: u64| {
+            let segments = parse_text_segments(text);
+            Compositor::resolve_segment_style(
+                &resolved,
+                &segments[0],
+                &event,
+                &[],
+                time_ms,
+                0,
+                10_000,
+            )
+            .font_size
+        };
+        // p = 0.5 at t = 1500: 48 * 1.5 = 72.
+        assert!((size_at(r"{\t(1000,2000,\fs+10)}x", 1500) - 72.0).abs() < 1e-9);
+        // p = 1 after the window: 48 * 2 = 96.
+        assert!((size_at(r"{\t(1000,2000,\fs+10)}x", 2500) - 96.0).abs() < 1e-9);
+        // Negative delta shrinks toward zero, then resets at the floor.
+        assert!((size_at(r"{\t(1000,2000,\fs-5)}x", 1500) - 36.0).abs() < 1e-9);
+        assert_eq!(size_at(r"{\t(1000,2000,\fs-10)}x", 2500), base.font_size);
+    }
+
+    #[test]
     fn test_transform_animates_supported_set() {
         // Every animatable tag reaches its target at progress 1.
         let base = Style::new("Default");
@@ -4564,14 +4664,29 @@ mod tests {
     }
 
     #[test]
-    fn test_degenerate_font_size_renders_nothing_safely() {
-        // \fs0 / negative sizes shape to nothing instead of panicking
-        // or producing garbage.
-        for text in ["{\\fs0}Hi", "{\\fs-5}Hi"] {
-            let buf = render_text(text, 1000);
-            assert_eq!(ink_bbox(&buf), None, "{text:?} must render nothing");
-        }
-        // Positive sizes still render.
+    fn test_degenerate_font_size_resets_to_style_safely() {
+        // libass: \fs0 and sizes computing to <= 0 reset to the event
+        // style size (rendering normally), instead of panicking,
+        // rendering nothing, or producing garbage.
+        let plain = render_text("Hi", 1000);
+        assert_eq!(
+            render_text("{\\fs0}Hi", 1000).as_bytes(),
+            plain.as_bytes(),
+            "\\fs0 must reset to style size"
+        );
+        assert_eq!(
+            render_text("{\\fs-10}Hi", 1000).as_bytes(),
+            plain.as_bytes(),
+            "relative size computing to 0 must reset to style size"
+        );
+        // Relative sizes that stay positive scale the current size.
+        let half = ink_bbox(&render_text("{\\fs-5}Hi", 1000));
+        let normal = ink_bbox(&plain);
+        assert!(half.is_some() && normal.is_some());
+        assert!(
+            half.unwrap().0 < normal.unwrap().0,
+            "\\fs-5 must render smaller than the style size"
+        );
         assert!(ink_bbox(&render_text("{\\fs+10}Hi", 1000)).is_some());
     }
 

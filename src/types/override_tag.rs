@@ -33,11 +33,17 @@ pub enum OverrideTag {
     Underline(bool),
     StrikeOut(bool),
     FontName(String),
-    /// Absolute `\fs` size. Reference ASS has no relative `\fs+N`
-    /// form: `strtod`-based parsers read the sign as part of an
-    /// absolute number, so `\fs+10` means size 10. This parser matches
-    /// that behavior exactly.
+    /// Absolute `\fs` size (no leading sign), e.g. `\fs24`.
+    /// A computed size `<= 0` resets to the event style size (libass).
     FontSize(f64),
+    /// Relative `\fs+N` / `\fs-N` delta (signed number after `\fs`).
+    /// libass scales the *current* size: `size * (1 + delta / 10)`,
+    /// so `\fs+10` doubles and `\fs-5` halves the current size.
+    /// Inside `\t`, progress `p` interpolates the factor:
+    /// `size * (1 + p * delta / 10)`.
+    FontSizeRelative(f64),
+    /// Bare `\fs` (no argument): reset to the event style size (libass).
+    FontSizeReset,
     LetterSpacing(f64),
     /// `\fe<id>` font encoding/charset override (stored in the resolved
     /// style; shaping stays Unicode-based, so charset remapping itself
@@ -238,6 +244,7 @@ impl OverrideTag {
         let f = |v: f64| v.is_finite();
         match self {
             Self::FontSize(v)
+            | Self::FontSizeRelative(v)
             | Self::LetterSpacing(v)
             | Self::RotationX(v)
             | Self::RotationY(v)
@@ -586,10 +593,19 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
         }
         "fn" => Some(OverrideTag::FontName(params?.trim().to_string())),
         "fs" => {
-            // Absolute size; a leading sign is part of the number
-            // (strtod-compatible: `\fs+10` is size 10, not relative).
-            let val = params?.parse().ok()?;
-            Some(OverrideTag::FontSize(val))
+            // libass `ass_parse.c`: a leading `+`/`-` makes the size
+            // relative to the current size; otherwise it is absolute.
+            // Bare `\fs` resets to the event style size.
+            let raw = params.unwrap_or("").trim();
+            if raw.is_empty() {
+                return Some(OverrideTag::FontSizeReset);
+            }
+            let val: f64 = raw.parse().ok()?;
+            if raw.starts_with('+') || raw.starts_with('-') {
+                Some(OverrideTag::FontSizeRelative(val))
+            } else {
+                Some(OverrideTag::FontSize(val))
+            }
         }
         "fe" => {
             let val = params?.parse().ok()?;
@@ -1112,15 +1128,28 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_sign_is_absolute_not_relative() {
-        // Reference ASS has no relative \fs form: strtod-compatible
-        // parsers read the sign as part of an absolute number.
+    fn test_fs_relative_parsing_matches_libass() {
+        // libass: a leading +/- makes \fs relative to the current size.
         let tags = OverrideTag::parse_from_text("{\\fs+10}x");
-        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == 10.0));
+        assert!(matches!(tags[0], OverrideTag::FontSizeRelative(d) if d == 10.0));
         let tags = OverrideTag::parse_from_text("{\\fs-5}x");
-        assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == -5.0));
+        assert!(matches!(tags[0], OverrideTag::FontSizeRelative(d) if d == -5.0));
+        // No sign: absolute.
         let tags = OverrideTag::parse_from_text("{\\fs24}x");
         assert!(matches!(tags[0], OverrideTag::FontSize(s) if s == 24.0));
+        // Bare \fs resets to the event style size.
+        let tags = OverrideTag::parse_from_text("{\\fs}x");
+        assert!(matches!(tags[0], OverrideTag::FontSizeReset));
+        // Parenthesized and signed forms inside \t parse identically.
+        let tags = OverrideTag::parse_from_text("{\\fs(+4)}x");
+        assert!(matches!(tags[0], OverrideTag::FontSizeRelative(d) if d == 4.0));
+        let tags = OverrideTag::parse_from_text("{\\t(0,1000,\\fs+10)}x");
+        match &tags[0] {
+            OverrideTag::Transform { tags: inner, .. } => {
+                assert!(matches!(inner[0], OverrideTag::FontSizeRelative(d) if d == 10.0));
+            }
+            other => panic!("expected Transform, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1321,6 +1350,8 @@ mod tests {
         assert!(OverrideTag::Clip(0, 0, 1, 1).is_line_global());
         assert!(!OverrideTag::Bold(700).is_line_global());
         assert!(!OverrideTag::FontSize(10.0).is_line_global());
+        assert!(!OverrideTag::FontSizeRelative(10.0).is_line_global());
+        assert!(!OverrideTag::FontSizeReset.is_line_global());
         // \an and \q are event-layout (whole-line effect) but NOT
         // \r-preserved: \r resets them like other style state.
         assert!(!OverrideTag::Alignment(7).is_line_global());
@@ -1342,6 +1373,8 @@ mod tests {
         // Segment-level tags are neither.
         assert!(!OverrideTag::Bold(700).is_event_layout());
         assert!(!OverrideTag::FontSize(10.0).is_event_layout());
+        assert!(!OverrideTag::FontSizeRelative(10.0).is_event_layout());
+        assert!(!OverrideTag::FontSizeReset.is_event_layout());
         assert!(!OverrideTag::KaraokeDuration(10).is_event_layout());
         assert!(!OverrideTag::Drawing(1).is_event_layout());
         assert!(!OverrideTag::Reset(None).is_event_layout());

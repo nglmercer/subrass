@@ -1,7 +1,12 @@
 # Audit Remediation Log
 
-Remediation of the 100-item audit in `temp_plan.md`, grouped by phase.
-All Rust behavior changes carry regression tests; run `cargo test`.
+Remediation of the 100-item audit in `temp_plan.md`, grouped by phase,
+plus follow-up review passes. All Rust behavior changes carry regression
+tests; run `cargo test`. `CONFORMANCE.md` is the test-backed
+compatibility statement; this file is the history of how it got there.
+
+Applies to HEAD after `ff336a4` (second-pass remediation) and the
+follow-up pass described at the bottom.
 
 ## Phase 1 — Safety invariants (#1–3, #70–75, #95)
 
@@ -58,7 +63,8 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   empty values default, malformed values error.
 - **#10 Strict styles** (`src/parser/style.rs`, `src/types/style.rs`): malformed
   non-empty values error (incl. non-finite floats); empty values keep defaults;
-  `MAX_STYLES` cap; case-insensitive keywords.
+  style field-count mismatches error; `MAX_STYLES` cap; case-insensitive
+  keywords.
 - **#11 ScriptInfo validation** (`src/types/script_info.rs`): `set_field`
   returns `Result`; bad `PlayRes` (incl. 0), `WrapStyle` (> 3), `ScriptType`,
   `YCbCr Matrix`, `ScaledBorderAndShadow` produce line-numbered errors.
@@ -73,8 +79,9 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   the syllable start, primary fill + outline from the exact start instant
   (corrected from an earlier reversed implementation). Helper
   `karaoke_outline_suppressed`.
-- **#16 Karaoke ordering**: `\K`/`\kf` sweep edges clamp to [0, 1]; `\ko` and
-  sweep combine per documented rules.
+- **#16 Karaoke ordering**: `\K`/`\kf` sweep edges clamp to [0, 1], split
+  within glyph bitmaps (a single glyph holds primary and secondary pixels
+  during the sweep); `\ko` and sweep combine per documented rules.
 - **#17 `\n` vs `\N`**: `\N` always breaks; `\n` is a space except in wrap
   mode 2, in segmentation (`parse_text_segments_with_wrap`), wrapping, and
   clean-text extraction.
@@ -104,8 +111,10 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   support, elliptical `apply_outline_xy` with degenerate-axis fallback.
 - **#23 X/Y shadows**: `shadow_x/shadow_y` (signed, incl. negatives),
   `\xshad \yshad` (and `\t`) support; active when either is non-zero.
-- **#24 `\fax \fay`**: parsed, transformed (`\t`-able), and rendered via
-  `shear_coverage_bitmap` (bilinear, bounded, clamped ±8) before rotation.
+- **#24 `\fax \fay`**: parsed, transformed (`\t`-able), and rendered as
+  pre-rotation shear in glyph-local coordinates before the Z/X/Y rotation
+  matrix — matching libass `calc_transform_matrix`, which builds the shear
+  basis first and composes rotations over it. Bounded, clamped ±8.
 - **#25 `ScaledBorderAndShadow`**: threaded from ScriptInfo; `no` maps script
   units 1:1 to video pixels for borders/shadows (default `yes` scales).
 - **#26 `LayoutResX/Y`**: parsed and validated; unused with a documented reason
@@ -130,15 +139,18 @@ All Rust behavior changes carry regression tests; run `cargo test`.
 - **#35 Layout measurement**: two-pass layout — every segment resolved (incl.
   `\t` at the frame time) and shaped with its own style; alignment, `\pos`,
   `\move`, rotation origins, and opaque boxes use block metrics from the same
-  dimensions used for rendering. Karaoke recolor applies post-layout.
+  dimensions used for rendering. Karaoke recolor applies post-layout, with
+  layout-aware (shaped-width) sweep edges.
 - **#36 Shaper measurement**: per-line trailing-spacing rule (no more global
   `max_x` corruption on newlines); `measure_text` returns the widest line.
 - **#82 Opaque box**: uses layout block metrics; back-color alpha honored;
-  margins saturate.
-- **#83 `\r` semantics**: resets segment state to the event/named style while
-  preserving line-global state (position, move, origin, clips, fades, drawing
-  mode). Documented as the chosen semantics (libass/VSFilter differ in
-  details; placement-independent line-globals are the consistent rule here).
+  margins saturate. Single-line matches libass (IoU 0.992); multi-line covers
+  the whole block while libass draws per-line boxes (known divergence, has a
+  dedicated fixture).
+- **#83 `\r` semantics**: resets segment state (fonts, colors, border/shadow,
+  rotation, karaoke, wrap, alignment, **drawing mode**, `\pbo`) to the
+  event/named style while preserving line-global state (position, move,
+  origin, clips, fades). `\r` exits drawing mode (`\p` is not line-global).
 
 ## Phase 4 — Fonts, attachments, colors (#37–45, #93, #94, #97)
 
@@ -155,7 +167,8 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   headers (`fontname:` in `[Fonts]`, `filename:` in `[Graphics]`,
   case-insensitive; wrong-section headers error); trailing `\r` handled.
 - **#41 Decode errors**: malformed uuencode payloads are line-numbered errors
-  (never silent empty files); per-attachment and count caps enforced.
+  (never silent empty files); per-attachment and count caps enforced; payload
+  alphabet validated.
 - **#42 Embedded fonts**: exposed to JS (`get_attachment_count/name/kind/data`);
   `[Fonts]` attachments are additionally best-effort auto-loaded by the
   renderer (failures surface via `warnings()`); manual `load_font` remains.
@@ -167,7 +180,8 @@ All Rust behavior changes carry regression tests; run `cargo test`.
 - **#94 Cache keys**: font id + size bits + faux flags; deterministic LRU
   eviction (tick-ordered, protected from evicting the just-inserted glyph).
 - **#97 Shaping tests**: shaping is covered by layout/render tests; complex
-  shaping (HarfBuzz) remains out of scope and is documented.
+  shaping (HarfBuzz) remains out of scope and is documented. Per-glyph
+  fallback across already-loaded faces **is** implemented.
 
 ## Phase 5 — Worker/demo/server (#46–58)
 
@@ -190,7 +204,10 @@ All Rust behavior changes carry regression tests; run `cargo test`.
 - **#55 Traversal**: repeated-decode + root-containment (`resolveContained`)
   for `/pkg/`, `/fonts/`, and `.ts` routes.
 - **#56 Demo errors**: renderer calls wrapped in try/catch (throwing WASM APIs).
-- **#57 `Effect` field**: parsed, exposed, documented as not rendered.
+- **#57 `Effect` field**: parsed, exposed, and **rendered**: `Banner` and
+  `Scroll up/down` with VSFilter timing, band clip, and edge fadeaway.
+  libass ignores these effects (renders static text), so their reference
+  fixtures are known-divergent, not gated.
 - **#58 Support matrix**: unsupported-but-parsed tags documented in README.
 
 ## Phase 6 — Quality gates (#59–69, #77–80, #84, #85, #89–92, #96, #98)
@@ -201,25 +218,25 @@ All Rust behavior changes carry regression tests; run `cargo test`.
   sort order, summary fields, renderer frame bytes, error paths); fixed the
   wrong "active at 2000ms" comment (both events active).
 - **#61 CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, native
-  tests, wasm32 check, browser tests, `cargo audit`, demo typecheck.
-- **#62 Reference tests**: **Remaining.**
-  - What: pixel-comparison tests against libass-rendered references.
-  - Why: no libass available in this environment to generate references.
-  - Impact: ASS-compat is verified by unit/render-rule tests, not pixels.
-  - Follow-up: render `demo/sample.ass` (+ fixtures) with libass at fixed
-    sizes, store PNGs under `tests/golden/`, compare with a tolerance.
-- **#63 Fuzz targets**: **Remaining.**
-  - What: `cargo-fuzz` targets for the ASS parser and drawing parser.
-  - Why: needs nightly + a separate fuzz workspace; out of scope for this pass.
-  - Impact: malformed-input robustness rests on unit tests (broad but manual).
-  - Follow-up: add `fuzz/` with `parse_ass` and `drawing` targets in CI.
-- **#64 Golden tests**: **Remaining (same as #62).**
-  - What: checked-in golden frame hashes for the sample file.
-  - Why: same blocker — no reference renderer to bless goldens against.
-  - Impact: regressions are caught by rule tests, not whole-frame hashes.
-  - Follow-up: bless goldens from libass references once #62 exists.
+  tests (ubuntu + windows), wasm32 check, browser tests, `cargo audit`,
+  demo typecheck, fuzz smoke.
+- **#62 Reference tests: done.** `tests/reference.rs` compares subrass output
+  against libass-rendered frames (ffmpeg `ass` filter, pinned build recorded
+  in `tests/reference/provenance.json`). 20/20 gated fixtures pass on
+  structural gates (bbox IoU ≥ 0.70, ink ratio 0.5–2.0, block mean error ≤ 25,
+  hard-error fraction ≤ 0.15); 3 legacy/fallback fixtures are measured but
+  known-divergent; 7 newer fixtures are golden-covered with libass frames
+  pending (the harness reports them as pending, never as passes).
+- **#63 Fuzz targets: done.** `fuzz/` workspace (`parse_ass`, `drawing`,
+  `render`) plus a CI `fuzz-smoke` job (nightly, builds all targets, runs
+  each briefly). Longer sessions run locally; see `fuzz/README.md`.
+- **#64 Golden tests: done.** `tests/golden.rs` renders 30 fixtures and
+  compares byte-exact against stored raw-RGBA expectations
+  (`UPDATE_GOLDENS=1` regenerates; never automatic).
 - **#65 Dependency audit**: CI job added; `cargo audit` status recorded below.
-- **#66 Toolchain**: `rust-toolchain.toml` pins stable + components.
+- **#66 Toolchain**: `rust-toolchain.toml` pins `1.96.0` + components, and CI
+  passes the same version explicitly (`toolchain: "1.96.0"`, since the
+  setup action does not read the repo file itself).
 - **#67 Package scripts**: `build/dev/start/typecheck/test` in package.json.
 - **#68 fmt**: `cargo fmt` clean.
 - **#69 clippy**: `cargo clippy --all-targets` clean (was 9 warnings).
@@ -238,19 +255,67 @@ All Rust behavior changes carry regression tests; run `cargo test`.
 - **#92 Line numbers**: off-by-one fixed (content starts at header+1); exact
   line asserted in tests.
 - **#96 Matrix**: README support matrix (Supported/Partial/Parsed).
-- **#98 Toolchain pin**: see #66.
+- **#98 Toolchain pin**: see #66. `build.sh` also enforces the pinned
+  `wasm-pack 0.15.0` (fails with an install hint when a different version
+  is present) instead of silently using whatever is installed.
+
+## Follow-up pass (review after `ff336a4`)
+
+- **Relative `\fs+N/-N`** (`src/types/override_tag.rs`,
+  `src/renderer/compositor.rs`): libass scales the *current* size by
+  `(1 + delta/10)` when the parameter starts with `+`/`-`, and by
+  `(1 + progress * delta/10)` inside `\t`. The old code treated the sign
+  as part of an absolute number. New representation:
+  `FontSize(f64)` (absolute), `FontSizeRelative(f64)` (delta), and
+  `FontSizeReset` (bare `\fs`); non-positive results reset to the event
+  style size, matching libass. Covered by parser tests
+  (`test_fs_relative_parsing_matches_libass`), resolution tests
+  (`test_relative_fs_*`), a render test
+  (`test_degenerate_font_size_resets_to_style_safely`), the updated
+  `tests/robustness.rs` geometry test, and the `relative-fs` golden +
+  (pending) reference fixture.
+- **Combination fixtures** (`tests/golden.rs`): added `relative-fs`,
+  `shear-rotation`, `karaoke-kf-frz/frx/fax/fay`, and
+  `opaque-box-multiline` (the karaoke fixtures are centered so the
+  transformed sweep stays fully on-frame; each shows both sweep colors).
+  All are golden-covered; their libass frames are pending generation
+  with `tests/reference/gen_references.ps1` (no ffmpeg+libass in this
+  environment), and `tests/reference.rs` reports them as pending rather
+  than passing. `opaque-box-multiline` joins `KNOWN_DIVERGENT` once its
+  frame exists (whole-block vs per-line boxes).
+- **`\K/\kf` under transforms**: documented as proportional across the
+  transformed bitmap (exact when unrotated); the new fixtures will gate
+  it against libass once their frames exist.
+- **Shear order**: kept pre-rotation shear — verified against libass
+  `calc_transform_matrix`, which builds the shear basis first and
+  composes Z/X/Y rotations over it. The earlier "move shear after
+  rotation" note was withdrawn; `shear-rotation` covers the combined
+  case.
+- **`\fe`**: parses, resolves, and resets; charset/encoding remapping is
+  still not performed (labeled `Partial` in `CONFORMANCE.md`).
+- **Complex shaping**: still unsupported (LTR `ab_glyph` only; no
+  HarfBuzz, RTL, ligatures, Indic/Arabic forms), accurately documented
+  in README and `CONFORMANCE.md`.
+- **Build/CI pinning**: `build.sh` enforces `wasm-pack 0.15.0`; CI
+  passes `toolchain: "1.96.0"` explicitly in every Rust job; new
+  `fuzz-smoke` CI job builds and briefly runs all three fuzz targets on
+  nightly.
+- **This log**: rewritten to remove stale "Remaining" entries and old
+  claims (reference/fuzz/golden done; Effect rendered; `\r` exits
+  drawing mode; current counts below).
 
 ## Verification commands and results
 
 | Command | Result |
 |---|---|
-| `cargo test` | 204 passed, 0 failed (was 118) |
-| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo test --locked --all-features` | 328 passed, 0 failed (317 lib + 11 integration) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
-| `cargo check --target wasm32-unknown-unknown --tests` | ok |
+| `cargo check --target wasm32-unknown-unknown --tests --locked` | ok |
+| `cargo test --test reference -- --nocapture` | 20/20 gated pass, 7 pending (see report) |
 | `wasm-pack build --target web --out-dir pkg` | ok |
 | `bun run typecheck` | clean |
-| `bun test` | 6 passed, 0 failed |
+| `bun test` | 24 passed, 0 failed |
 | `wasm-pack test --headless --chrome` | not run locally (no browser); runs in CI |
 
 `cargo audit`: run it in CI; if it reports the known unmaintained-`ttf-parser`
@@ -258,22 +323,29 @@ advisory (transitive via `ab_glyph`), that is pre-existing and informational —
 this crate parses font metadata itself and does not depend on `ttf-parser`
 directly.
 
+Note: CI status for a given HEAD cannot be confirmed from local data alone;
+the rows above are local runs. The listed GitHub Actions jobs exist in
+`.github/workflows/ci.yml` and gate the same commands.
+
 ## Intentional compatibility differences
 
-(See `CONFORMANCE.md` for the test-backed matrix. Earlier revisions of this
-list claimed `\ko`, `\K` edge splitting, smart wrap, per-glyph fallback,
-legacy effects, and auto-loading as differences or approximations; all have
-since been implemented and verified against libass reference frames.)
+(See `CONFORMANCE.md` for the test-backed matrix.)
 
 1. Blur runs before clipping so blurred pixels cannot bleed outside the clip
    region.
-2. `\r` preserves line-global tags wherever they appear (consistent rule).
+2. `\r` preserves only line-global tags (position, move, origin, clips,
+   fades); everything else, including drawing mode, resets.
 3. Rotation uses a fixed perspective distance (500 × vertical resolution
    ratio); extreme angles degrade to empty glyphs instead of over-allocating.
 4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
-   Indic/Arabic contextual forms); no system-font lookup.
+   Indic/Arabic contextual forms); no system-font lookup. Per-glyph fallback
+   covers already-loaded faces.
 5. Unhinted coverage rasterizer: ~1px placement/AA differences versus
    libass/FreeType hinted outlines (measured, not gated, in reference tests).
 6. Multi-line opaque boxes cover the whole block; libass draws per-line boxes.
 7. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent) rather than
    libass's rebalance (libass itself marks styles 0/3 handling FIXME).
+8. `\K`/`\kf` sweep edges map proportionally across the transformed glyph
+   bitmap under rotation/perspective (exact when unrotated); combination
+   fixtures will gate this against libass once generated.
+9. `\fe` parses/stores/resets but does not remap charsets.

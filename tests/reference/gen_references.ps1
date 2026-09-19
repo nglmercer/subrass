@@ -39,6 +39,15 @@ foreach ($prop in $manifest.fixtures.PSObject.Properties) {
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $name" }
 }
 
+# Mask-control frame for the harness blank-frame test: a libass frame
+# with no active event (plain.ass sampled past its 0-5s event).
+Write-Host 'rendering blank (mask control)'
+& $ffmpeg -hide_banner -loglevel error -y `
+    -f lavfi -i 'color=c=black:s=256x144:r=10:d=6' `
+    -vf "format=rgba,ass='tests/golden/plain.ass':fontsdir='fonts'" `
+    -ss 5.5 -frames:v 1 -f rawvideo -pix_fmt rgba 'tests/reference/blank.rgba'
+if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed for blank' }
+
 $sha = [System.Security.Cryptography.SHA256]::Create()
 $fontHash = [System.BitConverter]::ToString(
     $sha.ComputeHash([System.IO.File]::ReadAllBytes('fonts/DejaVuSans.ttf'))

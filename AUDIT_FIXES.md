@@ -6,9 +6,12 @@ tests; run `cargo test`. `CONFORMANCE.md` is the test-backed
 compatibility statement; this file is the history of how it got there.
 
 Applies to HEAD after `ff336a4` (second-pass remediation), the
-follow-up passes described below, and the precedence/clip/server pass
-at the bottom (first-wins semantics, libass clip state, dev-server
-rewrite, attachment budgets, 13 new reference fixtures).
+follow-up passes described below, the precedence/clip/server pass
+(first-wins semantics, libass clip state, dev-server rewrite,
+attachment budgets, 13 new reference fixtures), and the temp_plan.md
+remediation pass at the bottom (move timing, exact arity, wrap 3≡0,
+`\r` keeps drawing, per-glyph decorations, CJK/ZWSP breaking, harness
+proofs, doc sync).
 
 ## Phase 1 — Safety invariants (#1–3, #70–75, #95)
 
@@ -372,27 +375,106 @@ rewrite, attachment budgets, 13 new reference fixtures).
   bounds-checked indices, clamped casts, checked allocation math,
   capped drawing/blur/gap budgets, wasm32-safe `usize` conversions.
 
+## temp_plan.md remediation pass (final remaining fixes)
+
+- **P0 `\move` timing** (`src/renderer/compositor.rs`,
+  `src/types/override_tag.rs`): reversed times swap (`t1 > t2` behaves
+  like libass), equal nonzero times are an instant step, zero/negative
+  times span the event.
+  `test_move_reversed_times_render_identical`,
+  `test_move_equal_times_is_instant_step`,
+  `test_move_zero_and_negative_times_span_event`.
+- **P0 exact arity**: `\pos`/`\org` take exactly 2 args, `\move` 4 or 6
+  (trailing timing), `\fad`/`\fade` share count-based 2-arg/7-arg
+  parsing; wrong arity renders unpositioned/unfaded like libass.
+  `test_pos_exact_arity`, `test_org_exact_arity`,
+  `test_move_exact_arity_and_swap`,
+  `test_fad_fade_shared_count_based_arity`,
+  `test_move_wrong_arity_renders_unpositioned`.
+- **P1 malformed `\an`/`\a`**: slot consumption matches libass
+  (prefix values, slot markers, `\a4`/`\a8` quirk, bare/out-of-range
+  reset); argument whitespace and numeric parsing audited across all
+  tags. `test_an_prefix_values_and_slot_markers`.
+- **P1 edge fixtures**: move-timing, arity, and alignment edge cases
+  gated by libass frames; pending stays 0.
+- **P2 wrap style 3 ≡ 0** (`src/renderer/compositor.rs`): greedy fill +
+  pairwise rebalance whenever `wrap_style != 1`, matching libass
+  rebalance (`test_wrap_style_3_matches_style_0`). The old bottom-wide
+  greedy fill is gone; the ASS-spec intent stays unimplemented on both
+  sides (libass marks styles 0/3 FIXME).
+- **P2 `\r` keeps drawing mode** (`ass_reset_render_context` parity):
+  reset preserves line-globals + alignment + drawing mode + `\pbo`
+  (`test_reset_keeps_drawing_mode`,
+  `test_reset_keeps_first_alignment_and_ignores_later`); karaoke timing
+  survives a no-op reset so runs rejoin instead of splitting
+  (`test_karaoke_runs_noop_reset_joins_run`).
+- **P2 drawing bbox min preserved**: advance = width, ink at pen + min,
+  `\kf` splits at ink-left + frac × advance
+  (`test_drawing_preserves_min_x/y`,
+  `test_kf_drawing_split_at_fractional_scale`).
+- **P2 per-glyph decorations**: underline/strikeout bars computed from
+  `post`/OS/2 metrics (`test_metadata_decoration_metrics`), painted
+  per glyph so they shear/rotate/sweep with the text, span spaces, and
+  keep primary color under `\kf` (`test_deco_*`, incl. rotated and
+  karaoke cases; `deco/deco-rotated/deco-karaoke` gated).
+- **P2 line breaking** (`src/renderer/shaper.rs`, compositor): CJK runs
+  break without spaces, U+3000 and U+200B break, with
+  open/close/small-kana/NBSP/combining/currency glue
+  (`test_wrap_cjk_breaks_without_spaces`,
+  `test_wrap_cjk_open_bracket_sticks`, `test_wrap_cjk_nbsp_glues`,
+  `test_wrap_zwsp_breaks`, `test_wrap_ideographic_space_breaks`,
+  `test_combining_marks_glue_common_scripts`; `wrap/wrap-combining/
+  wrap-nbsp` gated at IoU 0.985/0.978/0.946). This is VSFilter/UAX-#14
+  behavior: default libass builds without unibreak break at ASCII
+  spaces only and overflow, so the CJK/ZWSP fixtures are measured as
+  known-divergent, never gated.
+- **P2 `\fe` explicitly retained Partial**: parses, stores, resets,
+  render-neutral (`test_fe_resolve_and_reset`,
+  `test_fe_encoding_is_render_neutral`; probe-grounded: `\fe129`
+  matches default rendering both here and in libass), but non-Unicode
+  byte remapping is not implemented.
+- **P2 collections rejected by design**: `.ttc`/`.otc` (and dfont/WOFF)
+  rejected with a message, never silent face 0
+  (`test_font_collections_rejected`).
+- **P2 shaping deferred, not half-integrated**: full rustybuzz+bidi
+  shaping stays on the `CONFORMANCE.md` roadmap (it touches every
+  advance consumer); the renderer stays deterministically LTR/scalar.
+- **P3 harness integrity**: blank-frame ink-mask proof
+  (`blank_libass_frame_has_zero_ink`: real libass blank frame yields
+  zero mask pixels) plus manifest/reference consistency
+  (`harness_manifest_and_references_are_consistent`); strict mode
+  (`SUBRASS_STRICT_REFERENCES=1`) fails on pending instead of
+  skipping.
+- **P3 server + attachments re-verified**: dev-server HTTP semantics
+  (redirects, MIME, GET/HEAD-only, `PORT` validation) and attachment
+  count/byte budgets enforced during decode (see previous pass);
+  `bun test` + robustness/corpus suites green.
+- **P4 docs**: README/`CONFORMANCE.md`/`AUDIT_FIXES.md` synchronized to
+  the fixed behavior (wrap 3≡0, `\r` keeps drawing, per-glyph deco,
+  `\fe` Partial, CJK/ZWSP divergence, `\pbo` placement note);
+  `fuzz/README.md` pins unchanged. Reference counts updated below. No
+  claim of full libass compatibility: shaping, `\fe` remapping,
+  system-font discovery, collections, Banner/Scroll timing, CJK/ZWSP
+  breaking, and `\pbo` placement remain documented divergences or
+  unsupported (see final table in `CONFORMANCE.md` divergences).
+
 ## Verification commands and results
 
 | Command | Result |
 |---|---|
-| `cargo test --locked --all-features` | 368 passed, 0 failed (352 lib + 2 corpus + 1 golden + 2 reference + 11 robustness) |
-| `cargo test --locked --no-default-features` | 368 passed, 0 failed (same breakdown as above) |
+| `cargo test --locked --all-features` | 415 passed, 0 failed (398 lib + 2 corpus + 1 golden + 3 reference + 11 robustness) |
+| `cargo test --locked --no-default-features` | 415 passed, 0 failed (same breakdown as above) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo check --target wasm32-unknown-unknown --tests --locked` | ok |
-| `cargo test --test reference -- --nocapture` | 48/48 gated pass, 0 pending, 3 known-divergent (see report) |
-| `cargo test --test golden` | 51/51 byte-exact pass |
+| `SUBRASS_STRICT_REFERENCES=1 cargo test --locked --test reference -- --nocapture` | 67/67 gated pass, 0 pending, 7 known-divergent (see report) |
+| `cargo test --locked --test golden` | 74/74 byte-exact pass |
 | `wasm-pack build --target web --out-dir pkg` | ok |
 | `bun install --frozen-lockfile` + `bun run typecheck` | clean |
 | `bun test` | 41 passed, 0 failed (13 demo/paths + 17 server HTTP + 11 worker-backend) |
-| `wasm-pack test --headless --chrome` | runs in CI (browser); `cargo check` covers the wasm target locally |
+| `cargo audit --deny warnings` | 0 vulnerabilities (1251 advisories loaded); known unmaintained-`ttf-parser` advisory explicitly ignored in `.cargo/audit.toml` with rationale (transitive via `ab_glyph`, `patched = []`, skrifa migration out of scope) |
+| `wasm-pack test --headless --chrome` | runs in CI (browser); cannot run locally — no Chrome binary installed (ChromeDriver starts, session creation 404s). `cargo check` covers the wasm target locally |
 | fuzz smoke (`parse_ass`, `drawing`, `render`) | CI-gated on Linux (`fuzz-smoke` job); cannot link locally (Windows MSVC `LNK2001`, no C toolchain in WSL). Stable-toolchain hostile-value coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
-
-`cargo audit`: run it in CI; if it reports the known unmaintained-`ttf-parser`
-advisory (transitive via `ab_glyph`), that is pre-existing and informational —
-this crate parses font metadata itself and does not depend on `ttf-parser`
-directly.
 
 Note: CI status for a given HEAD cannot be confirmed from local data alone;
 the rows above are local runs. The listed GitHub Actions jobs exist in
@@ -405,7 +487,8 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
 1. Blur runs before clipping so blurred pixels cannot bleed outside the clip
    region.
 2. `\r` preserves line-global tags (position, move, origin, clips,
-   fades) plus alignment; everything else, including drawing mode, resets.
+   fades) plus alignment and drawing mode (with `\pbo`); everything
+   else resets (karaoke timing survives a no-op reset so runs rejoin).
 3. Rotation uses libass's perspective distance (312.5 × vertical
    resolution ratio); extreme angles degrade to empty glyphs instead of
    over-allocating. (`frx`/`fry` inverse-map and `\fay` per-run shear
@@ -417,8 +500,18 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
    libass/FreeType hinted outlines (measured, not gated, in reference tests).
 6. Multi-line opaque boxes draw per-line boxes like libass (gated:
    `opaque-box-multiline` IoU 1.000).
-7. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent) rather than
-   libass's rebalance (libass itself marks styles 0/3 handling FIXME).
+7. Wrap mode 3 rebalances like mode 0, matching libass (the ASS-spec
+   bottom-wide intent is unimplemented on both sides; libass marks
+   styles 0/3 FIXME).
 8. `\K`/`\kf` sweep edges split at one device-space vertical line like
    libass (gated incl. rotation/shear/perspective combinations).
 9. `\fe` parses/stores/resets but does not remap charsets.
+10. CJK/U+200B line breaking follows UAX #14 / VSFilter (CJK runs
+    break with punctuation/combining glue; U+3000 and U+200B break),
+    while default libass builds without unibreak break at ASCII
+    spaces only and overflow (measured as known-divergent, never
+    gated).
+11. `\pbo` shifts single-line drawing ink by −pbo here, while libass's
+    asc/desc model cancels out on single-drawing lines (probed
+    pixel-identical); mixed-line behavior differs too. Pinned by
+    `test_pbo_shifts_drawing` pending pbo-aware line metrics.

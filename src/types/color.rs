@@ -167,6 +167,13 @@ impl FromStr for Color {
 
 fn parse_ass_hex_color(hex: &str) -> Result<Color, ColorError> {
     let hex = hex.trim_end_matches('&');
+    // Byte-length checks below only imply char boundaries for ASCII;
+    // multibyte input must fail, never panic on slicing.
+    if !hex.is_ascii() {
+        return Err(ColorError::InvalidComponent(format!(
+            "expected 6 or 8 hex digits, got {hex:?}"
+        )));
+    }
 
     match hex.len() {
         8 => {
@@ -201,6 +208,12 @@ fn parse_ass_hex_color(hex: &str) -> Result<Color, ColorError> {
 }
 
 fn parse_css_hex_color(hex: &str) -> Result<Color, ColorError> {
+    // See parse_ass_hex_color: slicing needs ASCII.
+    if !hex.is_ascii() {
+        return Err(ColorError::InvalidComponent(format!(
+            "expected 6 or 8 hex digits, got {hex:?}"
+        )));
+    }
     match hex.len() {
         8 => {
             // #RRGGBBAA format (CSS standard): AA is opacity, converted
@@ -270,6 +283,23 @@ mod tests {
         assert_eq!(color.red(), 255);
         assert_eq!(color.green(), 0);
         assert_eq!(color.blue(), 0);
+    }
+
+    #[test]
+    fn test_multibyte_hex_fails_without_panicking() {
+        // 6/8-byte multibyte input hits the slicing arms; byte lengths
+        // are not char boundaries, so this must error, never panic.
+        for s in [
+            "&Haébcdef&",
+            "&Haébcd&",
+            "&Héééé&",
+            "&Hééé&",
+            "#Ré00FFF",
+            "#Ré00F",
+            "#éééééé",
+        ] {
+            assert!("{s}".parse::<Color>().is_err(), "{s}");
+        }
     }
 
     #[test]

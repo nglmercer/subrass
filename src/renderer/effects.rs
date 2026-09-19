@@ -452,48 +452,83 @@ pub fn apply_blur(buffer: &mut RenderBuffer, blur_radius: f64) {
     buffer.box_blur(radius);
 }
 
+/// Piecewise-linear fade value (libass `interpolate_alpha`): ASS
+/// transparency where 0 = visible and 255 = transparent. Ramp math
+/// runs in f64 and truncates toward zero like the C `(int)` cast
+/// (Rust `as i32` truncates identically and saturates instead of
+/// overflowing). Runs in `i64` so hostile times cannot wrap; for
+/// realistic event lengths this equals the libass `i32` computation
+/// exactly. The lerp branches only run with a proven-positive
+/// denominator, so this cannot divide by zero.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn interpolate_alpha(
+    now: i64,
+    t1: i64,
+    t2: i64,
+    t3: i64,
+    t4: i64,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+) -> i32 {
+    if now < t1 {
+        a1
+    } else if now < t2 {
+        let cf = (now - t1) as f64 / (t2 - t1) as f64;
+        (f64::from(a1) * (1.0 - cf) + f64::from(a2) * cf) as i32
+    } else if now < t3 {
+        a2
+    } else if now < t4 {
+        let cf = (now - t3) as f64 / (t4 - t3) as f64;
+        (f64::from(a2) * (1.0 - cf) + f64::from(a3) * cf) as i32
+    } else {
+        a3
+    }
+}
+
 /// Calculate fade alpha based on time.
 ///
 /// Returns an opacity value: 0 = fully transparent, 255 = fully opaque.
-/// When fade-in and fade-out overlap (fade_out > duration), both ramps apply
-/// and the darker of the two wins.
+/// This is libass's 2-argument fade conversion evaluated through
+/// [`interpolate_alpha`] (`t1 = 0`, `t2 = fade_in`, `t4 = Duration`,
+/// `t3 = Duration - fade_out`), so overlapping fades follow the
+/// shared piecewise ramp — not the minimum of two independent ramps.
+/// Non-positive times mean "no fade" on that side, matching libass.
+/// A computed fade `<= 0` leaves the frame fully opaque (libass
+/// `ass_apply_fade` only applies positive fades); above 255 clamps to
+/// transparent (libass wraps mod 256 there, a C-cast artifact).
 pub fn calculate_fade_alpha(
     time_ms: u64,
     start_ms: u64,
     end_ms: u64,
-    fade_in_ms: u64,
-    fade_out_ms: u64,
+    fade_in_ms: i32,
+    fade_out_ms: i32,
 ) -> u8 {
     if time_ms < start_ms || time_ms >= end_ms {
         return 0;
     }
 
+    // Guarded above: `end_ms > time_ms >= start_ms`, so neither
+    // subtraction can underflow.
     let duration = end_ms - start_ms;
     let elapsed = time_ms - start_ms;
-
-    // Fade in: 0 -> 255 over [0, fade_in)
-    let fade_in_alpha = if fade_in_ms > 0 && elapsed < fade_in_ms {
-        (elapsed as f64 / fade_in_ms as f64 * 255.0) as u8
-    } else {
+    let duration = i64::try_from(duration).unwrap_or(i64::MAX);
+    let elapsed = i64::try_from(elapsed).unwrap_or(i64::MAX);
+    let a = interpolate_alpha(
+        elapsed,
+        0,
+        i64::from(fade_in_ms),
+        duration - i64::from(fade_out_ms),
+        duration,
+        255,
+        0,
+        255,
+    );
+    if a <= 0 {
         255
-    };
-
-    // Fade out: 255 -> 0 over (duration - fade_out, duration).
-    // saturating_sub defines the overlap behavior: a fade-out longer than
-    // the event covers the whole event.
-    let fade_out_alpha = if fade_out_ms > 0 {
-        let fade_out_start = duration.saturating_sub(fade_out_ms);
-        if elapsed > fade_out_start {
-            let remaining = duration - elapsed;
-            (remaining as f64 / fade_out_ms as f64 * 255.0).clamp(0.0, 255.0) as u8
-        } else {
-            255
-        }
     } else {
-        255
-    };
-
-    fade_in_alpha.min(fade_out_alpha)
+        (255 - a.min(255)) as u8
+    }
 }
 
 #[cfg(test)]
@@ -621,21 +656,73 @@ mod tests {
     }
 
     #[test]
-    fn test_fade_out_longer_than_duration() {
-        // fade_out (5000) > duration (2000): no underflow, defined ramp
-        let a_start = calculate_fade_alpha(0, 0, 2000, 0, 5000);
-        let a_mid = calculate_fade_alpha(1000, 0, 2000, 0, 5000);
-        let a_end = calculate_fade_alpha(1999, 0, 2000, 0, 5000);
-        assert!(a_start >= a_mid && a_mid >= a_end);
-        assert_eq!(calculate_fade_alpha(2000, 0, 2000, 0, 5000), 0);
+    fn test_interpolate_alpha_matches_libass() {
+        // Exact `interpolate_alpha` values on binary-exact fractions.
+        // libass truncates toward zero: 127.5 -> 127, not 128.
+        let t = (0, 1000, 2000, 3000);
+        assert_eq!(interpolate_alpha(-5, t.0, t.1, t.2, t.3, 255, 0, 255), 255);
+        assert_eq!(interpolate_alpha(0, t.0, t.1, t.2, t.3, 255, 0, 255), 255);
+        assert_eq!(interpolate_alpha(500, t.0, t.1, t.2, t.3, 255, 0, 255), 127);
+        assert_eq!(interpolate_alpha(1000, t.0, t.1, t.2, t.3, 255, 0, 255), 0);
+        assert_eq!(interpolate_alpha(1500, t.0, t.1, t.2, t.3, 255, 0, 255), 0);
+        assert_eq!(
+            interpolate_alpha(2500, t.0, t.1, t.2, t.3, 255, 0, 255),
+            127
+        );
+        assert_eq!(
+            interpolate_alpha(2999, t.0, t.1, t.2, t.3, 255, 0, 255),
+            254
+        );
+        assert_eq!(
+            interpolate_alpha(3000, t.0, t.1, t.2, t.3, 255, 0, 255),
+            255
+        );
+        assert_eq!(
+            interpolate_alpha(9999, t.0, t.1, t.2, t.3, 255, 0, 255),
+            255
+        );
+        // Zero-length ramps are instant jumps, never div-by-zero.
+        assert_eq!(interpolate_alpha(499, 500, 500, 500, 500, 10, 20, 30), 10);
+        assert_eq!(interpolate_alpha(500, 500, 500, 500, 500, 10, 20, 30), 30);
+        // Hostile times cannot wrap or panic.
+        assert_eq!(
+            interpolate_alpha(i64::MAX, i32::MIN as i64, 0, 0, i32::MAX as i64, 1, 2, 3),
+            3
+        );
     }
 
     #[test]
-    fn test_fade_in_out_overlap_takes_minimum() {
-        // fade in 1000 + fade out 1000 over a 1000ms event
-        let a = calculate_fade_alpha(500, 0, 1000, 1000, 1000);
-        // fade-in gives ~127, fade-out gives ~127
-        assert!((100..=160).contains(&a));
+    fn test_simple_fade_exact_values() {
+        // \fad(500,500) over a 5000ms event: t = (0,500,4500,5000).
+        assert_eq!(calculate_fade_alpha(0, 0, 5000, 500, 500), 0);
+        assert_eq!(calculate_fade_alpha(250, 0, 5000, 500, 500), 128);
+        assert_eq!(calculate_fade_alpha(500, 0, 5000, 500, 500), 255);
+        assert_eq!(calculate_fade_alpha(4750, 0, 5000, 500, 500), 128);
+        assert_eq!(calculate_fade_alpha(4999, 0, 5000, 500, 500), 1);
+        assert_eq!(calculate_fade_alpha(5000, 0, 5000, 500, 500), 0);
+    }
+
+    #[test]
+    fn test_simple_fade_overlap_follows_shared_ramp() {
+        // Overlapping fades use the shared piecewise ramp, NOT the
+        // minimum of two ramps: \fad(1000,1000) over 1000ms gives
+        // opacity 128 at the midpoint (min-of-ramps would give 127).
+        assert_eq!(calculate_fade_alpha(0, 0, 1000, 1000, 1000), 0);
+        assert_eq!(calculate_fade_alpha(500, 0, 1000, 1000, 1000), 128);
+        // At 999 the fade-in ramp is nearly complete: trunc(255 * 0.001)
+        // is 0, so the frame is fully opaque (libass truncation).
+        assert_eq!(calculate_fade_alpha(999, 0, 1000, 1000, 1000), 255);
+        // Fade-out longer than the event covers the whole event:
+        // \fad(0,4000) over 2000ms -> t3 = -2000, one long ramp.
+        assert_eq!(calculate_fade_alpha(0, 0, 2000, 0, 4000), 128);
+        assert_eq!(calculate_fade_alpha(1000, 0, 2000, 0, 4000), 64);
+        assert_eq!(calculate_fade_alpha(1999, 0, 2000, 0, 4000), 1);
+        assert_eq!(calculate_fade_alpha(2000, 0, 2000, 0, 4000), 0);
+        // Non-positive times mean "no fade" on that side, like libass.
+        assert_eq!(calculate_fade_alpha(0, 0, 5000, -5, 500), 255);
+        assert_eq!(calculate_fade_alpha(4750, 0, 5000, -5, 500), 128);
+        assert_eq!(calculate_fade_alpha(2500, 0, 5000, 0, 0), 255);
+        assert_eq!(calculate_fade_alpha(2500, 0, 5000, -3, -7), 255);
     }
 
     #[test]

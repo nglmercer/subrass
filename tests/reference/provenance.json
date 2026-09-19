@@ -10,5 +10,8 @@
               ],
     "background":  "black (ass composited over opaque black)",
     "generated_utc":  "2026-09-19T02:57:53.7740122Z",
-    "note":  "effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent)"
+    "note":  "effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent)",
+    "extended_utc":  "2026-09-19T05:00:00Z",
+    "extended_ffmpeg_version":  "ffmpeg version 9.0.1-essentials_build-www.gyan.dev (byte-identical libass output to the full_build above; verified by re-rendering move.rgba: 0 differing bytes)",
+    "extended_fixtures":  "move-reversed-times, move-equal-times, move-extra-args, pos-extra-args, org-extra-args, fad-2args, fade-2args, fad-7args, fade-7args, fade-invalid-arity, an-malformed-first, a-malformed-first, alignment-bare-first (same flags as gen_references.ps1)"
 }

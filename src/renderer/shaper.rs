@@ -42,15 +42,47 @@ pub struct ShapedLine {
     pub missing_glyphs: u32,
 }
 
-/// True for combining marks (Mn/Me-only blocks plus the two Mn kana
-/// marks): these attach to the preceding base for cluster-aware
-/// fallback and never start a wrapped line. Only fully-combining,
-/// long-stable ranges are listed; marks mixed into letter blocks
-/// (Indic, Thai, …) need a real shaper and stay per-character.
+/// True for combining marks (Mn/Mc) of the common scripts — Latin,
+/// Greek, Cyrillic, Hebrew, Arabic, Syriac, Thaana, Devanagari, Thai,
+/// Lao, Tibetan, CJK kana voicing marks, and the generic blocks.
+/// Marks attach to the preceding base for cluster-aware fallback and
+/// never start a wrapped line. Glue only (mark reordering itself
+/// needs a real shaper); remaining Indic scripts and historic marks
+/// stay per-character until UCD tables land.
 pub fn is_combining_mark(ch: char) -> bool {
     matches!(
         ch as u32,
         0x0300..=0x036F
+            | 0x0483..=0x0489
+            | 0x0591..=0x05BD
+            | 0x05BF
+            | 0x05C1..=0x05C2
+            | 0x05C4..=0x05C5
+            | 0x05C7
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4
+            | 0x06E7..=0x06E8
+            | 0x06EA..=0x06ED
+            | 0x0711
+            | 0x0730..=0x074A
+            | 0x07A6..=0x07B0
+            | 0x0900..=0x0903
+            | 0x093A..=0x093C
+            | 0x093E..=0x094D
+            | 0x094E..=0x094F
+            | 0x0951..=0x0957
+            | 0x0962..=0x0963
+            | 0x0E31
+            | 0x0E34..=0x0E3A
+            | 0x0E47..=0x0E4E
+            | 0x0EB1
+            | 0x0EB4..=0x0EBC
+            | 0x0EC8..=0x0ECD
+            | 0x0F71..=0x0F84
+            | 0x0F86..=0x0F87
             | 0x1AB0..=0x1AFF
             | 0x1DC0..=0x1DFF
             | 0x20D0..=0x20FF
@@ -111,15 +143,15 @@ where
 /// True for wide CJK characters that allow line breaks around them
 /// (conservative UAX #14 approximation for wrapping only): unified and
 /// compatibility ideographs, hiragana/katakana, Hangul syllables, and
-/// wide symbols. Excludes U+3000 (ideographic space: handled as a
-/// stick-to-previous break), conjoining jamo/bopomofo (kept glued),
-/// halfwidth forms (narrow), and ASCII-mirroring fullwidth
-/// alphanumerics (unbreakable like their ASCII halves).
+/// wide symbols, plus U+3000 (ideographic space: UAX #14 ID class
+/// breaks around it like other CJK). Excludes conjoining jamo/bopomofo
+/// (kept glued), halfwidth forms (narrow), and ASCII-mirroring
+/// fullwidth alphanumerics (unbreakable like their ASCII halves).
 pub fn is_cjk_breakable(ch: char) -> bool {
     matches!(
         ch as u32,
         0x2E80..=0x2FD5
-            | 0x3001..=0x303F
+            | 0x3000..=0x303F
             | 0x3040..=0x30FF
             | 0x31F0..=0x31FF
             | 0x3200..=0x33FF
@@ -220,7 +252,9 @@ pub fn is_cjk_nobreak_before(ch: char) -> bool {
 /// wrapper: breaks around CJK wide chars (subject to open/close glues),
 /// never inside combining sequences, around joiners, or between a
 /// currency sign and its digits — and never between two non-CJK chars
-/// (spaces own those).
+/// (spaces own those). U+200B ZERO WIDTH SPACE breaks on both sides
+/// (UAX #14 ZW); default libass builds (no unibreak) never break
+/// there, so this is a documented multilingual divergence like CJK.
 pub fn cjk_break_between(prev: char, next: char) -> bool {
     if prev == '\u{200C}'
         || next == '\u{200C}'
@@ -233,6 +267,9 @@ pub fn cjk_break_between(prev: char, next: char) -> bool {
     }
     if is_combining_mark(next) {
         return false;
+    }
+    if prev == '\u{200B}' || next == '\u{200B}' {
+        return true;
     }
     if matches!(
         prev as u32,
@@ -563,6 +600,52 @@ mod tests {
         // pair sticks to face 1 even though face 0 holds the base.
         let both = |face: usize, ch: char| face == 1 && (ch == 'a' || ch == '\u{301}');
         assert_eq!(cluster_font_picks("xa\u{301}", 2, both), vec![0, 1, 1]);
+    }
+
+    #[test]
+    fn test_combining_marks_glue_common_scripts() {
+        // Marks never start a wrapped line, whatever their script.
+        for mark in [
+            '\u{301}',  // Latin acute
+            '\u{485}',  // Cyrillic dasia pneumata
+            '\u{5B0}',  // Hebrew sheva
+            '\u{64B}',  // Arabic fathatan
+            '\u{7A8}',  // Thaana sukun
+            '\u{93E}',  // Devanagari vowel sign AA
+            '\u{E38}',  // Thai vowel sign Sara U
+            '\u{EB5}',  // Lao vowel sign I
+            '\u{F72}',  // Tibetan vowel sign I
+            '\u{3099}', // kana voicing mark
+        ] {
+            assert!(is_combining_mark(mark), "{mark:?} must glue");
+            assert!(!cjk_break_between('a', mark));
+            assert!(!cjk_break_between('あ', mark));
+        }
+        // Letters and spacing marks stay break-neutral.
+        for ch in ['a', 'あ', '\u{2FF}', '\u{905}'] {
+            assert!(!is_combining_mark(ch), "{ch:?} must not glue");
+        }
+    }
+
+    #[test]
+    fn test_zwsp_breaks_both_sides() {
+        assert!(cjk_break_between('a', '\u{200B}'));
+        assert!(cjk_break_between('\u{200B}', 'a'));
+        assert!(cjk_break_between('あ', '\u{200B}'));
+        assert!(cjk_break_between('\u{200B}', 'あ'));
+        // But not into combining marks or across joiners/NBSP.
+        assert!(!cjk_break_between('\u{200B}', '\u{301}'));
+        assert!(!cjk_break_between('\u{200B}', '\u{200D}'));
+        assert!(!cjk_break_between('\u{00A0}', '\u{200B}'));
+    }
+
+    #[test]
+    fn test_ideographic_space_breaks_like_cjk() {
+        assert!(is_cjk_breakable('\u{3000}'));
+        assert!(cjk_break_between('あ', '\u{3000}'));
+        assert!(cjk_break_between('\u{3000}', 'あ'));
+        assert!(cjk_break_between('a', '\u{3000}'));
+        assert!(cjk_break_between('\u{3000}', 'a'));
     }
 
     #[test]

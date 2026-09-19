@@ -1,6 +1,8 @@
-use super::buffer::{add_coord, effective_shear, finite_to_i32, RenderBuffer};
+use super::buffer::{
+    add_coord, effective_shear, finite_to_i32, RenderBuffer, MAX_GLYPH_BITMAP_PIXELS,
+};
 use super::effects;
-use super::font::FontManager;
+use super::font::{DecorationMetrics, FontManager};
 use super::glyph_cache::GlyphCache;
 use super::shaper::TextShaper;
 use crate::types::color::Color;
@@ -59,8 +61,8 @@ pub struct ResolvedStyle {
     pub inverse_clip: Option<(i32, i32, i32, i32)>,
     pub clip_vector: Option<VectorClip>,
     pub inverse_clip_vector: Option<VectorClip>,
-    pub fade_in: u64,
-    pub fade_out: u64,
+    pub fade_in: i32,
+    pub fade_out: i32,
     pub complex_fade: Option<ComplexFade>,
     /// libass `PARSED_FADE`: a `\fad`/`\fade` tag was already consumed
     /// for this event, so later fade tags are ignored (first wins).
@@ -84,12 +86,15 @@ pub struct VectorClip {
 
 /// Line-global state preserved across `\r` resets: the non-style
 /// line properties (`\pos`, `\move`, `\org`, `\clip`, `\iclip`,
-/// `\fad`, `\fade`) plus alignment: libass
+/// `\fad`, `\fade`) plus alignment, drawing mode, and `\pbo`: libass
 /// `ass_reset_render_context` (the `\r` handler) never touches
-/// alignment, so the first `\an`/`\a` survives resets. Everything
-/// else — including `\p` drawing mode, `\pbo`, fonts, colors,
-/// border/shadow, rotation, and karaoke — resets to the target
-/// style, because `\r` restores ordinary override state.
+/// alignment, `drawing_scale`, or `pbo`, so the first `\an`/`\a` and
+/// the current drawing state survive resets. Karaoke timing also
+/// survives (the reset never touches the effect fields); it is
+/// computed from accumulated tags, which `\r` does not clear.
+/// Everything else — fonts, colors, border/shadow, rotation —
+/// resets to the target style, because `\r` restores ordinary
+/// override state.
 struct LineGlobalKeep {
     position: Option<(f64, f64)>,
     origin: Option<(f64, f64)>,
@@ -98,12 +103,14 @@ struct LineGlobalKeep {
     inverse_clip: Option<(i32, i32, i32, i32)>,
     clip_vector: Option<VectorClip>,
     inverse_clip_vector: Option<VectorClip>,
-    fade_in: u64,
-    fade_out: u64,
+    fade_in: i32,
+    fade_out: i32,
     complex_fade: Option<ComplexFade>,
     alignment: i32,
     parsed_alignment: bool,
     parsed_fade: bool,
+    drawing_mode: i32,
+    drawing_baseline_offset: f64,
 }
 
 impl LineGlobalKeep {
@@ -122,6 +129,8 @@ impl LineGlobalKeep {
             alignment: resolved.alignment,
             parsed_alignment: resolved.parsed_alignment,
             parsed_fade: resolved.parsed_fade,
+            drawing_mode: resolved.drawing_mode,
+            drawing_baseline_offset: resolved.drawing_baseline_offset,
         }
     }
 
@@ -139,30 +148,34 @@ impl LineGlobalKeep {
         resolved.alignment = self.alignment;
         resolved.parsed_alignment = self.parsed_alignment;
         resolved.parsed_fade = self.parsed_fade;
+        resolved.drawing_mode = self.drawing_mode;
+        resolved.drawing_baseline_offset = self.drawing_baseline_offset;
     }
 }
 
-/// Move animation data
+/// Move animation data: times are `i32` like libass (`argtoi32`),
+/// already swapped so `t1 <= t2`.
 #[derive(Debug, Clone)]
 pub struct MoveData {
     pub x1: f64,
     pub y1: f64,
     pub x2: f64,
     pub y2: f64,
-    pub t1: u64,
-    pub t2: u64,
+    pub t1: i32,
+    pub t2: i32,
 }
 
-/// Complex fade data
+/// Complex fade data: all `i32` like libass. Alpha interpolates
+/// full-range and truncates exactly like `interpolate_alpha`.
 #[derive(Debug, Clone)]
 pub struct ComplexFade {
-    pub a1: u8,
-    pub a2: u8,
-    pub a3: u8,
-    pub t1: u64,
-    pub t2: u64,
-    pub t3: u64,
-    pub t4: u64,
+    pub a1: i32,
+    pub a2: i32,
+    pub a3: i32,
+    pub t1: i32,
+    pub t2: i32,
+    pub t3: i32,
+    pub t4: i32,
 }
 
 /// A word plus any raw tag groups that preceded it, with measured width
@@ -182,9 +195,10 @@ struct WrapWord {
 }
 
 /// Insert '\n' at word boundaries per the ASS wrap style:
-/// 0 = smart wrapping (balanced lines, top line widest),
-/// 1 = end-of-line greedy wrapping, 2 = no automatic wrapping,
-/// 3 = smart wrapping from the bottom (bottom line widest).
+/// 0 = smart wrapping (balanced lines), 1 = end-of-line greedy
+/// wrapping, 2 = no automatic wrapping, 3 = same as 0 (libass runs
+/// `wrap_lines_smart` for every style except 1; VSFilter's
+/// bottom-wide style 3 is a known libass divergence).
 ///
 /// Tag groups are opaque and travel with the word that follows them;
 /// explicit `\N` breaks (and `\n` in mode 2) split the text into
@@ -208,31 +222,27 @@ fn wrap_event_text(
         return text.to_string();
     }
 
-    /// Drawing state after a `{...}` group: the last of `\pN` / `\r`
-    /// wins in textual order. `\r` exits drawing mode because `\p` is
-    /// not line-global; `{\r\p1}` stays drawing, `{\p1\r}` does not.
+    /// Drawing state after a `{...}` group: the last `\pN` wins in
+    /// textual order. `\r` is ignored: libass
+    /// `ass_reset_render_context` never touches `drawing_scale`, so
+    /// `{\p1\r}` stays drawing — only `\p0` exits.
     fn drawing_state_after_group(group: &str) -> Option<bool> {
         let bytes = group.as_bytes();
         let mut state: Option<bool> = None;
         let mut i = 0;
         while i + 1 < bytes.len() {
-            if bytes[i] == b'\\' {
-                let c = bytes[i + 1];
-                if c == b'p' {
-                    // `\pN` with digits; `\pbo` has none and is skipped.
-                    let mut j = i + 2;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
+            if bytes[i] == b'\\' && bytes[i + 1] == b'p' {
+                // `\pN` with digits; `\pbo` has none and is skipped.
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 2 {
+                    if let Ok(mode) = group[i + 2..j].parse::<i32>() {
+                        state = Some(mode > 0);
                     }
-                    if j > i + 2 {
-                        if let Ok(mode) = group[i + 2..j].parse::<i32>() {
-                            state = Some(mode > 0);
-                        }
-                        i = j;
-                        continue;
-                    }
-                } else if c == b'r' {
-                    state = Some(false);
+                    i = j;
+                    continue;
                 }
             }
             i += 1;
@@ -549,34 +559,24 @@ fn gap_before(word: &WrapWord, space_width: f64) -> f64 {
     }
 }
 
-/// Greedy line grouping. Forward fill makes the top line the widest;
-/// filling from the end (style 3) makes the bottom the widest.
-/// Prefix-only entries ride along without consuming width budget.
-fn greedy_wrap_lines(
-    words: &[WrapWord],
-    bottom_wider: bool,
-    max_width: f64,
-    space_width: f64,
-) -> Vec<Vec<usize>> {
+/// Greedy line grouping (wrap style 1): forward fill, top line
+/// first. Prefix-only entries ride along without consuming width
+/// budget.
+fn greedy_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     let mut cur_w = 0.0_f64;
-    let order: Box<dyn Iterator<Item = usize>> = if bottom_wider {
-        Box::new((0..words.len()).rev())
-    } else {
-        Box::new(0..words.len())
-    };
-    for idx in order {
-        let ww = words[idx].width;
-        if ww == 0.0 && words[idx].text.is_empty() {
+    for (idx, word) in words.iter().enumerate() {
+        let ww = word.width;
+        if ww == 0.0 && word.text.is_empty() {
             cur.push(idx);
             continue;
         }
         if cur.is_empty() {
             cur_w = ww;
             cur.push(idx);
-        } else if cur_w + gap_before(&words[idx], space_width) + ww <= max_width {
-            cur_w += gap_before(&words[idx], space_width) + ww;
+        } else if cur_w + gap_before(word, space_width) + ww <= max_width {
+            cur_w += gap_before(word, space_width) + ww;
             cur.push(idx);
         } else {
             lines.push(std::mem::take(&mut cur));
@@ -587,16 +587,10 @@ fn greedy_wrap_lines(
     if !cur.is_empty() {
         lines.push(cur);
     }
-    if bottom_wider {
-        lines.reverse();
-        for line in &mut lines {
-            line.reverse();
-        }
-    }
     lines
 }
 
-/// Smart line grouping (wrap style 0): greedy fill, then pairwise
+/// Smart line grouping (wrap styles 0 and 3): greedy fill, then pairwise
 /// rebalance (libass `wrap_lines_smart`: move the last word of a line
 /// to the next line while it reduces the pair's length difference).
 /// This balances lines instead of minimizing leftover (a 224/140
@@ -604,7 +598,7 @@ fn greedy_wrap_lines(
 /// Overlong single words keep their own line. Words only ever move
 /// to later lines, so the loop always terminates.
 fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec<Vec<usize>> {
-    let mut lines = greedy_wrap_lines(words, false, max_width, space_width);
+    let mut lines = greedy_wrap_lines(words, max_width, space_width);
     // Trimmed width of one line (prefix-only entries are free, spaces
     // only between text words).
     let line_len = |line: &[usize]| -> f64 {
@@ -665,13 +659,16 @@ fn render_wrapped_run(
         return;
     }
 
-    // Style 0 fills greedily, then rebalances pairs toward even halves
-    // (libass); 1 fills greedily from the top; 3 fills greedily from
-    // the bottom (bottom widest).
-    let lines: Vec<Vec<usize>> = if wrap_style == 0 {
-        smart_wrap_lines(words, max_width, space_width)
+    // libass `wrap_lines_smart` runs for every style except 1 (the
+    // rebalance loop is gated on `wrap_style != 1`): styles 0 and 3
+    // are the same smart fill, 1 is greedy only. Style 3 is NOT
+    // bottom-wide greedy here — that is VSFilter behavior, and
+    // libass documents the gap with a FIXME ("implement style 0 and
+    // 3 correctly"). Style 2 never reaches this function.
+    let lines: Vec<Vec<usize>> = if wrap_style == 1 {
+        greedy_wrap_lines(words, max_width, space_width)
     } else {
-        greedy_wrap_lines(words, wrap_style == 3, max_width, space_width)
+        smart_wrap_lines(words, max_width, space_width)
     };
 
     for (i, line) in lines.iter().enumerate() {
@@ -709,28 +706,28 @@ enum KaraokeKind {
 /// Opacity (0.0 = invisible, 1.0 = fully visible) for
 /// `\fade(a1,a2,a3,t1,t2,t3,t4)` at `elapsed` ms into the event.
 ///
-/// ASS alpha is transparency (0 = visible, 255 = transparent), so each
-/// phase value converts via `opacity = 1 - alpha/255`. Zero-length ramps
-/// are instant jumps; inverted ranges saturate instead of underflowing.
+/// The fade value comes from [`effects::interpolate_alpha`] (libass
+/// `interpolate_alpha`, including its truncation); a value `<= 0`
+/// leaves the frame fully opaque (libass `ass_apply_fade` only
+/// applies positive fades) and above 255 clamps to transparent
+/// (libass wraps mod 256 there, a C-cast artifact).
 fn complex_fade_opacity(cf: &ComplexFade, elapsed: u64) -> f64 {
-    fn lerp(a: u8, b: u8, num: u64, denom: u64) -> f64 {
-        if denom == 0 {
-            return b as f64;
-        }
-        a as f64 + (num as f64 / denom as f64) * (b as f64 - a as f64)
-    }
-    let ass_transparency = if elapsed < cf.t1 {
-        cf.a1 as f64
-    } else if elapsed < cf.t2 {
-        lerp(cf.a1, cf.a2, elapsed - cf.t1, cf.t2.saturating_sub(cf.t1))
-    } else if elapsed < cf.t3 {
-        cf.a2 as f64
-    } else if elapsed < cf.t4 {
-        lerp(cf.a2, cf.a3, elapsed - cf.t3, cf.t4.saturating_sub(cf.t3))
+    let now = i64::try_from(elapsed).unwrap_or(i64::MAX);
+    let a = effects::interpolate_alpha(
+        now,
+        i64::from(cf.t1),
+        i64::from(cf.t2),
+        i64::from(cf.t3),
+        i64::from(cf.t4),
+        cf.a1,
+        cf.a2,
+        cf.a3,
+    );
+    if a <= 0 {
+        1.0
     } else {
-        cf.a3 as f64
-    };
-    (1.0 - ass_transparency / 255.0).clamp(0.0, 1.0)
+        (1.0 - f64::from(a.min(255)) / 255.0).clamp(0.0, 1.0)
+    }
 }
 
 /// `\ko` outline rule: the outline is suppressed *before* the run
@@ -1430,11 +1427,14 @@ fn build_karaoke_runs(segments: &[TextSegment], items: &[LayoutItem]) -> Karaoke
 }
 
 /// Measured vector drawing for one segment, in video pixels.
+/// `min_x` is the ink's left bearing (libass preserves it: ink at
+/// pen + min); the advance is `width` and the box hangs `height`
+/// above the baseline. `min_y` needs no field: ink lands at
+/// origin + y with the origin one height above the baseline.
 #[derive(Debug, Clone)]
 struct DrawingLayout {
     mode: i32,
     min_x: f64,
-    min_y: f64,
     width: f64,
     height: f64,
 }
@@ -1804,15 +1804,100 @@ fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i
     )
 }
 
+/// Decoration bar rows for one glyph, in scaled-bitmap pixels:
+/// `(top, bottom)` per active bar, relative to the bitmap origin.
+/// libass `ass_get_glyph_outline` centers each bar on its font-metric
+/// position about the pen: underline `|pos|` below the baseline,
+/// strikeout `pos` above. Returns an empty vec when the font lacks
+/// metrics or the em size is degenerate (libass draws no bar then).
+fn deco_bar_rows(
+    underline: bool,
+    strikeout: bool,
+    metrics: DecorationMetrics,
+    pen_y: f64,
+    em_px: f64,
+) -> Vec<(f64, f64)> {
+    let mut rows = Vec::new();
+    let upm = f64::from(metrics.units_per_em);
+    if upm <= 0.0 || !em_px.is_finite() || em_px <= 0.0 || !pen_y.is_finite() {
+        return rows;
+    }
+    if underline {
+        if let Some((pos, thick)) = metrics.underline {
+            let center = pen_y + f64::from(pos.unsigned_abs()) / upm * em_px;
+            let half = f64::from(thick) / upm * em_px / 2.0;
+            if half.is_finite() && half > 0.0 && center.is_finite() {
+                rows.push((center - half, center + half));
+            }
+        }
+    }
+    if strikeout {
+        if let Some((pos, size)) = metrics.strikeout {
+            let center = pen_y - f64::from(pos) / upm * em_px;
+            let half = f64::from(size) / upm * em_px / 2.0;
+            if half.is_finite() && half > 0.0 && center.is_finite() {
+                rows.push((center - half, center + half));
+            }
+        }
+    }
+    rows
+}
+
+/// Paint one decoration bar into a coverage bitmap with box-AA: every
+/// overlapped row/column gets proportional coverage, merged via max
+/// so bars add ink without erasing glyph pixels. Bounds are
+/// fractional bitmap pixels and clamp to the bitmap.
+fn paint_deco_bar(bitmap: &mut [u8], w: u32, h: u32, x0: f64, x1: f64, y0: f64, y1: f64) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    if !x0.is_finite() || !x1.is_finite() || !y0.is_finite() || !y1.is_finite() {
+        return;
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (w_f, h_f) = (f64::from(w), f64::from(h));
+    let (xa, xb) = (x0.clamp(0.0, w_f), x1.clamp(0.0, w_f));
+    let (ya, yb) = (y0.clamp(0.0, h_f), y1.clamp(0.0, h_f));
+    if xb <= xa || yb <= ya {
+        return;
+    }
+    let (ix0, ix1) = (xa.floor() as i64, xb.ceil() as i64);
+    let (iy0, iy1) = (ya.floor() as i64, yb.ceil() as i64);
+    for yy in iy0..iy1 {
+        if yy < 0 || yy >= i64::from(h) {
+            continue;
+        }
+        let cover_y = (yb.min(yy as f64 + 1.0) - ya.max(yy as f64)).clamp(0.0, 1.0);
+        if cover_y <= 0.0 {
+            continue;
+        }
+        for xx in ix0..ix1 {
+            if xx < 0 || xx >= i64::from(w) {
+                continue;
+            }
+            let cover_x = (xb.min(xx as f64 + 1.0) - xa.max(xx as f64)).clamp(0.0, 1.0);
+            let cover = cover_x * cover_y;
+            if cover <= 0.0 {
+                continue;
+            }
+            let idx = (yy as u32 * w + xx as u32) as usize;
+            if let Some(px) = bitmap.get_mut(idx) {
+                *px = (*px).max((cover * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
+        }
+    }
+}
+
 /// Active drawing mode for a segment: the last `\pN` in its tags,
-/// falling back to the event-level mode. A `\r` after the last `\pN`
-/// exits drawing mode (returns 0) because `\p` is not line-global.
+/// falling back to the event-level mode. `\r` is transparent here:
+/// libass `ass_reset_render_context` never touches `drawing_scale`,
+/// so only an explicit `\p0` exits drawing mode.
 fn segment_drawing_mode(tags: &[OverrideTag], event_mode: i32) -> i32 {
     for tag in tags.iter().rev() {
-        match tag {
-            OverrideTag::Drawing(m) => return *m,
-            OverrideTag::Reset(_) => return 0,
-            _ => {}
+        if let OverrideTag::Drawing(m) = tag {
+            return *m;
         }
     }
     event_mode
@@ -1841,22 +1926,22 @@ impl Compositor {
         }
     }
 
-    /// Apply accel function: t' = t^accel (ASS semantics: accel = 1 is
-    /// linear, accel > 1 starts slow and finishes fast, accel < 1 starts
-    /// fast and finishes slow). Non-finite accel falls back to linear.
+    /// Apply accel function: libass `pow(t, accel)` exactly (accel 1
+    /// is linear, accel > 1 starts slow, accel < 1 starts fast).
+    /// Accel 0 therefore applies instantly (`pow(t, 0) == 1`) and
+    /// negative accel extrapolates beyond 1 while finite, like libass.
+    /// Non-finite accel falls back to linear (libass would propagate
+    /// NaN); a non-finite result saturates to 1.0.
     fn apply_accel(t: f64, accel: f64) -> f64 {
         let t = t.clamp(0.0, 1.0);
-        if !accel.is_finite() || accel == 1.0 {
-            t
-        } else if accel <= 0.0 {
-            // Degenerate: treat as instant jump at the end/start boundary.
-            if t >= 1.0 {
-                1.0
-            } else {
-                0.0
-            }
+        if !accel.is_finite() {
+            return t;
+        }
+        let k = t.powf(accel);
+        if k.is_finite() {
+            k
         } else {
-            t.powf(accel).clamp(0.0, 1.0)
+            1.0
         }
     }
 
@@ -2228,6 +2313,10 @@ impl Compositor {
             }
             OverrideTag::ScaleX(s) => resolved.scale_x = *s,
             OverrideTag::ScaleY(s) => resolved.scale_y = *s,
+            OverrideTag::ScaleReset => {
+                resolved.scale_x = resolved.base_style.scale_x;
+                resolved.scale_y = resolved.base_style.scale_y;
+            }
             OverrideTag::RotationZ(r) => resolved.angle = *r,
             OverrideTag::RotationX(r) => resolved.rotation_x = *r,
             OverrideTag::RotationY(r) => resolved.rotation_y = *r,
@@ -2272,14 +2361,13 @@ impl Compositor {
             OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4) => {
                 if !resolved.parsed_fade {
                     resolved.parsed_fade = true;
-                    // Alpha components wrap mod 256 (`as u8`), matching
-                    // libass's `(uint8_t)` truncation; in-spec 0-255
-                    // values are unaffected, and opacity clamps to
-                    // [0, 1] at use.
+                    // Stored full-range like libass: alpha interpolates
+                    // in f64 and truncates in `interpolate_alpha`;
+                    // out-of-range results clamp at application.
                     resolved.complex_fade = Some(ComplexFade {
-                        a1: *a1 as u8,
-                        a2: *a2 as u8,
-                        a3: *a3 as u8,
+                        a1: *a1,
+                        a2: *a2,
+                        a3: *a3,
                         t1: *t1,
                         t2: *t2,
                         t3: *t3,
@@ -2502,24 +2590,30 @@ impl Compositor {
                 tags,
             } = tag
             {
-                let elapsed = time_ms.saturating_sub(start_ms);
-                if elapsed < *t1 {
+                // libass `complex_tag("t")` timing: `t2 == 0` means
+                // "until the end of the event", progress is 0 before
+                // `t1` and 1 from `t2` on (note the strict `<` on the
+                // left: at exactly `t1 == t2` the tag fully applies,
+                // unlike `\move`'s step which belongs to the start).
+                // The lerp runs only when `t1 < t2_eff` is proven, so
+                // this cannot divide by zero or underflow.
+                let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+                let t1 = i64::from(*t1);
+                if elapsed < t1 {
+                    // Progress would be 0, which is a no-op for every
+                    // tag class animated here (see the transformability
+                    // matrix). libass additionally applies
+                    // progress-ignoring inner tags (`\b`, `\fn`, `\an`,
+                    // ...) before the window; that gap is documented in
+                    // the support matrix.
                     continue;
                 }
-                // t2 == 0 means "until the end of the event" (the spec
-                // default when \t omits its timing arguments)
-                let t2_eff = if *t2 == 0 {
-                    end_ms.saturating_sub(start_ms)
-                } else {
-                    *t2
-                };
-                let duration = t2_eff.saturating_sub(*t1);
+                let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+                let t2_eff = if *t2 == 0 { duration } else { i64::from(*t2) };
                 let raw_progress = if elapsed >= t2_eff {
                     1.0
-                } else if duration > 0 {
-                    (elapsed - *t1) as f64 / duration as f64
                 } else {
-                    1.0
+                    (elapsed - t1) as f64 / (t2_eff - t1) as f64
                 };
                 let progress = Self::apply_accel(raw_progress, *accel);
                 Self::apply_transform_tags(&mut segment_resolved, tags, progress);
@@ -2598,11 +2692,10 @@ impl Compositor {
             let mode = segment_drawing_mode(&segment.tags, resolved.drawing_mode);
             let drawing = if !skipped && mode > 0 {
                 let unit = drawing_unit_scale(scale_x, scale_y, mode);
-                super::drawing::DrawingParser::measure(&segment.text).map(|(min_x, min_y, w, h)| {
+                super::drawing::DrawingParser::measure(&segment.text).map(|(min_x, _, w, h)| {
                     DrawingLayout {
                         mode,
                         min_x: min_x * unit,
-                        min_y: min_y * unit,
                         width: w * unit,
                         height: h * unit,
                     }
@@ -2849,6 +2942,16 @@ impl Compositor {
                     OverrideTag::WrapStyle(q) => Some(*q),
                     _ => None,
                 })
+                // libass `tag("q")`: the last `\q` wins (plain
+                // assignment), and anything outside 0-3 falls back to
+                // the track default instead of applying.
+                .map(|q| {
+                    if (0..=3).contains(&q) {
+                        q
+                    } else {
+                        script_wrap_style
+                    }
+                })
                 .unwrap_or(script_wrap_style)
         };
         let wrap_width =
@@ -2895,31 +2998,29 @@ impl Compositor {
             video_height,
         );
 
-        // Apply move animation
+        // Apply move animation (libass `complex_tag("move")`
+        // evaluation): `t1 <= 0 && t2 <= 0` — including the untimed
+        // 4-arg form — animates across the whole event; otherwise the
+        // window is literal, the start instant belongs to (x1,y1)
+        // (`t <= t1`), and equal nonzero times are an instant step.
+        // The parser swaps reversed times, and the branch structure
+        // below cannot divide by zero or underflow even if it didn't
+        // (the lerp runs only when `t1 < t2` is proven).
         if let Some(ref move_data) = resolved.move_data {
-            let elapsed = time_ms - start_ms;
-            let duration = end_ms - start_ms;
-
-            let t = if move_data.t1 == move_data.t2 {
-                if duration > 0 {
-                    (elapsed as f64 / duration as f64).min(1.0)
-                } else {
-                    0.0
-                }
+            let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+            let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+            let (t1, t2) = if move_data.t1 <= 0 && move_data.t2 <= 0 {
+                (0, duration)
             } else {
-                let move_start = move_data.t1.min(duration);
-                let move_end = move_data.t2.min(duration);
-                let move_duration = move_end - move_start;
+                (i64::from(move_data.t1), i64::from(move_data.t2))
+            };
 
-                if elapsed < move_start {
-                    0.0
-                } else if elapsed >= move_end {
-                    1.0
-                } else if move_duration > 0 {
-                    (elapsed - move_start) as f64 / move_duration as f64
-                } else {
-                    0.0
-                }
+            let t = if elapsed <= t1 {
+                0.0
+            } else if elapsed >= t2 {
+                1.0
+            } else {
+                (elapsed - t1) as f64 / (t2 - t1) as f64
             };
 
             let anchor_x = (move_data.x1 + (move_data.x2 - move_data.x1) * t) * scale_x;
@@ -3129,7 +3230,6 @@ impl Compositor {
                 x_offset = 0.0;
                 fay_line_shear = 0.0;
             }
-            let seg_first_line = cur_line;
 
             // Style/shape come from the layout pass; karaoke recolors
             // per glyph/run below (runs can change mid-segment at line
@@ -3147,18 +3247,32 @@ impl Compositor {
                 fay_line_shear = 0.0;
                 prev_shear_seg = Some(seg_idx);
                 let unit = drawing_unit_scale(scale_x, scale_y, drawing.mode);
-                // The pen sits on the text baseline; a drawing's box
-                // hangs above it (bottom on the baseline), matching
-                // libass/VSFilter placement for drawing lines.
+                // libass drawing placement (`get_outline_glyph`): the
+                // drawing origin sits at the pen with the box hanging
+                // above the baseline by its HEIGHT (`offset.y = -asc`,
+                // `asc = y_max - y_min`), and `offset.x = 0` — the
+                // bbox minimum is preserved, not normalized away.
+                // Advance is the bbox width (`v->advance = x_max -
+                // x_min`), so a drawing starting at x=80 leaves its
+                // left bearing empty (probe: 80u gap renders 53px)
+                // and min_y pushes ink below the baseline (probe:
+                // min_y=30 renders 20px lower; min_y=100 falls
+                // fully below a bottom-aligned frame).
                 let draw_inset = line_align_inset(
                     line_widths.get(cur_line).copied().unwrap_or(0.0),
                     layout.width,
                     resolved.alignment,
                 );
-                let draw_x = base_x + x_offset + draw_inset - drawing.min_x;
+                let draw_x = base_x + x_offset + draw_inset;
+                // Known divergence: libass models `\pbo` as
+                // asc/desc (`asc = height - pbo`, `desc = pbo`),
+                // which cancels out on single-drawing lines
+                // (probe: `\pbo20` renders pixel-identical to no
+                // `\pbo`) and shifts mixed lines +pbo downward.
+                // This term shifts single-line ink instead; fixing
+                // it needs pbo-aware line metrics (see CONFORMANCE).
                 let draw_y = base_y + line_y_offset
                     - drawing.height
-                    - drawing.min_y
                     - segment_resolved.drawing_baseline_offset * unit
                     + fay_line_shear;
                 // Karaoke for drawings (libass splits drawing runs
@@ -3171,13 +3285,18 @@ impl Compositor {
                         && elapsed_ms < run.end_ms
                         && run.span > 0.0
                     {
-                        // Device path-left + scaled layout span (probe:
-                        // libass splits path width, not ink). Drawings
+                        // Ink-left + full advance width (probe:
+                        // libass splits at `leftmost_x + frac *
+                        // advance`: a 60u square at x=80 splits at
+                        // its ink middle, not at pen + frac).
+                        // `run.span` and `min_x` already carry the
+                        // unit scale (layout multiplies once), so no
+                        // further scaling applies here. Drawings
                         // render unrotated here, so `flip` (a rotation
                         // effect) never applies: mirroring the sweep of
                         // an unrotated drawing would be wrong.
-                        let offset = run.sweep_frac(elapsed_ms) * run.span * unit;
-                        let left = draw_x + drawing.min_x * unit;
+                        let offset = run.sweep_frac(elapsed_ms) * run.span;
+                        let left = draw_x + drawing.min_x;
                         if left.is_finite() && offset.is_finite() && unit.is_finite() {
                             return Some((left + offset).round() as i64);
                         }
@@ -3392,39 +3511,215 @@ impl Compositor {
                     face.faux_italic,
                 );
 
-                if cached.width == 0 || cached.height == 0 {
+                // Decorations ride in the glyph bitmap (libass: deco
+                // bars are outline geometry, so they shear, rotate, and
+                // sweep with the glyph). Metrics come from this glyph's
+                // own face; like libass, bars need advance > 0 and
+                // gated font metrics, else the glyph is undecorated.
+                let deco = if segment_resolved.underline || segment_resolved.strike_out {
+                    font_manager.decoration_metrics(face.id).filter(|m| {
+                        m.units_per_em != 0
+                            && ((segment_resolved.underline && m.underline.is_some())
+                                || (segment_resolved.strike_out && m.strikeout.is_some()))
+                            && glyph.advance > 0.0
+                            && glyph.advance.is_finite()
+                            && segment_font_size.is_finite()
+                            && segment_font_size > 0.0
+                    })
+                } else {
+                    None
+                };
+                // Empty glyphs (spaces) still need bar-only bitmaps so
+                // bars stay continuous; without bars they skip as before.
+                let cached_empty = cached.width == 0 || cached.height == 0;
+                if cached_empty && deco.is_none() {
                     continue;
                 }
 
-                let scaled_bitmap = if (glyph.scale_x - 1.0).abs() < f64::EPSILON
-                    && (glyph.scale_y - 1.0).abs() < f64::EPSILON
-                {
-                    Cow::Borrowed(cached.bitmap.as_slice())
-                } else {
-                    Cow::Owned(
-                        RenderBuffer::resize_coverage_bitmap(
-                            &cached.bitmap,
-                            cached.width,
-                            cached.height,
-                            glyph.scale_x,
-                            glyph.scale_y,
-                        )
-                        .0,
+                // Effective work inputs for the shared transform path:
+                // normal glyphs use the cached raster (resized, padded
+                // when bars overhang the bitmap); bar-only glyphs
+                // synthesize a transparent advance-wide box.
+                let (
+                    work_bitmap,
+                    glyph_width,
+                    glyph_height,
+                    eff_bearing_x,
+                    eff_bearing_y,
+                    eff_scale_x,
+                    eff_scale_y,
+                ) = if cached_empty {
+                    // Bar-only (spaces): transparent box, pen at its
+                    // left edge, bars at metric rows. Authored in
+                    // device pixels, so the effective scale is 1.
+                    let Some(metrics) = deco else {
+                        continue;
+                    };
+                    let rel = deco_bar_rows(
+                        segment_resolved.underline,
+                        segment_resolved.strike_out,
+                        metrics,
+                        0.0,
+                        segment_font_size,
+                    );
+                    let top = rel.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+                    let bot = rel.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+                    if rel.is_empty() || !top.is_finite() || !bot.is_finite() || bot <= top {
+                        continue;
+                    }
+                    let w = glyph.advance.ceil().clamp(1.0, 65_536.0) as u32;
+                    let h = (bot - top).ceil().clamp(1.0, 1024.0) as u32;
+                    if u64::from(w) * u64::from(h) > MAX_GLYPH_BITMAP_PIXELS {
+                        continue;
+                    }
+                    let mut owned = vec![0u8; w as usize * h as usize];
+                    let pen_local = -top;
+                    for (t, b) in &rel {
+                        paint_deco_bar(
+                            &mut owned,
+                            w,
+                            h,
+                            0.0,
+                            glyph.advance,
+                            t + pen_local,
+                            b + pen_local,
+                        );
+                    }
+                    (
+                        Cow::Owned(owned),
+                        w,
+                        h,
+                        0.0f32,
+                        (-pen_local) as f32,
+                        1.0,
+                        1.0,
                     )
-                };
-                let scaled_width = {
-                    let v = (f64::from(cached.width) * glyph.scale_x).round();
-                    if !v.is_finite() {
-                        continue;
+                } else {
+                    let (sx, sy) = (glyph.scale_x, glyph.scale_y);
+                    let scaled =
+                        if (sx - 1.0).abs() < f64::EPSILON && (sy - 1.0).abs() < f64::EPSILON {
+                            Cow::Borrowed(cached.bitmap.as_slice())
+                        } else {
+                            Cow::Owned(
+                                RenderBuffer::resize_coverage_bitmap(
+                                    &cached.bitmap,
+                                    cached.width,
+                                    cached.height,
+                                    sx,
+                                    sy,
+                                )
+                                .0,
+                            )
+                        };
+                    let scaled_width = {
+                        let v = (f64::from(cached.width) * sx).round();
+                        if !v.is_finite() {
+                            continue;
+                        }
+                        (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
+                    };
+                    let scaled_height = {
+                        let v = (f64::from(cached.height) * sy).round();
+                        if !v.is_finite() {
+                            continue;
+                        }
+                        (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
+                    };
+                    match deco {
+                        None => (
+                            scaled,
+                            scaled_width,
+                            scaled_height,
+                            cached.bearing_x,
+                            cached.bearing_y,
+                            sx,
+                            sy,
+                        ),
+                        Some(metrics) => {
+                            // Bars span the full advance from the pen (libass
+                            // `add_rect(0, .., adv, ..)`); pad the bitmap so
+                            // bearing pixels are covered, else bars would dot
+                            // every glyph. Padding stays within the glyph pixel
+                            // budget, else bars paint clamped into the bitmap.
+                            let mut owned = scaled.into_owned();
+                            let pen_x = f64::from(-cached.bearing_x) * sx;
+                            let pen_y = f64::from(-cached.bearing_y) * sy;
+                            let mut pad_l: u32 = 0;
+                            let mut pad_r: u32 = 0;
+                            if pen_x.is_finite()
+                                && u64::from(scaled_width) * u64::from(scaled_height)
+                                    == owned.len() as u64
+                            {
+                                let need_l = (-pen_x).max(0.0);
+                                let need_r =
+                                    (pen_x + glyph.advance - f64::from(scaled_width)).max(0.0);
+                                let cand_l = need_l.ceil().clamp(0.0, f64::from(u32::MAX)) as u32;
+                                let mut cand_r =
+                                    need_r.ceil().clamp(0.0, f64::from(u32::MAX)) as u32;
+                                // Parity: the projective center math moves the
+                                // placement by half the total pad but floors the
+                                // output offset, so an odd total pad shifts the
+                                // glyph half a pixel (AA fringes differ from the
+                                // undecorated render). Keep the total even; the
+                                // extra transparent column never affects bars.
+                                if (u64::from(cand_l) + u64::from(cand_r)) % 2 == 1 {
+                                    cand_r = cand_r.saturating_add(1);
+                                }
+                                let w1 =
+                                    u64::from(scaled_width) + u64::from(cand_l) + u64::from(cand_r);
+                                if w1 <= u64::from(u32::MAX)
+                                    && w1 * u64::from(scaled_height) <= MAX_GLYPH_BITMAP_PIXELS
+                                {
+                                    pad_l = cand_l;
+                                    pad_r = cand_r;
+                                }
+                            }
+                            let (gw, bear_x) = if pad_l > 0 || pad_r > 0 {
+                                let w1 =
+                                    (u64::from(scaled_width) + u64::from(pad_l) + u64::from(pad_r))
+                                        as u32;
+                                let mut padded = vec![0u8; w1 as usize * scaled_height as usize];
+                                for (row, src_row) in
+                                    owned.chunks_exact(scaled_width as usize).enumerate()
+                                {
+                                    let dst = row * w1 as usize + pad_l as usize;
+                                    padded[dst..dst + scaled_width as usize]
+                                        .copy_from_slice(src_row);
+                                }
+                                owned = padded;
+                                (w1, cached.bearing_x - pad_l as f32 / sx as f32)
+                            } else {
+                                (scaled_width, cached.bearing_x)
+                            };
+                            let pen_x_eff = f64::from(-bear_x) * sx;
+                            for (t, b) in deco_bar_rows(
+                                segment_resolved.underline,
+                                segment_resolved.strike_out,
+                                metrics,
+                                pen_y,
+                                segment_font_size * sy,
+                            ) {
+                                paint_deco_bar(
+                                    &mut owned,
+                                    gw,
+                                    scaled_height,
+                                    pen_x_eff,
+                                    pen_x_eff + glyph.advance,
+                                    t,
+                                    b,
+                                );
+                            }
+                            (
+                                Cow::Owned(owned),
+                                gw,
+                                scaled_height,
+                                bear_x,
+                                cached.bearing_y,
+                                sx,
+                                sy,
+                            )
+                        }
                     }
-                    (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
-                };
-                let scaled_height = {
-                    let v = (f64::from(cached.height) * glyph.scale_y).round();
-                    if !v.is_finite() {
-                        continue;
-                    }
-                    (v.clamp(1.0, f64::from(u32::MAX)) as u32).max(1)
                 };
                 // Transform order (ASS reference, libass
                 // `calc_transform_matrix` + VSFilter `Transform_C`):
@@ -3433,10 +3728,8 @@ impl Compositor {
                 // compositing. The shear is folded into the projective
                 // pass below (single resample), never applied
                 // post-rotation.
-                let (work_bitmap, glyph_width, glyph_height) =
-                    (scaled_bitmap, scaled_width, scaled_height);
-                let bearing_x = f64::from(cached.bearing_x) * glyph.scale_x;
-                let bearing_y = f64::from(cached.bearing_y) * glyph.scale_y;
+                let bearing_x = f64::from(eff_bearing_x) * eff_scale_x;
+                let bearing_y = f64::from(eff_bearing_y) * eff_scale_y;
 
                 // Calculate original center of the glyph relative to origin
                 // (`glyph_y` carries the cumulative `\fay` baseline shear;
@@ -3456,8 +3749,8 @@ impl Compositor {
                     .as_scaled(PxScale::from(segment_font_size as f32))
                     .ascent() as f64;
                 let pivot = (
-                    f64::from(-cached.bearing_x) * glyph.scale_x,
-                    (f64::from(-cached.bearing_y) - ascent) * glyph.scale_y,
+                    f64::from(-eff_bearing_x) * eff_scale_x,
+                    (f64::from(-eff_bearing_y) - ascent) * eff_scale_y,
                 );
 
                 let dx = orig_cx - org_x;
@@ -3493,7 +3786,7 @@ impl Compositor {
                 else {
                     continue;
                 };
-                let (sx, sy) = (glyph.scale_x, glyph.scale_y);
+                let (sx, sy) = (eff_scale_x, eff_scale_y);
                 let (fax, fay) =
                     if sx.is_finite() && sy.is_finite() && sx.abs() > 1e-9 && sy.abs() > 1e-9 {
                         (fax * sx / sy, fay * sy / sx)
@@ -3745,78 +4038,11 @@ impl Compositor {
                 );
             }
 
-            // Decorations belong to the whole text segment, not individual
-            // glyph bitmaps. Drawing them from the segment baseline avoids
-            // gaps between glyphs and keeps them stable across font bearings.
-            if (segment_resolved.underline || segment_resolved.strike_out) && scale_y.is_finite() {
-                let color = segment_resolved.color.to_ass_components();
-                let color_alpha = 255 - color[3];
-                let line_width = if segment_resolved.underline {
-                    (2.0 * scale_y).round().clamp(1.0, 4096.0) as i32
-                } else {
-                    (3.0 * scale_y).round().clamp(1.0, 4096.0) as i32
-                };
-                // (row baseline, row width): each row's bar spans only
-                // its own glyphs, not the segment's widest row.
-                let mut line_offsets: Vec<(f64, f64)> = Vec::new();
-                for glyph in &shaped.glyphs {
-                    // Zero-scale glyphs never render; excluding them keeps
-                    // row indices aligned with the render loop's marker.
-                    if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
-                        continue;
-                    }
-                    let edge = glyph.x + glyph.advance;
-                    let edge = if edge.is_finite() { edge.max(0.0) } else { 0.0 };
-                    match line_offsets
-                        .iter_mut()
-                        .find(|(y, _)| (*y - glyph.y).abs() < f64::EPSILON)
-                    {
-                        Some(slot) => {
-                            slot.1 = slot.1.max(edge);
-                        }
-                        None => line_offsets.push((glyph.y, edge)),
-                    }
-                }
-                for (row_idx, (line_offset, row_width)) in line_offsets.iter().enumerate() {
-                    // Each row aligns like its rendered line: row 0 rides
-                    // the segment pen, later rows start at the line edge.
-                    let row_line = seg_first_line.saturating_add(row_idx);
-                    let row_inset = line_align_inset(
-                        line_widths.get(row_line).copied().unwrap_or(0.0),
-                        layout.width,
-                        resolved.alignment,
-                    );
-                    let row_pen_x = if row_idx == 0 { x_offset } else { 0.0 };
-                    let decoration_y = if segment_resolved.underline {
-                        base_y
-                            + line_y_offset
-                            + line_offset
-                            + (shaped.height - shaped.baseline) * 0.5
-                    } else {
-                        base_y + line_y_offset + line_offset - shaped.baseline * 0.35
-                    };
-                    let (Some(dx0), Some(dy0), Some(dw)) = (
-                        finite_to_i32(
-                            (base_x + row_pen_x + row_inset)
-                                .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
-                        ),
-                        finite_to_i32(decoration_y.clamp(f64::from(i32::MIN), f64::from(i32::MAX))),
-                        finite_to_i32(row_width.ceil().clamp(0.0, 65_536.0)),
-                    ) else {
-                        continue;
-                    };
-                    buffer.fill_rect(
-                        dx0,
-                        dy0,
-                        dw,
-                        line_width,
-                        color[0],
-                        color[1],
-                        color[2],
-                        (f64::from(color_alpha) * alpha_mult).clamp(0.0, 255.0) as u8,
-                    );
-                }
-            }
+            // Decorations need no segment pass: each glyph's bitmap
+            // already carries its bar segment (painted pre-transform
+            // in the loop above), so bars shear, rotate, and sweep
+            // with the text, span spaces via bar-only glyphs, and take
+            // outline, shadow, and karaoke colors like glyph ink.
 
             // Update offsets for next segment
             // Check if segment ends with line break
@@ -3832,15 +4058,12 @@ impl Compositor {
             }
         }
         // Event end flushes any pending sweep (normally already
-        // flushed at its last glyph; this covers skew cases). Segment
-        // decorations do NOT flush: runs routinely span segments
-        // (`{\k}a{\pos}b`), and splitting the sweep per segment would
-        // break the run span. Consequence: for a sweep run spanning
-        // segments, an earlier segment's underline/strike bar paints
-        // under the flushed fill (single-segment runs and all pop
-        // runs keep the usual bar-over-fill order). Whether libass
-        // also sweeps the bar color itself is unverified (no ffmpeg
-        // in this environment to probe); bars stay primary.
+        // flushed at its last glyph; this covers skew cases). Runs
+        // routinely span segments (`{\k}a{\pos}b`), so nothing
+        // flushes per segment. Decoration bars ride in the glyph
+        // bitmaps, hence sweep (and pop) with their glyphs: probe
+        // `{\kf100\u1}He` shows the bar split white/red at the
+        // midpoint, exactly like the glyph ink.
         sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
 
         // Blur before clipping: blurring after a clip would bleed
@@ -4279,10 +4502,11 @@ mod tests {
 
     #[test]
     fn test_reset_preserves_only_line_global() {
-        // \r keeps exactly \pos/\move/\org/\clip/\iclip/\fad/\fade and
-        // alignment (libass never resets alignment) and resets
+        // \r keeps exactly \pos/\move/\org/\clip/\iclip/\fad/\fade
+        // plus alignment, drawing mode, and \pbo (libass
+        // `ass_reset_render_context` touches none of those) and resets
         // everything else (fonts, colors, border/shadow, rotation,
-        // blur, spacing, \p, \pbo) to the target style.
+        // blur, spacing) to the target style.
         use crate::types::override_tag::TextSegment;
         let base = Style::new("Default");
         let event =
@@ -4334,24 +4558,36 @@ mod tests {
         assert_eq!(seg.blur, 0.0);
         assert_eq!(seg.angle, 0.0);
         assert_eq!(seg.scale_x, base.scale_x);
-        assert_eq!(seg.drawing_mode, 0);
-        assert_eq!(seg.drawing_baseline_offset, 0.0);
+        // libass `ass_reset_render_context` never touches
+        // `drawing_scale` or `pbo`, so both survive the reset.
+        assert_eq!(seg.drawing_mode, 1);
+        assert_eq!(seg.drawing_baseline_offset, 5.0);
     }
 
     #[test]
-    fn test_reset_exits_drawing_mode() {
-        // {\p1}...{\r}text: text after \r must not stay in drawing mode.
+    fn test_reset_keeps_drawing_mode() {
+        // libass `ass_reset_render_context` never touches
+        // `drawing_scale`: {\p1}...{\r}text stays in drawing mode.
         let segments = parse_text_segments("{\\p1}m 0 0 l 100 0 100 100{\\r}Normal text");
         assert_eq!(segments.len(), 2);
         assert_eq!(segment_drawing_mode(&segments[0].tags, 0), 1);
-        assert_eq!(segment_drawing_mode(&segments[1].tags, 0), 0);
-        // A later \p re-enters drawing mode.
-        let segments = parse_text_segments("{\\p1}a{\\r}b{\\p1}c");
-        assert_eq!(segment_drawing_mode(&segments[2].tags, 0), 1);
-        // Break escapes work again after \r (drawing no longer swallows them).
+        assert_eq!(segment_drawing_mode(&segments[1].tags, 0), 1);
+        // A later \p0 exits; a later \pN re-enters with a new scale.
+        let segments = parse_text_segments("{\\p1}a{\\r}b{\\p0}c{\\p2}d");
+        assert_eq!(segment_drawing_mode(&segments[3].tags, 0), 2);
+        // Break escapes stay swallowed across \r, work again after \p0.
         let segments = parse_text_segments("{\\p1}a{\\r}x\\Ny");
         let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
-        assert!(joined.contains('\n'), "post-\\r \\N must break: {joined:?}");
+        assert!(
+            !joined.contains('\n'),
+            "post-\\r \\N stays drawing: {joined:?}"
+        );
+        let segments = parse_text_segments("{\\p1}a{\\p0}x\\Ny");
+        let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            joined.contains('\n'),
+            "post-\\p0 \\N must break: {joined:?}"
+        );
         // Resolved style agrees.
         let base = Style::new("Default");
         let event = Event::parse_from_line(
@@ -4362,13 +4598,13 @@ mod tests {
         let segments = parse_text_segments(&event.text);
         let seg =
             Compositor::resolve_segment_style(&resolved, &segments[1], &event, &[], 0, 0, 2000);
-        assert_eq!(seg.drawing_mode, 0);
+        assert_eq!(seg.drawing_mode, 1);
     }
 
     #[test]
-    fn test_wrapper_resumes_after_reset_from_drawing() {
-        // Wrap tokenizer: text after {\r} wraps normally again instead of
-        // being treated as a verbatim drawing run.
+    fn test_wrapper_stays_drawing_across_reset() {
+        // Wrap tokenizer: {\r} inside a drawing does not resume
+        // wrapping — the text after it stays a verbatim drawing run.
         let font = fallback_font();
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
         let out = wrap_event_text(
@@ -4379,20 +4615,35 @@ mod tests {
             48.0,
             0.0,
         );
-        assert!(out.contains('\n'), "post-\\r text must wrap: {out:?}");
-        // Ordered groups: {\r\p1} stays drawing, {\p1\r} does not.
-        let still = wrap_event_text(
-            "{\\r\\p1}m 0 0 l 10 0 aa aa aa aa",
+        assert!(
+            !out.contains('\n'),
+            "post-\\r drawing must not wrap: {out:?}"
+        );
+        // Only \p0 resumes wrapping.
+        let out = wrap_event_text(
+            "{\\p1}m 0 0 l 10 0{\\p0}aa aa aa aa",
             0,
             word_w + 1.0,
             &[&font],
             48.0,
             0.0,
         );
-        assert!(
-            !still.contains('\n'),
-            "drawing run must not wrap: {still:?}"
-        );
+        assert!(out.contains('\n'), "post-\\p0 text must wrap: {out:?}");
+        // Ordered groups: {\r\p1} and {\p1\r} both stay drawing.
+        for group in ["{\\r\\p1}", "{\\p1\\r}"] {
+            let still = wrap_event_text(
+                &format!("{group}m 0 0 l 10 0 aa aa aa aa"),
+                0,
+                word_w + 1.0,
+                &[&font],
+                48.0,
+                0.0,
+            );
+            assert!(
+                !still.contains('\n'),
+                "{group} drawing run must not wrap: {still:?}"
+            );
+        }
     }
 
     #[test]
@@ -4628,6 +4879,11 @@ mod tests {
     }
 
     /// Plan #28: `\pbo` shifts drawing placement vertically.
+    /// Known divergence from libass (see CONFORMANCE): libass models
+    /// `\pbo` as asc/desc, which cancels out on single-drawing lines
+    /// (probe: `\pbo20` renders pixel-identical to no `\pbo`) and
+    /// shifts mixed lines +pbo downward. This pins the current
+    /// single-line shift until pbo-aware line metrics land.
     #[test]
     fn test_pbo_shifts_drawing() {
         fn min_row(buf: &RenderBuffer) -> u32 {
@@ -4645,6 +4901,233 @@ mod tests {
         let dy = min_row(&shifted) as i32 - min_row(&plain) as i32;
         // unit is 0.5 video px per drawing unit, so pbo -20 moves down 10px.
         assert!((8..=12).contains(&dy), "pbo shift rows: {dy}");
+    }
+
+    #[test]
+    fn test_drawing_preserves_min_x() {
+        // libass `offset.x = 0`: a drawing's left bearing stays
+        // empty and the advance is the bbox width (probe: the
+        // second square of `{\p1}...{\r}m 80 0 ...` starts 80u
+        // past the pen). At unit scale the ink shifts by exactly
+        // min_x with an unchanged width.
+        let base = render_text("{\\p1}m 0 0 l 60 0 l 60 60 l 0 60", 1000);
+        let off = render_text("{\\p1}m 80 0 l 140 0 l 140 60 l 80 60", 1000);
+        let (b0, b1) = painted_cols(&base);
+        let (o0, o1) = painted_cols(&off);
+        assert_eq!(o0 as i32 - b0 as i32, 80, "ink left: {b0} -> {o0}");
+        assert_eq!(o1 - o0, b1 - b0, "ink width unchanged");
+    }
+
+    #[test]
+    fn test_drawing_preserves_min_y() {
+        // libass hangs the box one HEIGHT above the baseline
+        // (`offset.y = -asc`, `asc = height`), so min_y pushes ink
+        // below the baseline (probe: min_y=30 renders 20px lower
+        // at 0.667 scale). Same-height boxes share the layout and
+        // differ only by the min_y shift.
+        let base = render_text("{\\p1}m 0 0 l 60 0 l 60 30 l 0 30", 1000);
+        let off = render_text("{\\p1}m 0 30 l 60 30 l 60 60 l 0 60", 1000);
+        let (b0, b1) = painted_rows(&base);
+        let (o0, o1) = painted_rows(&off);
+        assert_eq!(o0 as i32 - b0 as i32, 30, "ink top: {b0} -> {o0}");
+        assert_eq!(o1 - o0, b1 - b0, "ink height unchanged");
+    }
+
+    #[test]
+    fn test_kf_drawing_split_at_fractional_scale() {
+        // `\kf` splits drawings at ink-left + frac * advance with
+        // no extra unit scaling (probe: 60u square at x=80 splits
+        // at its ink middle). At 0.667 unit scale the midpoint
+        // split must sit at the ink middle, not at 0.667x of it.
+        let style = Style::new("Default");
+        let buf = render_sized(
+            "{\\kf100}{\\p1}m 0 0 l 60 0 l 60 60 l 0 60{\\p0}",
+            &style,
+            500,
+            384,
+            216,
+            256,
+            144,
+            true,
+        );
+        let bytes = buf.as_bytes();
+        let is_primary = |p: &[u8]| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0;
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        // Solid columns on the middle ink row: primaries left,
+        // secondaries right, with one hard edge between them.
+        let (_, max_y) = painted_rows(&buf);
+        let (min_x, max_x) = painted_cols(&buf);
+        let y = (painted_rows(&buf).0 + max_y) / 2;
+        let mut last_primary: Option<u32> = None;
+        let mut first_secondary: Option<u32> = None;
+        for x in min_x..=max_x {
+            let i = (y * buf.width + x) as usize * 4;
+            let p = &bytes[i..i + 4];
+            if is_primary(p) {
+                last_primary = Some(x);
+            } else if is_secondary(p) && first_secondary.is_none() {
+                first_secondary = Some(x);
+            }
+        }
+        let (lp, fs) = (
+            last_primary.expect("primary half"),
+            first_secondary.expect("secondary half"),
+        );
+        assert!(fs > lp && fs - lp <= 2, "hard edge at {lp}/{fs}");
+        let mid = (f64::from(min_x) + f64::from(max_x)) / 2.0;
+        assert!(
+            (f64::from(fs) - mid).abs() <= 3.0,
+            "split at ink middle {mid}: edge {lp}/{fs} over {min_x}..={max_x}"
+        );
+    }
+
+    /// Ink mask (alpha > 0) of a buffer.
+    fn ink_mask(buf: &RenderBuffer) -> Vec<bool> {
+        buf.as_bytes().chunks_exact(4).map(|p| p[3] > 0).collect()
+    }
+
+    #[test]
+    fn test_deco_underline_continuous_over_spaces() {
+        // Bars span every glyph's full advance (libass `add_rect(0,
+        // .., adv, ..)`), including spaces via bar-only glyphs: the
+        // bar under "H H" has no gap at the space.
+        let plain = ink_mask(&render_text("H H", 1000));
+        let deco = render_text("{\\u1}H H", 1000);
+        let ink = ink_mask(&deco);
+        let w = deco.width as usize;
+        // Bar rows: ink in deco where plain has none (the 'H's have
+        // no descenders, so underline rows are glyph-free).
+        let bar_rows: Vec<u32> = (0..deco.height)
+            .filter(|y| (*y as usize * w..(*y as usize + 1) * w).any(|i| ink[i] && !plain[i]))
+            .collect();
+        assert!(!bar_rows.is_empty(), "underline adds rows");
+        for y in bar_rows {
+            let row: Vec<bool> = (0..w).map(|x| ink[y as usize * w + x]).collect();
+            let first = row.iter().position(|b| *b).expect("bar ink");
+            let last = row.iter().rposition(|b| *b).expect("bar ink");
+            assert!(
+                row[first..=last].iter().all(|b| *b),
+                "bar row {y} has a gap (space not spanned)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deco_underline_and_strikeout_both_paint() {
+        // libass allows both DECO flags at once (up to two bars per
+        // glyph); the old segment pass drew only the underline.
+        let plain = render_text("U", 1000);
+        // Underline: the bar dips below the glyph's outline/shadow.
+        let both = render_text("{\\u1\\s1}U", 1000);
+        assert!(
+            painted_rows(&both).1 > painted_rows(&plain).1,
+            "underline extends below the glyph"
+        );
+        // Strikeout: new ink inside the glyph's vertical span (the
+        // bar crosses the U's hollow middle), beyond underline alone.
+        let under = ink_mask(&render_text("{\\u1}U", 1000));
+        let ink = ink_mask(&both);
+        let w = both.width as usize;
+        let (top, bottom) = painted_rows(&plain);
+        let inside = (top..=bottom)
+            .any(|y| (y as usize * w..(y as usize + 1) * w).any(|i| ink[i] && !under[i]));
+        assert!(inside, "strikeout row expected inside the glyph");
+    }
+
+    #[test]
+    fn test_deco_bar_rotates_with_text() {
+        // Bars are glyph-outline geometry (probe: `{\frz90\u1}Hello`
+        // shows a vertical bar), not axis-aligned rects.
+        let plain = ink_mask(&render_text("{\\frz90}H", 1000));
+        let deco = render_text("{\\frz90\\u1}H", 1000);
+        let ink = ink_mask(&deco);
+        let w = deco.width as usize;
+        let diff: Vec<(u32, u32)> = ink
+            .iter()
+            .zip(plain.iter())
+            .enumerate()
+            .filter(|(_, (d, p))| **d && !**p)
+            .map(|(i, _)| ((i % w) as u32, (i / w) as u32))
+            .collect();
+        assert!(diff.len() > 10, "rotated bar adds ink");
+        let (mut x0, mut x1) = (u32::MAX, 0u32);
+        let (mut y0, mut y1) = (u32::MAX, 0u32);
+        for (x, y) in &diff {
+            x0 = x0.min(*x);
+            x1 = x1.max(*x);
+            y0 = y0.min(*y);
+            y1 = y1.max(*y);
+        }
+        let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+        assert!(
+            bh > 3 * bw && bh > 10,
+            "bar must be vertical after frz90, got {bw}x{bh}"
+        );
+    }
+
+    #[test]
+    fn test_deco_bar_sweeps_with_karaoke() {
+        // Bars ride in the glyph bitmaps, hence sweep with their
+        // glyphs (probe: `{\kf100\u1}He` splits the bar white/red).
+        // The bar under the space carries no glyph ink, so its
+        // colors there are purely the bar's: white left of the
+        // midpoint split, secondary right of it.
+        let plain = render_text("{\\kf100}H H", 500);
+        let plain_ink = ink_mask(&plain);
+        let deco = render_text("{\\kf100\\u1}H H", 500);
+        let ink = ink_mask(&deco);
+        let w = deco.width as usize;
+        // Space x-range: the ink gap between the H blocks on a
+        // glyph row (outline included, so bar-only remains).
+        let mid_row = (painted_rows(&plain).0 + painted_rows(&plain).1) / 2;
+        let glyph_cols: Vec<usize> = (0..w)
+            .filter(|x| plain_ink[mid_row as usize * w + x])
+            .collect();
+        let mut gap: Option<(usize, usize)> = None;
+        for pair in glyph_cols.windows(2) {
+            if pair[1] > pair[0] + 1 {
+                gap = Some((pair[0], pair[1]));
+                break;
+            }
+        }
+        let (gap_l, gap_r) = gap.expect("ink gap between the H blocks");
+        // Bar rows: deco-only ink anywhere on the row.
+        let bar_rows: Vec<u32> = (0..deco.height)
+            .filter(|y| (*y as usize * w..(*y as usize + 1) * w).any(|i| ink[i] && !plain_ink[i]))
+            .collect();
+        assert!(!bar_rows.is_empty(), "bar adds rows to the sweep");
+        let bytes = deco.as_bytes();
+        let is_primary = |p: &[u8]| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0;
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        let split = (gap_l + gap_r) / 2;
+        let mut primary = false;
+        let mut secondary = false;
+        for y in bar_rows {
+            for x in gap_l..=gap_r {
+                if !ink[y as usize * w + x] || plain_ink[y as usize * w + x] {
+                    continue;
+                }
+                let p = &bytes[(y as usize * w + x) * 4..][..4];
+                if x < split {
+                    primary |= is_primary(p);
+                } else {
+                    secondary |= is_secondary(p);
+                }
+            }
+        }
+        assert!(primary && secondary, "space bar must split at mid-run");
+    }
+
+    #[test]
+    fn test_fe_encoding_is_render_neutral() {
+        // `\fe` parses and stores (libass parity at the tag level),
+        // but charset remapping stays partial by design: shaping
+        // consumes Unicode text, so the tag must not change
+        // rendering. Byte-identical frames pin the neutrality (see
+        // the support matrix).
+        let base = render_text("Hello", 1000);
+        let tagged = render_text("{\\fe129}Hello", 1000);
+        assert_eq!(base.as_bytes(), tagged.as_bytes());
     }
 
     /// Plan #27: the `\clip(scale, ...)` argument scales drawing units.
@@ -5298,6 +5781,184 @@ mod tests {
     }
 
     #[test]
+    fn test_move_reversed_times_render_identical() {
+        // libass swaps t1 > t2: reversed renders byte-identical to normal.
+        for t in [500, 1500, 2500] {
+            let reversed = render_text(r"{\move(20,20,300,20,2000,1000)}X", t);
+            let normal = render_text(r"{\move(20,20,300,20,1000,2000)}X", t);
+            assert_eq!(
+                reversed.as_bytes(),
+                normal.as_bytes(),
+                "reversed vs normal @ {t}ms"
+            );
+        }
+        // And the midpoint is actually mid-flight (not stuck at an end).
+        let mid = render_text(r"{\move(20,20,300,20,2000,1000)}X", 1500);
+        let start = render_text(r"{\pos(20,20)}X", 1500);
+        let end = render_text(r"{\pos(300,20)}X", 1500);
+        assert_ne!(mid.as_bytes(), start.as_bytes());
+        assert_ne!(mid.as_bytes(), end.as_bytes());
+    }
+
+    #[test]
+    fn test_move_equal_times_is_instant_step() {
+        // Equal nonzero times are an instant transition AT the stamp:
+        // before and exactly at render at (x1,y1), after at (x2,y2).
+        // (libass `t <= t1 -> k = 0`, verified against 0.17.5 frames.)
+        let before = render_text(r"{\move(20,20,300,20,1000,1000)}X", 999);
+        let at = render_text(r"{\move(20,20,300,20,1000,1000)}X", 1000);
+        let after = render_text(r"{\move(20,20,300,20,1000,1000)}X", 1001);
+        let from = render_text(r"{\pos(20,20)}X", 1000);
+        let to = render_text(r"{\pos(300,20)}X", 1001);
+        assert_eq!(before.as_bytes(), from.as_bytes(), "before == start pos");
+        assert_eq!(at.as_bytes(), from.as_bytes(), "at == start pos");
+        assert_eq!(after.as_bytes(), to.as_bytes(), "after == end pos");
+        // Only the untimed form animates across the whole event.
+        let animated = render_text(r"{\move(20,20,300,20)}X", 999);
+        assert_ne!(animated.as_bytes(), from.as_bytes());
+    }
+
+    #[test]
+    fn test_move_zero_and_negative_times_span_event() {
+        // Explicit (0,0), like the untimed form, animates the whole event.
+        for t in [1000, 2500, 4000] {
+            let explicit = render_text(r"{\move(20,20,300,20,0,0)}X", t);
+            let untimed = render_text(r"{\move(20,20,300,20)}X", t);
+            assert_eq!(explicit.as_bytes(), untimed.as_bytes(), "t={t}");
+        }
+        // libass `t1 <= 0 && t2 <= 0` also covers negative pairs.
+        for t in [1000, 2500, 4000] {
+            let negative = render_text(r"{\move(20,20,300,20,-5,-5)}X", t);
+            let untimed = render_text(r"{\move(20,20,300,20)}X", t);
+            assert_eq!(negative.as_bytes(), untimed.as_bytes(), "t={t}");
+        }
+    }
+
+    #[test]
+    fn test_move_wrong_arity_renders_unpositioned() {
+        // Ignored tags position nothing: identical to plain text.
+        for text in [
+            r"{\move(20,20,300,20,1000)}X",
+            r"{\move(20,20,300)}X",
+            r"{\pos(20,20,30)}X",
+            r"{\pos(20)}X",
+        ] {
+            let ignored = render_text(text, 1000);
+            let plain = render_text("X", 1000);
+            assert_eq!(ignored.as_bytes(), plain.as_bytes(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn test_malformed_alignment_first_consumes_slot() {
+        // Plan P1: the first alignment-like tag consumes PARSED_A even
+        // when malformed, so a later `\an7` cannot win. Style alignment
+        // is 2 (bottom-center); `\an7` alone would move ink top-left.
+        let plain = render_text("X", 1000);
+        let top_left = render_text(r"{\an7}X", 1000);
+        assert_ne!(plain.as_bytes(), top_left.as_bytes());
+        for text in [
+            r"{\anfoo\an7}X",
+            r"{\afoo\an7}X",
+            r"{\an\an7}X",
+            r"{\an99\an7}X",
+        ] {
+            let rendered = render_text(text, 1000);
+            assert_eq!(
+                rendered.as_bytes(),
+                plain.as_bytes(),
+                "{text:?} must fall back to the style"
+            );
+        }
+    }
+
+    #[test]
+    fn test_transform_equal_times_apply_fully() {
+        // Unlike `\move`, `\t` uses strict `<` on the left: at exactly
+        // `t1 == t2` the tag fully applies (libass `t >= t2 -> k = 1`).
+        let base = Style::new("Default"); // 48.0
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let size_at = |text: &str, time_ms: u64| {
+            let segments = parse_text_segments(text);
+            Compositor::resolve_segment_style(
+                &resolved,
+                &segments[0],
+                &event,
+                &[],
+                time_ms,
+                0,
+                10_000,
+            )
+            .font_size
+        };
+        assert_eq!(size_at(r"{\t(1000,1000,\fs60)}x", 999), 48.0);
+        assert_eq!(size_at(r"{\t(1000,1000,\fs60)}x", 1000), 60.0);
+        assert_eq!(size_at(r"{\t(1000,1000,\fs60)}x", 1001), 60.0);
+    }
+
+    #[test]
+    fn test_transform_accel_zero_applies_instantly() {
+        // libass `pow(t, 0) == 1`: accel 0 applies from the window start.
+        let base = Style::new("Default"); // 48.0
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let size_at = |text: &str, time_ms: u64| {
+            let segments = parse_text_segments(text);
+            Compositor::resolve_segment_style(
+                &resolved,
+                &segments[0],
+                &event,
+                &[],
+                time_ms,
+                0,
+                10_000,
+            )
+            .font_size
+        };
+        assert_eq!(size_at(r"{\t(100,200,0,\fs60)}x", 99), 48.0);
+        assert_eq!(size_at(r"{\t(100,200,0,\fs60)}x", 100), 60.0);
+        assert_eq!(size_at(r"{\t(100,200,0,\fs60)}x", 150), 60.0);
+    }
+
+    #[test]
+    fn test_fsc_resets_both_scale_axes() {
+        let base = Style::new("Default"); // scale 100/100
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fscx200\\fscy50\\fsc}Hi",
+        )
+        .unwrap();
+        let r = Compositor::resolve_style(&base, &event);
+        assert_eq!((r.scale_x, r.scale_y), (100.0, 100.0));
+        let event = Event::parse_from_line(
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fscx200\\fscy50}Hi",
+        )
+        .unwrap();
+        let r = Compositor::resolve_style(&base, &event);
+        assert_eq!((r.scale_x, r.scale_y), (200.0, 50.0));
+    }
+
+    #[test]
+    fn test_wrap_style_out_of_range_falls_back() {
+        // libass `tag("q")`: outside 0-3 the track default applies.
+        let plain = render_text("A\\nB", 1000);
+        for text in ["A\\nB{\\q5}", "A\\nB{\\q-1}", "A\\nB{\\q99}"] {
+            assert_eq!(
+                render_text(text, 1000).as_bytes(),
+                plain.as_bytes(),
+                "{text:?}"
+            );
+        }
+        // A valid non-default wrap still takes effect.
+        assert_ne!(
+            render_text("A\\nB{\\q2}", 1000).as_bytes(),
+            plain.as_bytes()
+        );
+    }
+
+    #[test]
     fn test_relative_fs_scales_current_size() {
         // libass: \fs+10 doubles, \fs-5 halves the *current* size.
         let base = Style::new("Default"); // 48.0
@@ -5483,13 +6144,21 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_style_3_bottom_wider() {
+    fn test_wrap_style_3_matches_style_0() {
+        // libass runs `wrap_lines_smart` for every style except 1, so
+        // 3 wraps exactly like 0 (balanced) — not bottom-wide greedy
+        // (that is VSFilter behavior libass never implemented).
         let font = fallback_font();
         let word_w = TextShaper::measure_text("aa", &font, 48.0, 0.0);
         let space_w = TextShaper::measure_text(" ", &font, 48.0, 0.0);
         let max = word_w * 3.0 + space_w * 2.0 + 0.5;
-        let out = wrap_event_text("aa aa aa aa", 3, max, &[&font], 48.0, 0.0);
-        assert_eq!(out, "aa\naa aa aa");
+        let smart = wrap_event_text("aa aa aa aa", 0, max, &[&font], 48.0, 0.0);
+        assert_eq!(smart, "aa aa\naa aa");
+        let three = wrap_event_text("aa aa aa aa", 3, max, &[&font], 48.0, 0.0);
+        assert_eq!(three, smart);
+        // Style 1 stays greedy (no rebalance).
+        let greedy = wrap_event_text("aa aa aa aa", 1, max, &[&font], 48.0, 0.0);
+        assert_eq!(greedy, "aa aa aa\naa");
     }
 
     #[test]
@@ -5540,6 +6209,41 @@ mod tests {
         // stays whole even when overlong.
         let out = wrap_event_text("あ\u{00A0}あ", 1, 5.0, &[&font], 48.0, 0.0);
         assert_eq!(out, "あ\u{00A0}あ");
+    }
+
+    #[test]
+    fn test_wrap_zwsp_breaks() {
+        let font = fallback_font();
+        // U+200B ZERO WIDTH SPACE breaks on both sides (UAX #14 ZW):
+        // "aa<ZWSP>aa" wraps at ZWSP width with the mark preserved.
+        let two = TextShaper::measure_text("aa", &font, 48.0, 0.0);
+        let out = wrap_event_text("aa\u{200B}aa", 1, two + 0.5, &[&font], 48.0, 0.0);
+        assert!(out.contains('\n'), "ZWSP run must wrap: {out:?}");
+        assert!(!out.contains(' '), "no phantom spaces: {out:?}");
+        assert_eq!(out.replace('\n', ""), "aa\u{200B}aa");
+    }
+
+    #[test]
+    fn test_wrap_ideographic_space_breaks() {
+        let font = fallback_font();
+        // U+3000 breaks around itself like other CJK (UAX #14 ID),
+        // even between Latin halves (it is still a space).
+        let one = TextShaper::measure_text("a", &font, 48.0, 0.0);
+        let out = wrap_event_text("a\u{3000}b", 1, one + 0.5, &[&font], 48.0, 0.0);
+        assert!(out.contains('\n'), "ideographic space must break: {out:?}");
+        assert_eq!(out.replace('\n', ""), "a\u{3000}b");
+    }
+
+    #[test]
+    fn test_zwsp_renders_nothing() {
+        // ZERO WIDTH SPACE is invisible and zero-advance: shaping
+        // "a<ZWSP>b" matches "ab" exactly (DejaVu carries an empty
+        // ZWSP glyph, so no .notdef box appears).
+        let base = render_text("ab", 1000);
+        let zwsp = render_text("a\u{200B}b", 1000);
+        assert_eq!(painted_cols(&base), painted_cols(&zwsp));
+        assert_eq!(painted_rows(&base), painted_rows(&zwsp));
+        assert_eq!(base.as_bytes(), zwsp.as_bytes());
     }
 
     #[test]
@@ -6480,6 +7184,32 @@ mod tests {
         let done = render_text("{\\kf100}a{\\b1}b", 1500);
         assert!(done.as_bytes().chunks_exact(4).any(is_primary));
         assert!(!done.as_bytes().chunks_exact(4).any(is_secondary));
+    }
+
+    #[test]
+    fn test_karaoke_runs_noop_reset_joins_run() {
+        // A `\r` that changes nothing breaks no run: libass
+        // `split_style_runs` compares per-glyph style snapshots, and
+        // `ass_reset_render_context` never touches the effect fields,
+        // so `{\k100}a{\r}b` keeps one run (probe: `{\k100}a{\r}b`
+        // shows no secondary pixel at 50ms — "b" sings with "a").
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k100}a{\\r}b");
+        assert_eq!(run_windows(&runs), vec![(0, 0, KaraokeKind::Hard, false)]);
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(0)]]);
+        // Render check mirroring the probe: no secondary anywhere.
+        let early = render_text("{\\k100}a{\\r}b", 50);
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        assert!(!early.as_bytes().chunks_exact(4).any(is_secondary));
+        // But a `\r` that DOES change style still splits the run.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\b1\\k100}a{\\r}b");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (1000, 1000, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
     }
 
     #[test]

@@ -72,13 +72,13 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 | Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
 | Fade | `\fad`, `\fade` (first fade tag wins, like libass) | `\fade` with degenerate timing saturates instead of dividing by zero | |
 | Karaoke | `\k`, `\kt` (explicit syllable starts), `\K`/`\kf` (continuous sweep, split within glyph bitmaps), `\ko` (secondary fill + outline suppressed before start; primary + outline from start) | | |
-| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; mode 0 smart wrap (greedy fill + pairwise rebalance, libass algorithm); each line aligns independently; conservative CJK break opportunities | | |
+| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; wrap styles 0/1/2 and 3≡0 (greedy fill + pairwise rebalance when style ≠ 1, libass algorithm); each line aligns independently; CJK + U+3000 + U+200B breaks with open/close/small-kana/combining/NBSP/currency glue (VSFilter behavior; default libass builds without unibreak overflow instead — see `CONFORMANCE.md`) | | |
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
 | Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear | Position/clip/fade/alignment/drawing/karaoke tags and nested `\t` are ignored inside `\t` | |
 | Alignment | `\an`, legacy `\a` (SSA numbering converted; first tag wins, like libass) | | |
 | Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` | `LayoutResX/Y`, `YCbCr Matrix` are parsed but unused (ASS-2 draft / RGB pipeline) | |
 | Attachments | `[Fonts]` parsed, decoded, and best-effort auto-loaded as fallback faces (failures surface via `warnings()`); `[Graphics]` parsed, decoded, exposed via `get_attachment_*`; manual `load_font(name, data)` | | |
-| Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter); `\fe` parsed/stored/reset (no charset remapping) | Unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
+| Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter) | `\fe` parsed/stored/reset but kept `Partial` (Unicode-only, no charset remapping); unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
 
 Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur is applied **before** clipping so blurred pixels cannot bleed outside the clip region.
 
@@ -88,7 +88,7 @@ Position tags use the event's alignment as their anchor: for example, `\an5\pos(
 - Per-glyph font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); no system-font lookup.
 - Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
 - Rotation perspective distance follows libass (312.5 × vertical resolution ratio); extreme angles degrade to empty glyphs rather than over-allocating.
-- `\r` preserves line-global state (position, move, origin, clips, fades) plus alignment, like libass; drawing mode, fonts, colors, rotation, and karaoke reset (note: libass keeps drawing mode across `\r` too — kept VSFilter-compatible here, see `CONFORMANCE.md`).
+- `\r` preserves line-global state (position, move, origin, clips, fades) plus alignment and drawing mode (with `\pbo`), like libass; fonts, colors, rotation, and karaoke styling reset (karaoke timing survives a no-op reset so runs rejoin).
 - Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz`; short smoke runs are CI-gated, longer sessions run locally.
 
 ## Build

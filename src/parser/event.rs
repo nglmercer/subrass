@@ -48,11 +48,16 @@ fn parse_format_columns(fmt: &str) -> Vec<String> {
 }
 
 fn starts_with_ci(line: &str, prefix: &str) -> bool {
-    line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
+    // Byte-based: `line[..prefix.len()]` would panic on multibyte input
+    // (a byte length is not a char boundary). ASCII prefixes only.
+    debug_assert!(prefix.is_ascii());
+    line.len() >= prefix.len()
+        && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     if starts_with_ci(line, prefix) {
+        // The ASCII prefix matched, so the boundary is safe.
         Some(&line[prefix.len()..])
     } else {
         None
@@ -97,6 +102,20 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, EventType::Dialogue);
         assert_eq!(events[1].event_type, EventType::Comment);
+    }
+
+    #[test]
+    fn test_multibyte_lines_skip_without_panicking() {
+        // Keyword-prefix slicing at byte lengths must never split a
+        // char; unrecognized lines are skipped, not fatal.
+        let lines = vec![
+            "éééééééééé,0:00:01.00,0:00:04.00,Default,,0,0,0,,x",
+            "Dialogué: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,x",
+            "Formaté: Layer, Start",
+        ];
+        let events = parse_events(&lines, 0).unwrap();
+        assert!(events.is_empty());
+        assert!(Event::parse_from_line("éééééééééé").is_err());
     }
 
     #[test]

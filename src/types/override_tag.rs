@@ -66,7 +66,10 @@ pub enum OverrideTag {
     // Positioning
     Position(f64, f64),
     Move(f64, f64, f64, f64),
-    MoveWithTiming(f64, f64, f64, f64, u64, u64),
+    /// Timed `\move(x1,y1,x2,y2,t1,t2)`: times are `i32` like libass
+    /// (`argtoi32`), already swapped so `t1 <= t2`. Negative times are
+    /// meaningful there (`t1 <= 0 && t2 <= 0` animates the whole event).
+    MoveWithTiming(f64, f64, f64, f64, i32, i32),
     Origin(f64, f64),
     Alignment(i32),
     /// Bare `\an` / `\a` (or a value libass rejects): reset to the
@@ -80,6 +83,9 @@ pub enum OverrideTag {
     RotationZ(f64),
     ScaleX(f64),
     ScaleY(f64),
+    /// Bare `\fsc` (any glued value ignored): reset both scale axes to
+    /// the event style, like libass `tag("fsc")`.
+    ScaleReset,
     ShearX(f64),
     ShearY(f64),
 
@@ -94,13 +100,18 @@ pub enum OverrideTag {
     Blur(f64),
 
     // Fading
-    Fade(u64, u64),
-    ComplexFade(u64, u64, u64, u64, u64, u64, u64),
+    /// `\fad` / 2-arg `\fade`: (fade-in ms, fade-out ms) as `i32` like
+    /// libass (`argtoi32`); negative values mean "no fade" on that side.
+    Fade(i32, i32),
+    /// 7-arg `\fade(a1,a2,a3,t1,t2,t3,t4)`, all `i32` like libass.
+    /// Alpha is interpolated full-range and truncated exactly like
+    /// `interpolate_alpha`; out-of-range results clamp at application.
+    ComplexFade(i32, i32, i32, i32, i32, i32, i32),
 
     // Animation: \t(t1, t2, [accel,] tags...)
     Transform {
-        t1: u64,
-        t2: u64,
+        t1: i32,
+        t2: i32,
         accel: f64,
         tags: Vec<OverrideTag>,
     },
@@ -217,8 +228,10 @@ impl OverrideTag {
     /// `\an`/`\a`: libass `ass_reset_render_context` (the `\r` handler)
     /// does not touch alignment, so the first alignment tag survives
     /// resets like the other line-global properties. `\r` restores
-    /// ordinary override state (fonts, colors, border, rotation,
-    /// karaoke, drawing mode, ...) to the target style.
+    /// ordinary override state (fonts, colors, border, rotation, ...)
+    /// to the target style; karaoke timing and drawing mode also
+    /// survive (the reset touches neither), but stay non-line-global
+    /// because they apply positionally, not to the whole line.
     pub fn is_line_global(&self) -> bool {
         matches!(
             self,
@@ -339,11 +352,12 @@ pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSeg
                 // Parse tags
                 for tag in parse_tag_group(&tag_str) {
                     // Track drawing mode: any \pN with N > 0 enables it,
-                    // and \r exits it (\p is not line-global).
-                    match &tag {
-                        OverrideTag::Drawing(n) => in_drawing_mode = *n > 0,
-                        OverrideTag::Reset(_) => in_drawing_mode = false,
-                        _ => {}
+                    // `\p0` disables it. `\r` is transparent: libass
+                    // `ass_reset_render_context` never touches
+                    // `drawing_scale`, so a drawing continues across a
+                    // reset (`{\p1}...{\r}...` stays one drawing run).
+                    if let OverrideTag::Drawing(n) = &tag {
+                        in_drawing_mode = *n > 0;
                     }
                     accumulated_tags.push(tag);
                 }
@@ -408,30 +422,41 @@ pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSeg
 
 /// Parse a group of override tags (content between { and }).
 /// Handles nested tags like \t(t1,t2,\blur20\4c&H00BBB0&).
+/// Maximum `\t` nesting depth. Each level consumes input, so hostile
+/// input could otherwise recurse to a stack overflow; real files never
+/// nest transforms, and anything past this degrades to Unknown.
+const MAX_TAG_NESTING: u32 = 32;
+
 fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
+    parse_tag_group_depth(group, 0)
+}
+
+fn parse_tag_group_depth(group: &str, depth: u32) -> Vec<OverrideTag> {
+    // libass trims trailing spaces before `}`/`)` at the call level
+    // (the `end` argument), so bare tags stay bare.
+    let group = group.trim_end_matches([' ', '\t']);
     let mut tags = Vec::new();
     let mut chars = group.chars().peekable();
 
     while let Some(&c) = chars.peek() {
         if c == '\\' {
             chars.next(); // consume '\\'
+                          // libass `skip_spaces` after the backslash: `\ pos(1,2)` works.
+            while matches!(chars.peek(), Some(' ' | '\t')) {
+                chars.next();
+            }
 
-            // Read tag name: first char can be alpha or digit (for \4c, \1a),
-            // then continue with alphabetic chars (e.g., "blur", "bord", "fad")
+            // Read tag name: alphanumerics. libass scans to `(`,
+            // `\` or end, so digits belong to the name region too
+            // (`\pos2(1,2)` still applies `\pos`); `split_tag_name`
+            // re-splits known prefixes identically either way.
             let mut name = String::new();
-            if let Some(&c) = chars.peek() {
+            while let Some(&c) = chars.peek() {
                 if c.is_alphanumeric() {
                     name.push(c);
                     chars.next();
-                    // Continue reading alphabetic chars for the rest of the name
-                    while let Some(&c) = chars.peek() {
-                        if c.is_alphabetic() {
-                            name.push(c);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
+                } else {
+                    break;
                 }
             }
 
@@ -443,6 +468,12 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
             // so split a known tag prefix from a glued value: `\rAltStyle`
             // is tag `r` with value `AltStyle`, `\fnArial` is `fn`+`Arial`.
             let (tag_name, glued) = split_tag_name(&name);
+
+            // libass skips spaces between the name and `(`: `\pos (1,2)`
+            // applies. Harmless for plain values (parsers trim anyway).
+            while matches!(chars.peek(), Some(' ' | '\t')) {
+                chars.next();
+            }
 
             // Check for '(' -> read params with depth tracking
             if let Some(&'(') = chars.peek() {
@@ -463,8 +494,16 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
                     param_str.push(c);
                 }
 
+                // libass `complex_tag` is a PREFIX match that ignores
+                // everything between the keyword and `(`: `\position(1,2)`
+                // applies `\pos`. No keyword prefixes another and no longer
+                // known tag extends them, so this cannot misroute.
+                let (tag_name, glued) = match complex_tag_keyword(&name) {
+                    Some(keyword) => (keyword, ""),
+                    None => (tag_name, glued),
+                };
                 if glued.is_empty() {
-                    match parse_tag_with_params(tag_name, Some(&param_str)) {
+                    match parse_tag_with_params(tag_name, Some(&param_str), depth) {
                         Some(tag) if tag.all_finite() => tags.push(tag),
                         _ => tags.push(OverrideTag::Unknown(format!("{}({})", name, param_str))),
                     }
@@ -482,13 +521,21 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
                     chars.next();
                 }
 
+                // libass complex tags take arguments ONLY from parens
+                // (`nargs` counts pushed paren args, never the glued
+                // remainder): without parens they are ignored even with
+                // glued text (`\pos10,20` does nothing there).
+                if is_complex_tag_name(tag_name) {
+                    tags.push(OverrideTag::Unknown(format!("{}{}", name, value)));
+                    continue;
+                }
                 let combined = format!("{}{}", glued, value);
                 let params = if combined.is_empty() {
                     None
                 } else {
                     Some(combined.as_str())
                 };
-                match parse_tag_with_params(tag_name, params) {
+                match parse_tag_with_params(tag_name, params, depth) {
                     Some(tag) if tag.all_finite() => tags.push(tag),
                     // Malformed known tag: preserved as Unknown so it is
                     // distinguishable from "no tag" and never half-applied.
@@ -501,6 +548,24 @@ fn parse_tag_group(group: &str) -> Vec<OverrideTag> {
     }
 
     tags
+}
+
+/// libass `complex_tag` keywords: parenthesized tags whose name match
+/// is a PREFIX match and whose arguments come only from the parens.
+fn is_complex_tag_name(name: &str) -> bool {
+    matches!(
+        name,
+        "pos" | "move" | "org" | "fad" | "fade" | "t" | "clip" | "iclip"
+    )
+}
+
+/// Prefix keyword for a parenthesized tag name (`\position(1,2)` ->
+/// `"pos"`). `fad` covers `fade` (both dispatch to the shared fade
+/// arm); every other keyword maps to itself.
+fn complex_tag_keyword(name: &str) -> Option<&'static str> {
+    ["pos", "move", "org", "fad", "t", "clip", "iclip"]
+        .into_iter()
+        .find(|keyword| name.starts_with(keyword))
 }
 
 /// Whether `name` is a recognized override tag name.
@@ -535,6 +600,7 @@ fn is_known_tag_name(name: &str) -> bool {
             | "fr"
             | "fscx"
             | "fscy"
+            | "fsc"
             | "fax"
             | "fay"
             | "bord"
@@ -581,6 +647,124 @@ fn split_tag_name(raw: &str) -> (&str, &str) {
     (raw, "")
 }
 
+/// Split comma-separated tag params the libass way: trim spaces/tabs
+/// (exactly `skip_spaces`/`rskip_spaces`, which skip no other
+/// characters) around each argument and drop segments left empty —
+/// libass `push_arg` skips those, so trailing/double commas never
+/// count toward arity (`\pos(10,20,)` is a valid 2-arg tag there).
+fn split_tag_args(params: &str) -> Vec<&str> {
+    params
+        .split(',')
+        .map(|a| a.trim_matches([' ', '\t']))
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// Parse a double the libass way (`ass_strtod` value semantics, as in
+/// `argtod`): skip whitespace, one optional sign, longest digit run
+/// with at most one `.`, optional `e`/`E` exponent. There are no
+/// `inf`/`NaN` literals (those parse as 0.0) and no hex floats; no
+/// digits at all means 0.0. Never fails: even garbage yields a value,
+/// so malformed numbers never ignore the whole tag.
+fn parse_libass_f64(s: &str) -> f64 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
+        i += 1;
+    }
+    let num_start = i;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let mut digits = 0u32;
+    let mut dot = false;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            digits += 1;
+            i += 1;
+        } else if b[i] == b'.' && !dot {
+            dot = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if digits == 0 {
+        return 0.0;
+    }
+    let mut end = i;
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        let exp_start = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        // Without exponent digits the `e` is not part of the number
+        // (libass consumes it but the value is the same either way).
+        if j > exp_start {
+            end = j;
+        }
+    }
+    s[num_start..end].parse().unwrap_or(0.0)
+}
+
+/// libass `dtoi32`: double to `i32` without UB — NaN and anything
+/// outside `i32` maps to `INT32_MIN` (x86 `cvttsd2si` behavior),
+/// otherwise truncate toward zero.
+fn libass_dtoi32(v: f64) -> i32 {
+    if v.is_nan() || v <= -2147483648.0 || v >= 2147483648.0 {
+        i32::MIN
+    } else {
+        v as i32
+    }
+}
+
+/// Finite-coordinate clamp for prefix-parsed positions: `ass_strtod`
+/// overflow yields inf, which would poison layout math. libass renders
+/// such coordinates off-screen, so clamp to a huge-but-finite value —
+/// slot consumption and off-screen rendering are preserved.
+fn sanitize_coord(v: f64) -> f64 {
+    if v.is_nan() {
+        0.0
+    } else if v.is_infinite() {
+        if v.is_sign_negative() {
+            -1e18
+        } else {
+            1e18
+        }
+    } else {
+        v
+    }
+}
+
+/// Parse an integer the libass way (`strtoll` base 10 clamped to `i32`,
+/// as in `mystrtoi32`): ASCII whitespace skipped, one optional sign,
+/// longest digit prefix wins (`7x` parses as 7), no digits means 0,
+/// overflow clamps. Never fails: even garbage yields a value, which is
+/// exactly why malformed `\an`/`\a` still consume the alignment slot.
+fn parse_libass_i32(s: &str) -> i32 {
+    let t = s.trim_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (t, neg) = match t.as_bytes().first() {
+        Some(b'+') => (&t[1..], false),
+        Some(b'-') => (&t[1..], true),
+        _ => (t, false),
+    };
+    let digits_len = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits_len == 0 {
+        return 0;
+    }
+    let magnitude: i64 = t[..digits_len].parse().unwrap_or(i64::MAX);
+    let value = if neg {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    };
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
 /// Parse a karaoke duration parameter: missing/empty means the libass
 /// bare-tag default, otherwise a strict unsigned centisecond count
 /// (negatives and non-numerics are malformed, not clamped).
@@ -592,7 +776,7 @@ fn parse_karaoke_param(params: Option<&str>, bare_default: u64) -> Option<u64> {
     }
 }
 
-fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag> {
+fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option<OverrideTag> {
     match name {
         "b" => {
             let val = params?.parse::<i32>().ok()?;
@@ -686,71 +870,86 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             Some(OverrideTag::ShadowAlpha(alpha))
         }
         "pos" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 2 {
-                let x = parts[0].parse().ok()?;
-                let y = parts[1].parse().ok()?;
-                Some(OverrideTag::Position(x, y))
+            // Exactly 2 arguments (libass `nargs == 2`); extra or
+            // missing arguments ignore the whole tag. Values are
+            // prefix-parsed and never fail (`\pos(x,20)` is (0,20)).
+            let parts = split_tag_args(params?);
+            if parts.len() == 2 {
+                Some(OverrideTag::Position(
+                    sanitize_coord(parse_libass_f64(parts[0])),
+                    sanitize_coord(parse_libass_f64(parts[1])),
+                ))
             } else {
                 None
             }
         }
         "move" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
+            // Exactly 4 (untimed) or 6 (timed) arguments; anything
+            // else is ignored. Coordinates are prefix-parsed, times
+            // are `i32` (`argtoi32`), and reversed times swap (libass
+            // parses `t1 > t2` swapped), so resolution never sees them.
+            let parts = split_tag_args(params?);
             match parts.len() {
-                4 => {
-                    let x1 = parts[0].parse().ok()?;
-                    let y1 = parts[1].parse().ok()?;
-                    let x2 = parts[2].parse().ok()?;
-                    let y2 = parts[3].parse().ok()?;
-                    Some(OverrideTag::Move(x1, y1, x2, y2))
-                }
+                4 => Some(OverrideTag::Move(
+                    sanitize_coord(parse_libass_f64(parts[0])),
+                    sanitize_coord(parse_libass_f64(parts[1])),
+                    sanitize_coord(parse_libass_f64(parts[2])),
+                    sanitize_coord(parse_libass_f64(parts[3])),
+                )),
                 6 => {
-                    let x1 = parts[0].parse().ok()?;
-                    let y1 = parts[1].parse().ok()?;
-                    let x2 = parts[2].parse().ok()?;
-                    let y2 = parts[3].parse().ok()?;
-                    let t1 = parts[4].parse().ok()?;
-                    let t2 = parts[5].parse().ok()?;
-                    Some(OverrideTag::MoveWithTiming(x1, y1, x2, y2, t1, t2))
+                    let t1 = parse_libass_i32(parts[4]);
+                    let t2 = parse_libass_i32(parts[5]);
+                    let (t1, t2) = if t1 > t2 { (t2, t1) } else { (t1, t2) };
+                    Some(OverrideTag::MoveWithTiming(
+                        sanitize_coord(parse_libass_f64(parts[0])),
+                        sanitize_coord(parse_libass_f64(parts[1])),
+                        sanitize_coord(parse_libass_f64(parts[2])),
+                        sanitize_coord(parse_libass_f64(parts[3])),
+                        t1,
+                        t2,
+                    ))
                 }
                 _ => None,
             }
         }
         "org" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 2 {
-                let x = parts[0].parse().ok()?;
-                let y = parts[1].parse().ok()?;
-                Some(OverrideTag::Origin(x, y))
+            // Exactly 2 arguments, like `\pos`.
+            let parts = split_tag_args(params?);
+            if parts.len() == 2 {
+                Some(OverrideTag::Origin(
+                    sanitize_coord(parse_libass_f64(parts[0])),
+                    sanitize_coord(parse_libass_f64(parts[1])),
+                ))
             } else {
                 None
             }
         }
         "an" => {
-            // Bare `\an` resets to the style alignment (libass still
-            // consumes PARSED_A); out-of-range values also fall back to
-            // the style at apply time, with the slot consumed.
-            let raw = params.map(str::trim).unwrap_or("");
-            if raw.is_empty() {
+            // libass `tag("an")` + `argtoi32`: the value is a digit
+            // prefix (`\an7x` is 7), garbage means 0, and every form —
+            // bare, garbage, out-of-range — consumes PARSED_A with a
+            // style fallback for anything outside 1-9.
+            let raw = params.unwrap_or("");
+            if raw.trim().is_empty() {
                 return Some(OverrideTag::AlignmentReset);
             }
-            let val = raw.parse::<i32>().ok()?;
+            let val = parse_libass_i32(raw);
+            if !(1..=9).contains(&val) {
+                return Some(OverrideTag::AlignmentReset);
+            }
             Some(OverrideTag::Alignment(val))
         }
         "a" => {
             // Legacy SSA alignment numbering, converted to ASS numpad.
-            // libass `ass_parse.c` (`\a` branch): values outside 1-11
-            // fall back to the style alignment (slot still consumed),
-            // and the VSFilter quirk maps illegal \a4 / \a8 to \a5.
-            let raw = params.map(str::trim).unwrap_or("");
-            if raw.is_empty() {
+            // libass `tag("a")` after `tag("an")`: same prefix-number
+            // parsing; values outside 1-11 fall back to the style
+            // (slot still consumed), and the VSFilter quirk maps
+            // illegal \a4 / \a8 to \a5.
+            let raw = params.unwrap_or("");
+            if raw.trim().is_empty() {
                 return Some(OverrideTag::AlignmentReset);
             }
-            let val = raw.parse::<i32>().ok()?;
+            let val = parse_libass_i32(raw);
             if !(1..=11).contains(&val) {
                 return Some(OverrideTag::AlignmentReset);
             }
@@ -779,6 +978,9 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::ScaleY(val))
         }
+        // libass `tag("fsc")`: resets both scale axes to the style and
+        // ignores any value.
+        "fsc" => Some(OverrideTag::ScaleReset),
         "fax" => {
             let val = params?.parse().ok()?;
             Some(OverrideTag::ShearX(val))
@@ -819,62 +1021,82 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::Blur(val))
         }
-        "fad" => {
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 2 {
-                let fade_in = parts[0].parse().ok()?;
-                let fade_out = parts[1].parse().ok()?;
-                Some(OverrideTag::Fade(fade_in, fade_out))
-            } else {
-                None
-            }
-        }
-        "fade" => {
-            // \fade(a1, a2, a3, t1, t2, t3, t4)
-            let params = params?;
-            let parts: Vec<&str> = params.split(',').collect();
-            if parts.len() >= 7 {
-                let a1 = parts[0].trim().parse().ok()?;
-                let a2 = parts[1].trim().parse().ok()?;
-                let a3 = parts[2].trim().parse().ok()?;
-                let t1 = parts[3].trim().parse().ok()?;
-                let t2 = parts[4].trim().parse().ok()?;
-                let t3 = parts[5].trim().parse().ok()?;
-                let t4 = parts[6].trim().parse().ok()?;
-                Some(OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4))
-            } else {
-                None
+        // libass parses both names identically (`complex_tag("fade") ||
+        // complex_tag("fad")`): argument COUNT selects the behavior, not
+        // the name — 2 args is a simple fade, 7 is a complex fade, and
+        // anything else ignores the tag. So `\fade(100,200)` fades and
+        // `\fad(3-arg)` does not. Values are prefix-parsed `i32` and
+        // never fail (`\fad(x,200)` fades out only).
+        "fad" | "fade" => {
+            let parts = split_tag_args(params?);
+            match parts.len() {
+                2 => Some(OverrideTag::Fade(
+                    parse_libass_i32(parts[0]),
+                    parse_libass_i32(parts[1]),
+                )),
+                7 => Some(OverrideTag::ComplexFade(
+                    parse_libass_i32(parts[0]),
+                    parse_libass_i32(parts[1]),
+                    parse_libass_i32(parts[2]),
+                    parse_libass_i32(parts[3]),
+                    parse_libass_i32(parts[4]),
+                    parse_libass_i32(parts[5]),
+                    parse_libass_i32(parts[6]),
+                )),
+                _ => None,
             }
         }
         "t" => {
-            // \t([t1, t2,] [accel,] tags...)
-            // Leading numeric arguments precede the first backslash; the
-            // remainder is the inner tag string (which may itself contain
-            // commas, e.g. \clip(0,0,100,100)).
+            // libass `complex_tag("t")`: parenthesized only (the group
+            // parser rejects bare `\t`), and the last argument swallows
+            // from the first backslash to `)`, so timing args precede it.
+            // `cnt` = nargs - 1 selects the timing form; without inner
+            // tags, or with more than 3 timing args, it is ignored.
+            // Past the nesting cap the whole tag degrades to Unknown
+            // instead of recursing deeper (stack safety).
+            if depth >= MAX_TAG_NESTING {
+                return None;
+            }
             let params = params?;
             let tags_pos = params.find('\\').unwrap_or(params.len());
             let (args_part, tags_str) = params.split_at(tags_pos);
-            let args: Vec<&str> = args_part
+            if !tags_str.contains('\\') {
+                return None;
+            }
+            let mut args: Vec<&str> = args_part
                 .split(',')
-                .map(|s| s.trim())
+                .map(|s| s.trim_matches([' ', '\t']))
                 .filter(|s| !s.is_empty())
                 .collect();
+            // A non-comma-terminated tail before the backslash belongs to
+            // the swallowed last argument, not to timing (`\t(1,2,x\y)`
+            // times (1,2), like libass's backslash swallow).
+            if !args_part.trim_matches([' ', '\t']).ends_with(',') {
+                args.pop();
+            }
 
-            // Per the ASS spec: 0 args = defaults, 1 = accel, 2 = t1/t2,
-            // 3 = t1/t2/accel. t2 == 0 means "until the end of the event".
+            // VSFilter-compatible per-count parsing: the 2-timing-arg
+            // form parses floats (`dtoi32`), the 3-arg form parses ints
+            // (`argtoi32`), so `\t(1e3,2000,\fs3)` starts at 1000 while
+            // `\t(1e3,2000,1,\fs3)` starts at 1. `t2 == 0` means "until
+            // the end of the event" (resolved at evaluation).
             let (t1, t2, accel) = match args.len() {
-                0 => (0u64, 0u64, 1.0f64),
-                1 => (0u64, 0u64, args[0].parse().ok()?),
-                2 => (args[0].parse().ok()?, args[1].parse().ok()?, 1.0f64),
-                _ => (
-                    args[0].parse().ok()?,
-                    args[1].parse().ok()?,
-                    args[2].parse().ok()?,
+                0 => (0, 0, 1.0),
+                1 => (0, 0, parse_libass_f64(args[0])),
+                2 => (
+                    libass_dtoi32(parse_libass_f64(args[0])),
+                    libass_dtoi32(parse_libass_f64(args[1])),
+                    1.0,
                 ),
+                3 => (
+                    parse_libass_i32(args[0]),
+                    parse_libass_i32(args[1]),
+                    parse_libass_f64(args[2]),
+                ),
+                _ => return None,
             };
 
-            let tags = parse_tag_group(tags_str);
+            let tags = parse_tag_group_depth(tags_str, depth + 1);
 
             Some(OverrideTag::Transform {
                 t1,
@@ -973,6 +1195,11 @@ fn parse_ass_color_tag(s: &str) -> Option<Color> {
         .strip_prefix('H')
         .or_else(|| s.strip_prefix('h'))
         .unwrap_or(s);
+    // Byte-length checks below only imply char boundaries for ASCII;
+    // multibyte input must fail, never panic on slicing.
+    if !s.is_ascii() {
+        return None;
+    }
 
     match s.len() {
         6 => {
@@ -1285,14 +1512,41 @@ mod tests {
     }
 
     #[test]
-    fn test_non_finite_numerics_become_unknown() {
-        // NaN/inf must never reach layout as live tags
-        for text in [
-            "{\\pos(NaN,10)}",
-            "{\\fsinf}",
-            "{\\fscx(NaN)}",
-            "{\\blur(-inf)}",
+    fn test_non_finite_numerics_never_reach_layout() {
+        // libass `ass_strtod` has no inf/NaN literals: those parse as
+        // 0.0 and the tag still applies (`\pos(NaN,10)` is (0,10)).
+        for (text, want) in [
+            ("{\\pos(NaN,10)}", (0.0, 10.0)),
+            ("{\\pos(inf,20)}", (0.0, 20.0)),
+            ("{\\pos(-inf,-inf)}", (0.0, 0.0)),
         ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert_eq!(tags.len(), 1, "{}", text);
+            assert!(
+                matches!(tags[0], OverrideTag::Position(x, y) if x == want.0 && y == want.1),
+                "{} -> {:?}",
+                text,
+                tags[0]
+            );
+        }
+        // Overflow (`1e999`) clamps to a huge-but-finite coordinate:
+        // off-screen like libass, still consuming the position slot,
+        // and never poisoning layout with inf.
+        let tags = OverrideTag::parse_from_text("{\\pos(1e999,20)}");
+        assert!(
+            matches!(tags[0], OverrideTag::Position(x, 20.0) if x == 1e18),
+            "{:?}",
+            tags[0]
+        );
+        let tags = OverrideTag::parse_from_text("{\\pos(-9e999,20)}");
+        assert!(
+            matches!(tags[0], OverrideTag::Position(x, 20.0) if x == -1e18),
+            "{:?}",
+            tags[0]
+        );
+        // Simple tags keep strict parsing (documented gap): garbage
+        // there stays Unknown rather than prefix-parsing.
+        for text in ["{\\fsinf}", "{\\fscx(NaN)}", "{\\blur(-inf)}"] {
             let tags = OverrideTag::parse_from_text(text);
             assert_eq!(tags.len(), 1, "{}", text);
             assert!(
@@ -1312,6 +1566,419 @@ mod tests {
         let tags = OverrideTag::parse_from_text("{\\pos(1)}");
         assert_eq!(tags.len(), 1);
         assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+    }
+
+    #[test]
+    fn test_pos_exact_arity() {
+        // libass `nargs == 2`: exactly 2, not >= 2.
+        let tags = OverrideTag::parse_from_text("{\\pos(10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        for text in [
+            "{\\pos(10,20,30)}Hi",
+            "{\\pos(10)}Hi",
+            "{\\pos()}Hi",
+            "{\\pos(,)}Hi",
+            "{\\pos(1,2,3,4,5,6,7,8,9)}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        // Empty segments never count (libass `push_arg` skips them):
+        // trailing and double commas are still 2-arg tags.
+        for text in [
+            "{\\pos(10,20,)}Hi",
+            "{\\pos(10,,20)}Hi",
+            "{\\pos(,10,20,)}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Position(10.0, 20.0)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_org_exact_arity() {
+        let tags = OverrideTag::parse_from_text("{\\org(10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Origin(10.0, 20.0)));
+        for text in [
+            "{\\org(10,20,30)}Hi",
+            "{\\org(10)}Hi",
+            "{\\org()}Hi",
+            "{\\org(10,20,)}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            let ok = matches!(tags[0], OverrideTag::Origin(10.0, 20.0));
+            let ignored = matches!(tags[0], OverrideTag::Unknown(_));
+            // Trailing comma still counts as 2 args; the rest are ignored.
+            assert_eq!(ok, text.contains("(10,20,)"), "{text:?} -> {tags:?}");
+            assert_eq!(ignored, !text.contains("(10,20,)"), "{text:?} -> {tags:?}");
+        }
+    }
+
+    #[test]
+    fn test_move_exact_arity_and_swap() {
+        // 4 args: untimed; 6 args: timed with reversed times swapped.
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,50)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Move(0.0, 0.0, 100.0, 50.0)));
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,0,1000,2000)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::MoveWithTiming(0.0, 0.0, 100.0, 0.0, 1000, 2000)
+        ));
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,0,2000,1000)}Hi");
+        assert!(
+            matches!(
+                tags[0],
+                OverrideTag::MoveWithTiming(0.0, 0.0, 100.0, 0.0, 1000, 2000)
+            ),
+            "reversed times swap: {tags:?}"
+        );
+        // Everything else is ignored.
+        for text in [
+            "{\\move(0,0,100)}Hi",
+            "{\\move(0,0,100,0,1000)}Hi",
+            "{\\move(0,0,100,0,1000,2000,3000)}Hi",
+            "{\\move()}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        // Trailing commas never count: 4- and 6-arg forms stay valid.
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,50,)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Move(0.0, 0.0, 100.0, 50.0)));
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,0,1000,2000,)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::MoveWithTiming(0.0, 0.0, 100.0, 0.0, 1000, 2000)
+        ));
+    }
+
+    #[test]
+    fn test_fad_fade_shared_count_based_arity() {
+        // Count selects behavior, not the name: 2 -> simple, 7 -> complex.
+        let tags = OverrideTag::parse_from_text("{\\fade(100,200)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(100, 200)));
+        let tags = OverrideTag::parse_from_text("{\\fad(255,0,255,0,1000,2000,3000)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::ComplexFade(255, 0, 255, 0, 1000, 2000, 3000)
+        ));
+        let tags = OverrideTag::parse_from_text("{\\fad(100,200)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(100, 200)));
+        let tags = OverrideTag::parse_from_text("{\\fade(255,0,255,0,1000,2000,3000)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::ComplexFade(255, 0, 255, 0, 1000, 2000, 3000)
+        ));
+        // Anything else is ignored (and consumes no fade slot).
+        for text in [
+            "{\\fad(100,200,300)}Hi",
+            "{\\fade(1,2,3)}Hi",
+            "{\\fad(100)}Hi",
+            "{\\fade(1,2,3,4,5,6)}Hi",
+            "{\\fade(1,2,3,4,5,6,7,8)}Hi",
+            "{\\fad()}Hi",
+            "{\\fade()}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_libass_f64_prefix_values() {
+        // (input, expected) — `ass_strtod` value semantics.
+        for (input, want) in [
+            ("10", 10.0),
+            ("10x", 10.0),
+            ("+10", 10.0),
+            ("-2.5", -2.5),
+            ("  12  ", 12.0),
+            ("1e3", 1000.0),
+            ("1E-2", 0.01),
+            (".5", 0.5),
+            ("5.", 5.0),
+            ("1.2.3", 1.2),
+            ("1e", 1.0),
+            ("1_0", 1.0),
+            ("0x10", 0.0),
+            ("", 0.0),
+            ("x", 0.0),
+            ("inf", 0.0),
+            ("-inf", 0.0),
+            ("NaN", 0.0),
+            ("+", 0.0),
+            (".", 0.0),
+            ("e5", 0.0),
+        ] {
+            assert_eq!(parse_libass_f64(input), want, "{input:?}");
+        }
+        assert!(parse_libass_f64("1e999").is_infinite());
+    }
+
+    #[test]
+    fn test_libass_i32_prefix_values() {
+        for (input, want) in [
+            ("7", 7),
+            ("7x", 7),
+            ("+7", 7),
+            ("  -12  ", -12),
+            ("0x10", 0),
+            ("", 0),
+            ("x", 0),
+            ("+", 0),
+            ("+-5", 0),
+            ("99999999999999999999999", i32::MAX),
+            ("-99999999999999999999999", i32::MIN),
+        ] {
+            assert_eq!(parse_libass_i32(input), want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_libass_dtoi32() {
+        assert_eq!(libass_dtoi32(1.9), 1);
+        assert_eq!(libass_dtoi32(-1.9), -1);
+        assert_eq!(libass_dtoi32(f64::NAN), i32::MIN);
+        assert_eq!(libass_dtoi32(1e30), i32::MIN);
+        assert_eq!(libass_dtoi32(-1e30), i32::MIN);
+        assert_eq!(libass_dtoi32(2147483647.0), i32::MAX);
+        assert_eq!(libass_dtoi32(2147483648.0), i32::MIN);
+        assert_eq!(libass_dtoi32(-2147483648.0), i32::MIN);
+    }
+
+    #[test]
+    fn test_argument_whitespace_accepted() {
+        // libass skips spaces/tabs around every argument.
+        let tags = OverrideTag::parse_from_text("{\\pos( 10 , 20 )}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\org( 10 , 20 )}Hi");
+        assert!(matches!(tags[0], OverrideTag::Origin(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\move( 0 , 0 , 100 , 100 )}Hi");
+        assert!(matches!(tags[0], OverrideTag::Move(0.0, 0.0, 100.0, 100.0)));
+        let tags = OverrideTag::parse_from_text("{\\fad( 100 , 200 )}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(100, 200)));
+        let tags =
+            OverrideTag::parse_from_text("{\\fade( 255 , 0 , 255 , 0 , 1000 , 2000 , 3000 )}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::ComplexFade(255, 0, 255, 0, 1000, 2000, 3000)
+        ));
+        // Tabs too, plus spaces between the name and `(` and after `\`.
+        let tags = OverrideTag::parse_from_text("{\\pos\t(\t10\t,\t20\t)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\pos (10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\ pos(10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+    }
+
+    #[test]
+    fn test_numeric_edge_values_never_ignore_tag() {
+        // Signs, partial numerics, and overflow still apply the tag
+        // with prefix-parsed values; the tag is never dropped.
+        let tags = OverrideTag::parse_from_text("{\\pos(+10,-20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, -20.0)));
+        let tags = OverrideTag::parse_from_text("{\\pos(10x,20y)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\pos(x,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(0.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,0,-500,1500)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::MoveWithTiming(0.0, 0.0, 100.0, 0.0, -500, 1500)
+        ));
+        let tags = OverrideTag::parse_from_text("{\\move(0,0,100,0,9999999999999999999,5)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::MoveWithTiming(0.0, 0.0, 100.0, 0.0, 5, i32::MAX)
+        ));
+        let tags = OverrideTag::parse_from_text("{\\fad(x,200)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(0, 200)));
+        let tags = OverrideTag::parse_from_text("{\\fad(-100,200)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(-100, 200)));
+    }
+
+    #[test]
+    fn test_an_prefix_values_and_slot_markers() {
+        // Digit prefixes win; bare/garbage/out-of-range mark the slot
+        // consumed with a style fallback (never Unknown).
+        for (text, want) in [
+            ("{\\an7x}Hi", 7),
+            ("{\\an(7,x)}Hi", 7),
+            ("{\\an(7,8)}Hi", 7),
+            ("{\\an7,8}Hi", 7),
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Alignment(a) if a == want),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        for text in [
+            "{\\anfoo}Hi",
+            "{\\an}Hi",
+            "{\\an99}Hi",
+            "{\\an0}Hi",
+            "{\\an(x)}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::AlignmentReset),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        for text in ["{\\afoo}Hi", "{\\a}Hi", "{\\a0}Hi", "{\\a12}Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::AlignmentReset),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_complex_tag_prefix_names() {
+        // libass `complex_tag` is a prefix match: junk between the
+        // keyword and `(` is ignored.
+        let tags = OverrideTag::parse_from_text("{\\position(10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+        let tags = OverrideTag::parse_from_text("{\\movement(0,0,9,9)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Move(0.0, 0.0, 9.0, 9.0)));
+        let tags = OverrideTag::parse_from_text("{\\orgx(1,2)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Origin(1.0, 2.0)));
+        let tags = OverrideTag::parse_from_text("{\\fader(100,200)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Fade(100, 200)));
+        let tags = OverrideTag::parse_from_text("{\\t2(1,2,\\fs30)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform { t1: 1, t2: 2, .. }
+        ));
+        let tags = OverrideTag::parse_from_text("{\\clipx(1,2,3,4)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Clip(1, 2, 3, 4)));
+        // Digit junk works too (the name scan covers digits).
+        let tags = OverrideTag::parse_from_text("{\\pos2(10,20)}Hi");
+        assert!(matches!(tags[0], OverrideTag::Position(10.0, 20.0)));
+    }
+
+    #[test]
+    fn test_complex_tags_require_parens() {
+        // Without parens libass sees `nargs == 0` and ignores complex
+        // tags, even with glued text.
+        for text in [
+            "{\\pos10,20}Hi",
+            "{\\move1,2,3,4}Hi",
+            "{\\org1,2}Hi",
+            "{\\fad100,200}Hi",
+            "{\\fade1,2,3,4,5,6,7}Hi",
+            "{\\clip1,2,3,4}Hi",
+            "{\\t100,200}Hi",
+            "{\\pos}Hi",
+            "{\\move}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_transform_cnt_forms() {
+        // 2-timing-arg form parses floats (`dtoi32`), 3-arg form ints.
+        let tags = OverrideTag::parse_from_text("{\\t(1e3,2000,\\fs30)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform {
+                t1: 1000,
+                t2: 2000,
+                ..
+            }
+        ));
+        let tags = OverrideTag::parse_from_text("{\\t(1e3,2000,1,\\fs30)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform {
+                t1: 1,
+                t2: 2000,
+                ..
+            }
+        ));
+        // A non-comma tail before the backslash is the swallowed arg.
+        let tags = OverrideTag::parse_from_text("{\\t(1,2,x\\y)}Hi");
+        assert!(matches!(
+            tags[0],
+            OverrideTag::Transform { t1: 1, t2: 2, .. }
+        ));
+        // No inner tags, or more than 3 timing args: ignored.
+        for text in ["{\\t(100,200)}Hi", "{\\t()}Hi", "{\\t(1,2,3,4,\\fs30)}Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fsc_resets_scale() {
+        for text in ["{\\fsc}Hi", "{\\fsc50}Hi", "{\\fsc(1,2)}Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::ScaleReset),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multibyte_color_values_fail_without_panicking() {
+        // Byte-length slicing must never split a char: multibyte hex
+        // fails cleanly (these byte lengths hit the 6/8-digit arms).
+        for text in [
+            "{\\c&Haébcdef&}Hi",
+            "{\\c&Haébcd&}Hi",
+            "{\\c&Héééé&}Hi",
+            "{\\c&Hééé&}Hi",
+            "{\\1a&Hé&}Hi",
+        ] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Unknown(_)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deeply_nested_transforms_degrade_without_overflow() {
+        // 200 nested `\t(` would recurse 200 deep uncapped; past the
+        // cap the inner tags degrade to Unknown instead.
+        let mut text = String::from("{");
+        for _ in 0..200 {
+            text.push_str("\\t(\\");
+        }
+        text.push_str("fs30");
+        for _ in 0..200 {
+            text.push(')');
+        }
+        text.push_str("}Hi");
+        let tags = OverrideTag::parse_from_text(&text);
+        assert!(!tags.is_empty());
+        // Outermost still parses as a transform.
+        assert!(matches!(tags[0], OverrideTag::Transform { .. }));
     }
 
     #[test]
@@ -1473,15 +2140,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_reset_exits_drawing_mode() {
-        // \r re-enables break escapes swallowed in drawing mode.
+    fn test_parse_reset_keeps_drawing_mode() {
+        // libass `ass_reset_render_context` never touches
+        // `drawing_scale`: `\r` inside a drawing does NOT re-enable
+        // break escapes; the text after it stays drawing commands.
         let segs = parse_text_segments("{\\p1}m 0 0{\\r}a\\Nb");
         let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
-        assert!(joined.contains('\n'), "{joined:?}");
-        // Without \r the break stays verbatim drawing text.
-        let segs = parse_text_segments("{\\p1}m 0 0 a\\Nb");
-        let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
         assert!(!joined.contains('\n'), "{joined:?}");
+        // Only `\p0` exits drawing mode and re-enables breaks.
+        let segs = parse_text_segments("{\\p1}m 0 0{\\p0}a\\Nb");
+        let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert!(joined.contains('\n'), "{joined:?}");
     }
 
     #[test]

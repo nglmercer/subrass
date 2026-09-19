@@ -254,9 +254,16 @@ fn check_total_budget(
 
 /// Match `fontname:` / `filename:` headers case-insensitively.
 /// Returns the matched prefix (original case) and the name that follows.
+/// Byte-based: slicing at `prefix.len()` would panic on multibyte input
+/// (a byte length is not a char boundary), so match on bytes first —
+/// an ASCII prefix match guarantees the boundary is safe.
 fn strip_header(line: &str) -> Option<(&str, &str)> {
     for prefix in ["fontname:", "filename:"] {
-        if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        let bytes = line.as_bytes();
+        if bytes.len() >= prefix.len()
+            && bytes[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        {
+            // `prefix` is ASCII and matched, so both slices are safe.
             return Some((&line[..prefix.len()], &line[prefix.len()..]));
         }
     }
@@ -364,6 +371,18 @@ mod tests {
     #[test]
     fn test_decode_rejects_lone_trailing_char() {
         assert!(decode_attachment_data(b"15*$!").is_none());
+    }
+
+    #[test]
+    fn test_strip_header_multibyte_fails_without_panicking() {
+        // Prefix slicing at a byte length must never split a char.
+        assert_eq!(
+            strip_header("fontname: A.ttf"),
+            Some(("fontname:", " A.ttf"))
+        );
+        assert_eq!(strip_header("éééééééééé"), None);
+        assert_eq!(strip_header("fontnamé: A.ttf"), None);
+        assert_eq!(strip_header("éontname: A.ttf"), None);
     }
 
     #[test]

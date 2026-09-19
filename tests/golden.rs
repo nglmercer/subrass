@@ -333,6 +333,158 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             ),
             1000,
         ),
+        // P0/P1 edge semantics: each also gates a libass reference frame.
+        (
+            "move-reversed-times".to_string(),
+            one("Default", "{\\move(20,20,300,180,4000,1000)}Moving"),
+            2500,
+        ),
+        (
+            "move-equal-times".to_string(),
+            one("Default", "{\\move(20,20,300,20,1000,1000)}Step"),
+            1000,
+        ),
+        (
+            "move-extra-args".to_string(),
+            one("Default", "{\\move(20,20,300,20,1000)}Ignored"),
+            1000,
+        ),
+        (
+            "pos-extra-args".to_string(),
+            one("Default", "{\\pos(20,20,30)}Ignored"),
+            1000,
+        ),
+        (
+            "org-extra-args".to_string(),
+            one("Default", "{\\org(20,20,30)\\frz30\\frx20}Rotated"),
+            1000,
+        ),
+        (
+            "fad-2args".to_string(),
+            one("Default", "{\\fad(1000,500)}Fading"),
+            500,
+        ),
+        (
+            "fade-2args".to_string(),
+            one("Default", "{\\fade(1000,500)}Fading"),
+            500,
+        ),
+        (
+            "fad-7args".to_string(),
+            one("Default", "{\\fad(255,0,255,0,1000,2000,3000)}Fading"),
+            500,
+        ),
+        (
+            "fade-7args".to_string(),
+            one("Default", "{\\fade(255,0,255,0,1000,2000,3000)}Fading"),
+            500,
+        ),
+        (
+            "fade-invalid-arity".to_string(),
+            one("Default", "{\\fade(1000,2000,3000)}NoFade"),
+            500,
+        ),
+        (
+            "an-malformed-first".to_string(),
+            one("Default", "{\\anfoo\\an7}Bottom"),
+            1000,
+        ),
+        (
+            "a-malformed-first".to_string(),
+            one("Default", "{\\afoo\\an7}Bottom"),
+            1000,
+        ),
+        (
+            "alignment-bare-first".to_string(),
+            one("Default", "{\\an\\an7}Bottom"),
+            1000,
+        ),
+        (
+            // \r inside a drawing keeps drawing (libass
+            // `ass_reset_render_context` never touches
+            // `drawing_scale`): two squares, no "m ..." text.
+            "reset-drawing".to_string(),
+            one(
+                "Default",
+                "{\\p1}m 0 0 l 60 0 l 60 60 l 0 60{\\r}m 80 0 l 140 0 l 140 60 l 80 60",
+            ),
+            1000,
+        ),
+        (
+            // Decorations are glyph-outline geometry: underline
+            // spans spaces, strikeout adds a second bar.
+            "deco".to_string(),
+            one("Default", "{\\u1}under line{\\s1} + strike"),
+            1000,
+        ),
+        (
+            // Underline follows rotation (probe: frz90 shows a
+            // vertical bar).
+            "deco-rotated".to_string(),
+            one("Default", "{\\frz30\\u1}Hello"),
+            1000,
+        ),
+        (
+            // Underline sweeps with karaoke (probe: the bar splits
+            // white/red at the midpoint, like the ink).
+            "deco-karaoke".to_string(),
+            one("Default", "{\\kf100\\u1}He"),
+            500,
+        ),
+        (
+            // CJK run overflows one line: wraps mid-run (default
+            // libass overflows; known-divergent, VSFilter-aligned).
+            // Tofu: the bundled font lacks CJK syllabaries, but the
+            // boxes still gate break positions deterministically.
+            "wrap-cjk".to_string(),
+            one(
+                "Default",
+                "あいうえおかきくけこさしすせそたちつてとあいうえおかきくけこ",
+            ),
+            1000,
+        ),
+        (
+            // CJK punctuation and quotes: 、。」 stick to their
+            // predecessor, 「 sticks to its follower (tofu punct
+            // between real Latin; break positions still gated).
+            "wrap-cjk-punct".to_string(),
+            one("Default", "ab、cd。ef「gh」ij、kl。mn「op」qr、st。uv"),
+            1000,
+        ),
+        (
+            // U+200B breaks Latin runs with no spaces (default
+            // libass overflows; known-divergent, UAX #14 ZW).
+            "wrap-zwsp".to_string(),
+            one("Default", "aaaaa\u{200B}bbbbb\u{200B}ccccc\u{200B}ddddd"),
+            1000,
+        ),
+        (
+            // Combining marks glue to their base across space wraps
+            // (gated: spaces break identically in libass).
+            "wrap-combining".to_string(),
+            one(
+                "Default",
+                "e\u{301}x e\u{301}x e\u{301}x e\u{301}x e\u{301}x e\u{301}x e\u{301}x e\u{301}x",
+            ),
+            1000,
+        ),
+        (
+            // Mixed scripts break at CJK boundaries (default libass
+            // overflows; known-divergent; tofu kana, real Latin).
+            "wrap-mixed".to_string(),
+            one("Default", "HelloあいうWorldえおHelloあいうWorldえお"),
+            1000,
+        ),
+        (
+            // NBSP glues the whole run: no break anywhere, so both
+            // sides overflow identically (gated like normal text).
+            "wrap-nbsp".to_string(),
+            one(
+                "Default",
+                "aaa\u{00A0}bbb\u{00A0}ccc\u{00A0}ddd\u{00A0}eee\u{00A0}fff",
+            ),
+            1000,
+        ),
     ]
 }
 

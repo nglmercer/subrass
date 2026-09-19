@@ -226,7 +226,13 @@ const DEFAULT_EVENT_COLUMNS: &[&str] = &[
 /// Case-insensitive prefix strip (ASS keywords are matched case-insensitively
 /// for compatibility with real-world files).
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+    // Byte-based: `line[..prefix.len()]` would panic on multibyte input
+    // (a byte length is not a char boundary). ASCII prefixes only.
+    debug_assert!(prefix.is_ascii());
+    if line.len() >= prefix.len()
+        && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    {
+        // The ASCII prefix matched, so the boundary is safe.
         Some(&line[prefix.len()..])
     } else {
         None

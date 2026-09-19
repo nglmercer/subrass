@@ -31,6 +31,23 @@ struct LoadedFont {
     /// usWeightClass when available, else from the style flags.
     weight: u16,
     is_italic: bool,
+    /// Underline/strikeout metrics for decorations.
+    decorations: DecorationMetrics,
+}
+
+/// Underline/strikeout font metrics (libass `ass_get_glyph_outline`
+/// `DECO_*`): `post` underline + OS/2 strikeout in font units plus
+/// units-per-em. A `None` member means "draw no bar" — libass skips
+/// the bar when its table is missing or fails the validity gate
+/// (underline needs position <= 0 and thickness > 0, strikeout
+/// needs position >= 0 and size > 0).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecorationMetrics {
+    pub units_per_em: u16,
+    /// `(position, thickness)`; position <= 0 (below baseline).
+    pub underline: Option<(i16, i16)>,
+    /// `(position, size)`; position >= 0 (above baseline).
+    pub strikeout: Option<(i16, i16)>,
 }
 
 impl FontManager {
@@ -76,6 +93,15 @@ impl FontManager {
         let font = FontArc::try_from_vec(data.to_vec())
             .map_err(|e| format!("Failed to parse font '{}': {}", name, e))?;
 
+        // Decoration metrics (single parse at load; missing tables
+        // mean "no bar", like libass).
+        let deco = inspect_font_metadata(data);
+        let decorations = DecorationMetrics {
+            units_per_em: deco.as_ref().and_then(|m| m.units_per_em).unwrap_or(0),
+            underline: deco.as_ref().and_then(|m| m.underline),
+            strikeout: deco.as_ref().and_then(|m| m.strikeout),
+        };
+
         let weight = weight.clamp(1, 1000);
         let idx = self.fonts.len();
         self.fonts.push(LoadedFont {
@@ -83,6 +109,7 @@ impl FontManager {
             font,
             weight,
             is_italic,
+            decorations,
         });
 
         // Set as fallback if it's the first font loaded
@@ -273,6 +300,11 @@ impl FontManager {
         self.fonts.get(index).map(|f| &f.font)
     }
 
+    /// Underline/strikeout metrics for a loaded font id.
+    pub fn decoration_metrics(&self, index: usize) -> Option<DecorationMetrics> {
+        self.fonts.get(index).map(|f| f.decorations)
+    }
+
     /// Get number of loaded fonts
     pub fn font_count(&self) -> usize {
         self.fonts.len()
@@ -362,6 +394,12 @@ struct FontMetadata {
     weight: Option<u16>,
     is_bold: Option<bool>,
     is_italic: Option<bool>,
+    /// `post` underline `(position, thickness)` when gated valid.
+    underline: Option<(i16, i16)>,
+    /// OS/2 strikeout `(position, size)` when gated valid.
+    strikeout: Option<(i16, i16)>,
+    /// `head` unitsPerEm when nonzero.
+    units_per_em: Option<u16>,
 }
 
 /// Inspect a font's own `name`, `OS/2`, and `head` tables.
@@ -381,7 +419,9 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
     }
 
     // OS/2.usWeightClass at offset 4; fsSelection at 62
-    // (bit 0 = italic, bit 5 = bold).
+    // (bit 0 = italic, bit 5 = bold); yStrikeoutSize at 26 and
+    // yStrikeoutPosition at 28 (SHORT, y-up, libass gates
+    // position >= 0 and size > 0).
     if let Some(os2) = tables
         .iter()
         .find(|(tag, _, _)| tag == b"OS/2")
@@ -395,6 +435,37 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
         if let Some(fs_selection) = read_u16(os2, 62) {
             meta.is_italic = Some(fs_selection & 0x0001 != 0);
             meta.is_bold = Some(fs_selection & 0x0020 != 0);
+        }
+        if let (Some(size), Some(pos)) = (read_i16(os2, 26), read_i16(os2, 28)) {
+            if pos >= 0 && size > 0 {
+                meta.strikeout = Some((pos, size));
+            }
+        }
+    }
+
+    // post.underlinePosition (FWord) at 8, underlineThickness at 10
+    // (y-up font units; libass gates position <= 0, thickness > 0).
+    if let Some(post) = tables
+        .iter()
+        .find(|(tag, _, _)| tag == b"post")
+        .and_then(|(_, offset, len)| data.get(*offset..offset.saturating_add(*len)))
+    {
+        if let (Some(pos), Some(thick)) = (read_i16(post, 8), read_i16(post, 10)) {
+            if pos <= 0 && thick > 0 {
+                meta.underline = Some((pos, thick));
+            }
+        }
+    }
+
+    // head.unitsPerEm at 18 scales all font-unit metrics.
+    if let Some(head) = tables
+        .iter()
+        .find(|(tag, _, _)| tag == b"head")
+        .and_then(|(_, offset, len)| data.get(*offset..offset.saturating_add(*len)))
+        .and_then(|head| read_u16(head, 18))
+    {
+        if head != 0 {
+            meta.units_per_em = Some(head);
         }
     }
 
@@ -420,6 +491,8 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
         && meta.is_bold.is_none()
         && meta.is_italic.is_none()
         && meta.weight.is_none()
+        && meta.underline.is_none()
+        && meta.strikeout.is_none()
     {
         return None;
     }
@@ -522,12 +595,16 @@ fn decode_utf16_be(bytes: &[u8]) -> Option<String> {
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2)
+    data.get(offset..offset.saturating_add(2))
         .map(|b| u16::from_be_bytes([b[0], b[1]]))
 }
 
+fn read_i16(data: &[u8], offset: usize) -> Option<i16> {
+    read_u16(data, offset).map(|v| v as i16)
+}
+
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4)
+    data.get(offset..offset.saturating_add(4))
         .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
@@ -559,6 +636,24 @@ mod tests {
         assert!(inspect_font_metadata(b"not a font").is_none());
         assert!(inspect_font_metadata(&[]).is_none());
         assert!(inspect_font_metadata(&[0u8; 100]).is_none());
+    }
+
+    #[test]
+    fn test_metadata_decoration_metrics() {
+        // DejaVu Sans post/OS/2 tables (values read from the bundled
+        // file; gates: underline pos <= 0 thick > 0, strikeout
+        // pos >= 0 size > 0, like libass).
+        let meta = inspect_font_metadata(get_fallback_font()).expect("metadata");
+        assert_eq!(meta.underline, Some((-130, 90)));
+        assert_eq!(meta.strikeout, Some((530, 102)));
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", get_fallback_font(), false, false)
+            .unwrap();
+        let deco = fm.decoration_metrics(0).expect("metrics");
+        assert_eq!(deco.units_per_em, 2048);
+        assert_eq!(deco.underline, Some((-130, 90)));
+        assert_eq!(deco.strikeout, Some((530, 102)));
+        assert!(fm.decoration_metrics(9).is_none());
     }
 
     #[test]

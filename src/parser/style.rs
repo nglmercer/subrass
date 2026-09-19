@@ -51,7 +51,13 @@ pub fn parse_styles(
 }
 
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+    // Byte-based: `line[..prefix.len()]` would panic on multibyte input
+    // (a byte length is not a char boundary). ASCII prefixes only.
+    debug_assert!(prefix.is_ascii());
+    if line.len() >= prefix.len()
+        && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    {
+        // The ASCII prefix matched, so the boundary is safe.
         Some(&line[prefix.len()..])
     } else {
         None
@@ -226,6 +232,15 @@ mod tests {
         assert_eq!(styles.len(), 1);
         assert_eq!(styles[0].name, "Default");
         assert_eq!(styles[0].font_name, "Arial");
+    }
+
+    #[test]
+    fn test_multibyte_lines_skip_without_panicking() {
+        // Keyword-prefix slicing at byte lengths must never split a
+        // char; unrecognized lines are skipped, not fatal.
+        let lines = vec!["Stylé: Default,Arial,48", "éééééééé"];
+        let styles = parse_styles(&lines, 0, false).unwrap();
+        assert!(styles.is_empty());
     }
 
     #[test]

@@ -1,15 +1,13 @@
 use crate::utils::Matrix3x3;
-
-/// Maximum allowed frame-buffer dimension (width or height) in pixels.
-pub const MAX_DIMENSION: u32 = 16_384;
-/// Maximum total pixels in a single frame buffer (64 megapixels ≈ 256 MiB RGBA).
-pub const MAX_BUFFER_PIXELS: u64 = 67_108_864;
-/// Maximum total pixels in a transformed/scaled glyph coverage bitmap.
-pub const MAX_GLYPH_BITMAP_PIXELS: u64 = 16_777_216;
-/// Maximum box-blur radius applied to a buffer.
-pub const MAX_BLUR_RADIUS: u32 = 128;
-/// Maximum outline radius used by effect loops.
-pub const MAX_OUTLINE_RADIUS: f64 = 128.0;
+#[path = "buffer_geometry.rs"]
+mod buffer_geometry;
+pub use super::limits::{
+    MAX_BLUR_RADIUS, MAX_BUFFER_PIXELS, MAX_DIMENSION, MAX_GLYPH_BITMAP_PIXELS, MAX_OUTLINE_RADIUS,
+};
+pub use buffer_geometry::{
+    add_coord, bitmap_has_pixels, checked_pixel_count, effective_shear, finite_to_i32,
+    finite_to_u32, shear_forward, shear_inverse,
+};
 
 /// Errors from render-buffer allocation and sizing.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -20,113 +18,6 @@ pub enum RenderError {
     DimensionsTooLarge { width: u32, height: u32 },
     #[error("Render dimensions {width}x{height} exceed the allocation limit")]
     AllocationTooLarge { width: u32, height: u32 },
-}
-
-/// Checked `usize` pixel-count multiplication (WASM32-safe).
-///
-/// Returns `None` when the conversion or multiplication overflows the
-/// target `usize`. Use for every bitmap-length validation and glyph
-/// allocation instead of `w as usize * h as usize`.
-#[inline]
-pub fn checked_pixel_count(w: u32, h: u32) -> Option<usize> {
-    usize::try_from(w)
-        .ok()
-        .and_then(|w| usize::try_from(h).ok().and_then(|h| w.checked_mul(h)))
-}
-
-/// True when `bitmap` holds at least `w*h` bytes, using checked arithmetic.
-#[inline]
-pub fn bitmap_has_pixels(bitmap: &[u8], w: u32, h: u32) -> bool {
-    match checked_pixel_count(w, h) {
-        Some(need) => bitmap.len() >= need,
-        None => false,
-    }
-}
-
-/// Convert a finite float to `i32` with explicit range validation.
-///
-/// Returns `None` for non-finite values or values outside `i32` range.
-/// Callers choose clamping or skipping; the conversion itself never
-/// relies on saturating-cast masking.
-#[inline]
-pub fn finite_to_i32(v: f64) -> Option<i32> {
-    if !v.is_finite() || v < f64::from(i32::MIN) || v > f64::from(i32::MAX) {
-        return None;
-    }
-    Some(v as i32)
-}
-
-/// Convert a finite float to `u32` with explicit range validation.
-#[inline]
-pub fn finite_to_u32(v: f64) -> Option<u32> {
-    if !v.is_finite() || v < 0.0 || v > f64::from(u32::MAX) {
-        return None;
-    }
-    Some(v as u32)
-}
-
-/// Resolve raw (`\fax`, `\fay`) factors into the effective shear:
-/// non-finite input yields `None` (caller skips the glyph), values
-/// clamp to ±8 for bounded output, and a near-singular pair
-/// (`fax*fay` ≈ 1, which would collapse the plane to a line) falls back
-/// to fax-only shear, which is always invertible.
-#[inline]
-pub fn effective_shear(shear: (f64, f64)) -> Option<(f64, f64)> {
-    let (fax, fay) = shear;
-    if !fax.is_finite() || !fay.is_finite() {
-        return None;
-    }
-    let (fax, fay) = (fax.clamp(-8.0, 8.0), fay.clamp(-8.0, 8.0));
-    if (1.0 - fax * fay).abs() < 1e-9 {
-        Some((fax, 0.0))
-    } else {
-        Some((fax, fay))
-    }
-}
-
-/// Forward ASS shear around a pivot: `x' = x + fax*(y - py)`,
-/// `y' = y + fay*(x - px)`. Reference order (libass `x1`/`y1` matrix,
-/// VSFilter `Transform_C`) shears glyph-local coordinates BEFORE
-/// rotation, so the caller passes the glyph-space pivot.
-#[inline]
-pub fn shear_forward(x: f64, y: f64, fax: f64, fay: f64, pivot: (f64, f64)) -> (f64, f64) {
-    (x + fax * (y - pivot.1), y + fay * (x - pivot.0))
-}
-
-/// Inverse of [`shear_forward`]. Returns `None` when the shear is
-/// singular (`fax*fay` ≈ 1).
-#[inline]
-pub fn shear_inverse(
-    px: f64,
-    py: f64,
-    fax: f64,
-    fay: f64,
-    pivot: (f64, f64),
-) -> Option<(f64, f64)> {
-    let det = 1.0 - fax * fay;
-    if !det.is_finite() || det.abs() < 1e-9 {
-        return None;
-    }
-    let rx = px - pivot.0;
-    let ry = py - pivot.1;
-    Some((
-        (rx - fax * ry) / det + pivot.0,
-        (ry - fay * rx) / det + pivot.1,
-    ))
-}
-
-/// Add a signed base coordinate and an unsigned bitmap offset widening
-/// through `i64`, then bounds-check against `limit`.
-///
-/// Returns the in-bounds `u32` coordinate or `None` when the sum is
-/// negative, overflows, or falls outside `[0, limit)`.
-#[inline]
-pub fn add_coord(base: i32, offset: u32, limit: u32) -> Option<u32> {
-    let v = i64::from(base) + i64::from(offset);
-    if v < 0 || v >= i64::from(limit) {
-        return None;
-    }
-    Some(v as u32)
 }
 
 /// Validate dimensions with checked arithmetic and return the RGBA byte length.

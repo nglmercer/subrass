@@ -4,6 +4,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+#[path = "font/collections.rs"]
+mod collections;
+#[path = "font/sfnt.rs"]
+mod sfnt;
+use self::collections::collection_face_count;
+use self::sfnt::{read_i16, read_u16, read_u32};
+
 /// A resolved font with a stable identity and faux-style requirements.
 #[derive(Debug, Clone, Copy)]
 pub struct FontMatch<'a> {
@@ -710,24 +717,6 @@ fn read_sfnt_table_directory_at(
     Some(tables)
 }
 
-/// Number of faces in a validated collection, or one for a standalone sfnt.
-/// The count is bounded before any per-face parsing/allocation occurs.
-fn collection_face_count(data: &[u8]) -> Option<usize> {
-    if data.get(0..4) == Some(b"ttcf") {
-        let count = read_u32(data, 8)? as usize;
-        if count == 0 || count > 64 {
-            return None;
-        }
-        let offsets_len = count.checked_mul(4)?.checked_add(12)?;
-        if data.len() < offsets_len {
-            return None;
-        }
-        Some(count)
-    } else {
-        Some(1)
-    }
-}
-
 /// Parse name IDs 1 (family), 16 (typographic family), and 4 (full name).
 fn parse_name_table(table: &[u8]) -> Vec<String> {
     let mut families = Vec::new();
@@ -791,20 +780,6 @@ fn decode_utf16_be(bytes: &[u8]) -> Option<String> {
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16(&units).ok()
-}
-
-fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset.saturating_add(2))
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-}
-
-fn read_i16(data: &[u8], offset: usize) -> Option<i16> {
-    read_u16(data, offset).map(|v| v as i16)
-}
-
-fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset.saturating_add(4))
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 #[cfg(test)]

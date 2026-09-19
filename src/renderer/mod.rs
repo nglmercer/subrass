@@ -4,6 +4,7 @@ pub mod drawing;
 pub mod effects;
 pub mod font;
 pub mod glyph_cache;
+pub mod limits;
 pub mod shaper;
 
 use wasm_bindgen::prelude::*;

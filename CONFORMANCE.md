@@ -136,13 +136,13 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad`, `\be`, `\blur` | ✓ | `test_scaled_*` | border-shadow G+L | Supported |
 | `ScaledBorderAndShadow` yes/no | ✓ | `test_scaled_*` | — | Supported |
 | `\clip`, `\iclip` rect + vector (separate state: later rect replaces + flips mode, first vector retained, both render) | ✓ | `test_clip_libass_rect_vector_semantics` | clip/vector-clip/rect-vector-clip/vector-rect-clip/vector-vector-clip G+L | Supported |
-| Drawings `\pN`, `\pbo`, `m n l b s p c` (bbox min preserved: advance = width, ink at pen + min; `\kf` splits at ink-left + frac × advance) | ✓ | `test_drawing_preserves_min_*`, `test_kf_drawing_split_at_fractional_scale` | drawing G+L (IoU 0.828), reset-drawing G+L (IoU 0.889) | Supported (B-splines subdivided; `\pbo` placement diverges — see below) |
+| Drawings `\pN`, `\pbo`, `m n l b s p c` (bbox min preserved: advance = width, ink at pen + min; `\kf` splits at ink-left + frac × advance) | ✓ | `test_drawing_preserves_min_*`, `test_pbo_shifts_drawing`, `test_kf_drawing_split_at_fractional_scale` | drawing G+L (IoU 0.828), reset-drawing G+L (IoU 0.889) | Supported (B-splines are subdivided; `\pbo` uses libass asc/desc line metrics) |
 | `\fad`, `\fade` (first fade tag wins, libass `PARSED_FADE`) | ✓ | `test_fad_fade_first_wins_both_orders` | fade/fad-fade/fade-fad G+L | Supported |
 | `\k`, `\kt`, `\K`/`\kf` within-glyph sweep, `\ko` | ✓ | `test_kf_sweep_splits_within_glyph`, `test_karaoke_outline_suppressed_before_start` | karaoke* G+L incl. kf-{frx,fry,frz,fax,fay,combined} | Supported (device-space vertical split like libass) |
 | `\N`, `\n`, `\h`, `\q`; wrap styles 0/1/2, 3≡0 (libass `wrap_style != 1` rebalance); CJK + U+3000 + U+200B breaks, open/close/small-kana glue, NBSP/ZWJ/ZWNJ glue, combining-mark glue (common scripts), currency-digit glue | ✓ | `test_wrap_style_3_matches_style_0`, `test_wrap_cjk_*`, `test_wrap_zwsp_breaks`, `test_wrap_ideographic_space_breaks`, `test_combining_marks_glue_common_scripts`, … | wrap/wrap-combining/wrap-nbsp G+L (IoU 0.985/0.978/0.946); wrap-cjk/wrap-cjk-punct/wrap-zwsp/wrap-mixed G + measured-divergent L | Supported (CJK/ZWSP diverge from default libass builds — see below) |
 | Per-line alignment (1–9) | — | `test_multiline_centers_each_line`, `*_right_aligns_*`, `*_left_aligns_*` | wrap/alignment G+L | Supported |
 | `\r`, `\rStyleName` (line-global + alignment + drawing mode + `\pbo` preserved, karaoke timing survives; a style-changing `\r` still splits karaoke runs) | ✓ | `test_reset_keeps_*`, `test_karaoke_runs_noop_reset_joins_run` | reset/reset-drawing G+L | Supported |
-| `\t` animation (colors/alpha/size/scales/spacing/rotation/border/shadow/shear) | ✓ | `test_transform_animates_supported_set`, `test_transform_ignores_non_animatable` | transform G+L | Supported; pos/move/org/clip/fade/an/q/p/karaoke/`\r`/nested `\t` ignored inside `\t` (see matrix in `apply_transform_tags`) |
+| `\t` animation (continuous style fields plus discrete/event-global tags, rectangular clips, and bounded nested transforms) | ✓ | `test_transform_animates_supported_set`, `test_transform_applies_libass_discrete_and_global_tags` | transform G+L | Supported; vector clip geometry remains discrete, matching libass |
 | `\an`, legacy `\a` (first tag wins, libass `PARSED_A`; `\a4`/`\a8` quirk; bare/out-of-range resets to style) | ✓ | `test_alignment_first_tag_applies_event_wide`, `test_parse_legacy_a_quirk_and_range` | alignment/an-an/a-an/an-a G+L | Supported |
 | `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
@@ -183,12 +183,9 @@ the harness reports it as pending (never as a pass) in normal mode, and
    per UAX #14. This matches VSFilter behavior and libass builds *with*
    unibreak; fixtures `wrap-cjk`, `wrap-cjk-punct`, `wrap-zwsp`,
    `wrap-mixed` are `KNOWN_DIVERGENT` (probes confirm libass overflows).
-9. `\pbo` placement: libass models `\pbo` as asc/desc (`asc = height -
-   pbo`, `desc = pbo`), which cancels out on single-drawing lines (a probe
-   shows `\pbo20` rendering pixel-identical to no `\pbo`) and shifts mixed
-   lines +pbo downward. This renderer shifts single-line ink by -pbo
-   instead. Fixing it needs pbo-aware line metrics plus mixed-line probes;
-   the current behavior is pinned by `test_pbo_shifts_drawing` until then.
+9. `\pbo` uses libass drawing ascent/descent metrics (`asc = height - pbo`,
+   `desc = pbo`), so single-drawing lines keep their ink anchored while mixed
+   text/drawing lines use the drawing's adjusted ascent.
 
 ## Complex-shaping roadmap (deferred, not forgotten)
 

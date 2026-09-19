@@ -49,6 +49,8 @@ pub enum OverrideTag {
     /// style; shaping stays Unicode-based, so charset remapping itself
     /// is partial — see the support matrix).
     FontEncoding(i32),
+    /// Restore one property from the active style (bare or invalid value).
+    PropertyReset(String),
     /// `\r` (reset to the event style) or `\rStyleName` (reset to a style).
     Reset(Option<String>),
 
@@ -145,6 +147,11 @@ pub enum OverrideTag {
     /// for the next karaoke syllable. Sets the timeline clock without
     /// starting a syllable; syllables still need `\k`-family durations.
     KaraokeStart(u64),
+    /// Signed millisecond timing, including fractional centiseconds.
+    KaraokeTiming {
+        mode: u8,
+        millis: i32,
+    },
 
     // Line breaks
     HardLineBreak,
@@ -475,21 +482,14 @@ fn parse_tag_group_depth(group: &str, depth: u32) -> Vec<OverrideTag> {
                 chars.next();
             }
 
-            // Check for '(' -> read params with depth tracking
+            // libass terminates at the FIRST closing parenthesis, including
+            // inside transforms; nested transforms consume this argument's tail.
             if let Some(&'(') = chars.peek() {
-                chars.next(); // consume '('
+                chars.next();
                 let mut param_str = String::new();
-                let mut depth = 1u32;
                 for c in chars.by_ref() {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
+                    if c == ')' {
+                        break;
                     }
                     param_str.push(c);
                 }
@@ -641,6 +641,50 @@ fn split_tag_name(raw: &str) -> (&str, &str) {
         }
         let (head, tail) = raw.split_at(len);
         if is_known_tag_name(head) {
+            // Numeric tags only accept a prefix when the glued value starts
+            // with a sign or digit. This keeps `\frobnicator` and
+            // `\samebogus` unknown while accepting libass forms such as
+            // `\frz30xyz` and `\b1foo`.
+            if matches!(
+                head,
+                "b" | "i"
+                    | "u"
+                    | "s"
+                    | "fs"
+                    | "fsp"
+                    | "fe"
+                    | "fr"
+                    | "frx"
+                    | "fry"
+                    | "frz"
+                    | "fscx"
+                    | "fscy"
+                    | "fax"
+                    | "fay"
+                    | "bord"
+                    | "xbord"
+                    | "ybord"
+                    | "shad"
+                    | "xshad"
+                    | "yshad"
+                    | "be"
+                    | "blur"
+                    | "p"
+                    | "pbo"
+                    | "q"
+                    | "k"
+                    | "K"
+                    | "kf"
+                    | "ko"
+                    | "kt"
+            ) && !tail
+                .trim_start_matches([' ', '\t', '+', '-'])
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+            {
+                continue;
+            }
             return (head, tail);
         }
     }
@@ -765,33 +809,113 @@ fn parse_libass_i32(s: &str) -> i32 {
     value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-/// Parse a karaoke duration parameter: missing/empty means the libass
-/// bare-tag default, otherwise a strict unsigned centisecond count
-/// (negatives and non-numerics are malformed, not clamped).
-fn parse_karaoke_param(params: Option<&str>, bare_default: u64) -> Option<u64> {
-    match params {
-        None => Some(bare_default),
-        Some(p) if p.trim().is_empty() => Some(bare_default),
-        Some(p) => p.trim().parse().ok(),
+/// libass converts double centiseconds to signed 32-bit milliseconds.
+fn parse_karaoke_param(params: Option<&str>, mode: u8) -> Option<OverrideTag> {
+    let value = params
+        .map(parse_libass_f64)
+        .unwrap_or(if mode == 3 { 0.0 } else { 100.0 });
+    if !value.is_finite() {
+        return None;
     }
+    let millis = libass_dtoi32(value * 10.0);
+    if millis >= 0 && millis % 10 == 0 {
+        let cs = (millis / 10) as u64;
+        match mode {
+            0 => OverrideTag::KaraokeDuration(cs),
+            1 => OverrideTag::KaraokeSweep(cs),
+            2 => OverrideTag::KaraokeOutline(cs),
+            _ => OverrideTag::KaraokeStart(cs),
+        }
+    } else {
+        OverrideTag::KaraokeTiming { mode, millis }
+    }
+    .into()
 }
 
 fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option<OverrideTag> {
+    let params = params.filter(|p| !p.trim_matches([' ', '\t']).is_empty());
+    if let Some(raw) = params {
+        let lower = raw.to_ascii_lowercase();
+        let simple_numeric = matches!(
+            name,
+            "fs" | "fsp"
+                | "fr"
+                | "frx"
+                | "fry"
+                | "frz"
+                | "fscx"
+                | "fscy"
+                | "fax"
+                | "fay"
+                | "bord"
+                | "xbord"
+                | "ybord"
+                | "shad"
+                | "xshad"
+                | "yshad"
+                | "be"
+                | "blur"
+        );
+        if simple_numeric && (lower.contains("nan") || lower.contains("inf")) {
+            return None;
+        }
+    }
+    if params.is_none()
+        && matches!(
+            name,
+            "b" | "i"
+                | "u"
+                | "s"
+                | "fn"
+                | "fe"
+                | "fsp"
+                | "fr"
+                | "frx"
+                | "fry"
+                | "frz"
+                | "fscx"
+                | "fscy"
+                | "fax"
+                | "fay"
+                | "bord"
+                | "xbord"
+                | "ybord"
+                | "shad"
+                | "xshad"
+                | "yshad"
+                | "be"
+                | "blur"
+        )
+    {
+        return Some(OverrideTag::PropertyReset(name.to_string()));
+    }
     match name {
         "b" => {
-            let val = params?.parse::<i32>().ok()?;
+            let val = parse_libass_i32(params?);
+            if !(val == 0 || val == 1 || val >= 100) {
+                return Some(OverrideTag::PropertyReset(name.to_string()));
+            }
             Some(OverrideTag::Bold(ass_bold_weight(val)))
         }
         "i" => {
-            let val = params?.parse::<i32>().ok()?;
+            let val = parse_libass_i32(params?);
+            if !(0..=1).contains(&val) {
+                return Some(OverrideTag::PropertyReset(name.to_string()));
+            }
             Some(OverrideTag::Italic(val != 0))
         }
         "u" => {
-            let val = params?.parse::<i32>().ok()?;
+            let val = parse_libass_i32(params?);
+            if !(0..=1).contains(&val) {
+                return Some(OverrideTag::PropertyReset(name.to_string()));
+            }
             Some(OverrideTag::Underline(val != 0))
         }
         "s" => {
-            let val = params?.parse::<i32>().ok()?;
+            let val = parse_libass_i32(params?);
+            if !(0..=1).contains(&val) {
+                return Some(OverrideTag::PropertyReset(name.to_string()));
+            }
             Some(OverrideTag::StrikeOut(val != 0))
         }
         "fn" => Some(OverrideTag::FontName(params?.trim().to_string())),
@@ -803,7 +927,10 @@ fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option
             if raw.is_empty() {
                 return Some(OverrideTag::FontSizeReset);
             }
-            let val: f64 = raw.parse().ok()?;
+            if !raw.chars().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let val = parse_libass_f64(raw);
             if raw.starts_with('+') || raw.starts_with('-') {
                 Some(OverrideTag::FontSizeRelative(val))
             } else {
@@ -811,11 +938,14 @@ fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option
             }
         }
         "fe" => {
-            let val = params?.parse().ok()?;
+            if !params?.chars().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let val = parse_libass_i32(params?);
             Some(OverrideTag::FontEncoding(val))
         }
         "fsp" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::LetterSpacing(val))
         }
         "r" => {
@@ -959,66 +1089,66 @@ fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option
             )))
         }
         "frx" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::RotationX(val))
         }
         "fry" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::RotationY(val))
         }
         "frz" | "fr" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::RotationZ(val))
         }
         "fscx" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ScaleX(val))
         }
         "fscy" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ScaleY(val))
         }
         // libass `tag("fsc")`: resets both scale axes to the style and
         // ignores any value.
         "fsc" => Some(OverrideTag::ScaleReset),
         "fax" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ShearX(val))
         }
         "fay" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ShearY(val))
         }
         "bord" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::Border(val))
         }
         "xbord" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::BorderX(val))
         }
         "ybord" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::BorderY(val))
         }
         "shad" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::Shadow(val))
         }
         "xshad" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ShadowX(val))
         }
         "yshad" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::ShadowY(val))
         }
         "be" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::EdgeBlur(val))
         }
         "blur" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::Blur(val))
         }
         // libass parses both names identically (`complex_tag("fade") ||
@@ -1108,27 +1238,23 @@ fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option
         "clip" => parse_clip_params(params, false),
         "iclip" => parse_clip_params(params, true),
         "p" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_i32(params.unwrap_or("")).max(0);
             Some(OverrideTag::Drawing(val))
         }
         "pbo" => {
-            let val = params?.parse().ok()?;
+            let val = parse_libass_f64(params.unwrap_or(""));
             Some(OverrideTag::DrawingBaseline(val))
         }
         "q" => {
-            let val = params?.parse().ok()?;
+            let val = params.map(parse_libass_i32).unwrap_or(-1);
             Some(OverrideTag::WrapStyle(val))
         }
         // Bare karaoke tags carry libass defaults (`\k`/`\K`/`\kf`/`\ko`
         // default to 100cs, bare `\kt` to 0); empty parens count as bare.
-        "k" => Some(OverrideTag::KaraokeDuration(parse_karaoke_param(
-            params, 100,
-        )?)),
-        "K" | "kf" => Some(OverrideTag::KaraokeSweep(parse_karaoke_param(params, 100)?)),
-        "ko" => Some(OverrideTag::KaraokeOutline(parse_karaoke_param(
-            params, 100,
-        )?)),
-        "kt" => Some(OverrideTag::KaraokeStart(parse_karaoke_param(params, 0)?)),
+        "k" => parse_karaoke_param(params, 0),
+        "K" | "kf" => parse_karaoke_param(params, 1),
+        "ko" => parse_karaoke_param(params, 2),
+        "kt" => parse_karaoke_param(params, 3),
         _ => {
             // Reconstruct tag string for unknown tags
             let tag_str = match params {
@@ -1147,27 +1273,25 @@ fn parse_clip_params(params: Option<&str>, inverse: bool) -> Option<OverrideTag>
     let parts: Vec<&str> = params.split(',').collect();
     // Rectangular form: exactly four integers.
     if parts.len() == 4 {
-        if let (Ok(x1), Ok(y1), Ok(x2), Ok(y2)) = (
-            parts[0].trim().parse::<i32>(),
-            parts[1].trim().parse::<i32>(),
-            parts[2].trim().parse::<i32>(),
-            parts[3].trim().parse::<i32>(),
-        ) {
-            return Some(if inverse {
-                OverrideTag::InverseClip(x1, y1, x2, y2)
-            } else {
-                OverrideTag::Clip(x1, y1, x2, y2)
-            });
-        }
+        let (x1, y1, x2, y2) = (
+            parse_libass_i32(parts[0]),
+            parse_libass_i32(parts[1]),
+            parse_libass_i32(parts[2]),
+            parse_libass_i32(parts[3]),
+        );
+        return Some(if inverse {
+            OverrideTag::InverseClip(x1, y1, x2, y2)
+        } else {
+            OverrideTag::Clip(x1, y1, x2, y2)
+        });
     }
     // Vector form: [scale,] drawing commands. The drawing must contain
     // at least one drawing command letter, otherwise this is a malformed
     // rectangle (e.g. "1,2,3"), not a vector clip.
     let (scale, drawing) = match params.split_once(',') {
-        Some((head, tail)) if !tail.trim().is_empty() => match head.trim().parse::<i32>() {
-            Ok(s) => (s, tail.trim().to_string()),
-            Err(_) => (1, params.trim().to_string()),
-        },
+        Some((head, tail)) if !tail.trim().is_empty() => {
+            (parse_libass_i32(head), tail.trim().to_string())
+        }
         _ => (1, params.trim().to_string()),
     };
     if drawing.is_empty() || !drawing_contains_command(&drawing) {
@@ -1388,9 +1512,15 @@ mod tests {
         assert!(matches!(tags[0], OverrideTag::KaraokeDuration(100)));
         let tags = OverrideTag::parse_from_text("{\\kt}x");
         assert!(matches!(tags[0], OverrideTag::KaraokeStart(0)));
-        // Malformed durations stay Unknown (never half-applied).
+        // Signed numeric prefixes are retained like libass.
         let tags = OverrideTag::parse_from_text("{\\k-5}x");
-        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+        assert!(matches!(
+            tags[0],
+            OverrideTag::KaraokeTiming {
+                mode: 0,
+                millis: -50
+            }
+        ));
         let tags = OverrideTag::parse_from_text("{\\kfoo}x");
         assert!(matches!(tags[0], OverrideTag::Unknown(_)));
     }
@@ -1402,9 +1532,9 @@ mod tests {
         assert!(matches!(tags[0], OverrideTag::FontEncoding(128)));
         let tags = OverrideTag::parse_from_text("{\\fe1}");
         assert!(matches!(tags[0], OverrideTag::FontEncoding(1)));
-        // Missing value stays Unknown, never half-applied.
+        // A bare encoding tag resets to the style encoding.
         let tags = OverrideTag::parse_from_text("{\\fe}");
-        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+        assert!(matches!(tags[0], OverrideTag::PropertyReset(ref name) if name == "fe"));
     }
 
     #[test]

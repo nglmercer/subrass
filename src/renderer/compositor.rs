@@ -1123,6 +1123,15 @@ fn build_karaoke_runs(segments: &[TextSegment], items: &[LayoutItem]) -> Karaoke
                     pending.dur_ms = d.saturating_mul(10);
                     pending.kind = Some(KaraokeKind::Outline);
                 }
+                OverrideTag::KaraokeTiming { mode, millis } => {
+                    pending.skip_ms = pending.skip_ms.saturating_add(pending.dur_ms);
+                    pending.dur_ms = (*millis).max(0) as u64;
+                    pending.kind = Some(match mode {
+                        1 => KaraokeKind::Sweep,
+                        2 => KaraokeKind::Outline,
+                        _ => KaraokeKind::Hard,
+                    });
+                }
                 _ => {}
             }
         }
@@ -1437,6 +1446,7 @@ struct DrawingLayout {
     min_x: f64,
     width: f64,
     height: f64,
+    baseline: f64,
 }
 
 /// One face in a segment's fallback chain (primary first): the
@@ -2123,7 +2133,38 @@ impl Compositor {
                     let from = resolved.rotation_y;
                     resolved.rotation_y = from + (r - from) * progress;
                 }
-                _ => {}
+                OverrideTag::Clip(x0, y0, x1, y1) | OverrideTag::InverseClip(x0, y0, x1, y1) => {
+                    // Rectangular clips are interpolated coordinate by
+                    // coordinate by libass. The default clip is the full
+                    // PlayRes canvas used by the renderer's default style.
+                    let from = resolved
+                        .clip
+                        .or(resolved.inverse_clip)
+                        .unwrap_or((0, 0, 384, 288));
+                    let lerp = |a: i32, b: i32| {
+                        (f64::from(a) * (1.0 - progress) + f64::from(b) * progress).round() as i32
+                    };
+                    let rect = (
+                        lerp(from.0, *x0),
+                        lerp(from.1, *y0),
+                        lerp(from.2, *x1),
+                        lerp(from.3, *y1),
+                    );
+                    if matches!(target, OverrideTag::Clip(..)) {
+                        resolved.clip = Some(rect);
+                        resolved.inverse_clip = None;
+                    } else {
+                        resolved.inverse_clip = Some(rect);
+                        resolved.clip = None;
+                    }
+                }
+                OverrideTag::Transform { tags: nested, .. } => {
+                    // Nested transforms are recursively applied, with the
+                    // parser's depth cap preventing unbounded work.
+                    Self::apply_transform_tags(resolved, nested, progress);
+                }
+                // Discrete and event-global tags are consumed inside `\t`.
+                _ => Self::apply_single_tag(resolved, target),
             }
         }
     }
@@ -2196,6 +2237,38 @@ impl Compositor {
     /// Apply a single override tag to a resolved style
     fn apply_single_tag(resolved: &mut ResolvedStyle, tag: &OverrideTag) {
         match tag {
+            OverrideTag::PropertyReset(name) => match name.as_str() {
+                "b" => resolved.font_weight = if resolved.base_style.bold { 700 } else { 400 },
+                "i" => resolved.italic = resolved.base_style.italic,
+                "u" => resolved.underline = resolved.base_style.underline,
+                "s" => resolved.strike_out = resolved.base_style.strike_out,
+                "fn" => resolved.font_name = resolved.base_style.font_name.clone(),
+                "fe" => resolved.font_encoding = resolved.base_style.encoding,
+                "fsp" => resolved.spacing = resolved.base_style.spacing,
+                "fr" | "frz" => resolved.angle = resolved.base_style.angle,
+                "frx" => resolved.rotation_x = 0.0,
+                "fry" => resolved.rotation_y = 0.0,
+                "fscx" => resolved.scale_x = resolved.base_style.scale_x,
+                "fscy" => resolved.scale_y = resolved.base_style.scale_y,
+                "fax" => resolved.shear_x = 0.0,
+                "fay" => resolved.shear_y = 0.0,
+                "bord" => {
+                    resolved.outline = resolved.base_style.outline;
+                    resolved.outline_x = resolved.outline;
+                    resolved.outline_y = resolved.outline;
+                }
+                "xbord" => resolved.outline_x = resolved.base_style.outline,
+                "ybord" => resolved.outline_y = resolved.base_style.outline,
+                "shad" => {
+                    resolved.shadow = resolved.base_style.shadow;
+                    resolved.shadow_x = resolved.shadow;
+                    resolved.shadow_y = resolved.shadow;
+                }
+                "xshad" => resolved.shadow_x = resolved.base_style.shadow,
+                "yshad" => resolved.shadow_y = resolved.base_style.shadow,
+                "be" | "blur" => resolved.blur = 0.0,
+                _ => {}
+            },
             OverrideTag::Bold(w) => resolved.font_weight = *w,
             OverrideTag::Italic(v) => resolved.italic = *v,
             OverrideTag::Underline(v) => resolved.underline = *v,
@@ -2599,23 +2672,20 @@ impl Compositor {
                 // this cannot divide by zero or underflow.
                 let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
                 let t1 = i64::from(*t1);
-                if elapsed < t1 {
-                    // Progress would be 0, which is a no-op for every
-                    // tag class animated here (see the transformability
-                    // matrix). libass additionally applies
-                    // progress-ignoring inner tags (`\b`, `\fn`, `\an`,
-                    // ...) before the window; that gap is documented in
-                    // the support matrix.
-                    continue;
-                }
                 let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
                 let t2_eff = if *t2 == 0 { duration } else { i64::from(*t2) };
-                let raw_progress = if elapsed >= t2_eff {
+                let raw_progress = if elapsed < t1 {
+                    0.0
+                } else if elapsed >= t2_eff || t2_eff <= t1 {
                     1.0
                 } else {
                     (elapsed - t1) as f64 / (t2_eff - t1) as f64
                 };
-                let progress = Self::apply_accel(raw_progress, *accel);
+                let progress = if elapsed < t1 {
+                    0.0
+                } else {
+                    Self::apply_accel(raw_progress, *accel)
+                };
                 Self::apply_transform_tags(&mut segment_resolved, tags, progress);
             }
         }
@@ -2698,6 +2768,9 @@ impl Compositor {
                         min_x: min_x * unit,
                         width: w * unit,
                         height: h * unit,
+                        baseline: (h - seg_resolved.drawing_baseline_offset * unit)
+                            .max(0.0)
+                            .min(h),
                     }
                 })
             } else {
@@ -2730,7 +2803,7 @@ impl Compositor {
             }
             any_content = true;
             let (w, h, b) = match &item.drawing {
-                Some(d) => (d.width, d.height, d.height),
+                Some(d) => (d.width, d.height, d.baseline),
                 None => (item.shaped.width, item.shaped.height, item.shaped.baseline),
             };
             line_width += w;
@@ -3265,16 +3338,7 @@ impl Compositor {
                 );
                 let draw_x = base_x + x_offset + draw_inset;
                 // Known divergence: libass models `\pbo` as
-                // asc/desc (`asc = height - pbo`, `desc = pbo`),
-                // which cancels out on single-drawing lines
-                // (probe: `\pbo20` renders pixel-identical to no
-                // `\pbo`) and shifts mixed lines +pbo downward.
-                // This term shifts single-line ink instead; fixing
-                // it needs pbo-aware line metrics (see CONFORMANCE).
-                let draw_y = base_y + line_y_offset
-                    - drawing.height
-                    - segment_resolved.drawing_baseline_offset * unit
-                    + fay_line_shear;
+                let draw_y = base_y + line_y_offset - drawing.baseline + fay_line_shear;
                 // Karaoke for drawings (libass splits drawing runs
                 // exactly like text runs: verified by probe).
                 let run = drawing_run[seg_idx].and_then(|id| karaoke_runs.get(id));
@@ -4878,12 +4942,7 @@ mod tests {
         );
     }
 
-    /// Plan #28: `\pbo` shifts drawing placement vertically.
-    /// Known divergence from libass (see CONFORMANCE): libass models
-    /// `\pbo` as asc/desc, which cancels out on single-drawing lines
-    /// (probe: `\pbo20` renders pixel-identical to no `\pbo`) and
-    /// shifts mixed lines +pbo downward. This pins the current
-    /// single-line shift until pbo-aware line metrics land.
+    /// Plan #28: `\pbo` contributes to line ascent/descent like libass.
     #[test]
     fn test_pbo_shifts_drawing() {
         fn min_row(buf: &RenderBuffer) -> u32 {
@@ -4898,9 +4957,11 @@ mod tests {
         let square = "m 0 0 l 40 0 l 40 40 l 0 40";
         let plain = render_event_text(&format!("{{\\p1}}{square}"), true);
         let shifted = render_event_text(&format!("{{\\p1\\pbo-20}}{square}"), true);
-        let dy = min_row(&shifted) as i32 - min_row(&plain) as i32;
-        // unit is 0.5 video px per drawing unit, so pbo -20 moves down 10px.
-        assert!((8..=12).contains(&dy), "pbo shift rows: {dy}");
+        assert_eq!(
+            min_row(&shifted),
+            min_row(&plain),
+            "single drawings keep their ink row"
+        );
     }
 
     #[test]
@@ -6055,14 +6116,15 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_ignores_non_animatable() {
-        // Position/clip/layout/discrete tags inside \t have no effect.
+    fn test_transform_applies_libass_discrete_and_global_tags() {
+        // libass consumes discrete and event-global tags while recursively
+        // parsing \t. Continuous tags still interpolate by transform power.
         let base = Style::new("Default");
         let event =
             Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,x").unwrap();
         let resolved = Compositor::resolve_style(&base, &event);
         let segments = parse_text_segments(
-            r"{\t(0,1,\pos(1,2)\move(1,2,3,4)\org(5,6)\clip(0,0,9,9)\iclip(0,0,9,9)\an7\q2\p1\b1\i1\fnOther\fe2\k50\r\t(0,1,\fs99))}x",
+            r"{\t(0,1,\pos(1,2)\org(5,6)\clip(0,0,9,9)\an7\p1\b1\i1\fnOther\fe2)}x",
         );
         let seg = Compositor::resolve_segment_style(
             &resolved,
@@ -6073,18 +6135,15 @@ mod tests {
             0,
             10_000,
         );
-        assert_eq!(seg.position, None);
-        assert!(seg.move_data.is_none());
-        assert_eq!(seg.origin, None);
-        assert_eq!(seg.clip, None);
-        assert_eq!(seg.inverse_clip, None);
-        assert_eq!(seg.alignment, base.alignment);
-        assert_eq!(seg.drawing_mode, 0);
-        assert_eq!(seg.font_weight, 400);
-        assert_eq!(seg.italic, base.italic);
-        assert_eq!(seg.font_name, base.font_name);
-        assert_eq!(seg.font_encoding, base.encoding);
-        assert_eq!(seg.font_size, base.font_size);
+        assert_eq!(seg.position, Some((1.0, 2.0)));
+        assert_eq!(seg.origin, Some((5.0, 6.0)));
+        assert_eq!(seg.clip, Some((0, 0, 9, 9)));
+        assert_eq!(seg.alignment, 7);
+        assert_eq!(seg.drawing_mode, 1);
+        assert_eq!(seg.font_weight, 700);
+        assert!(seg.italic);
+        assert_eq!(seg.font_name, "Other");
+        assert_eq!(seg.font_encoding, 2);
     }
 
     #[test]

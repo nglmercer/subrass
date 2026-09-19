@@ -132,8 +132,8 @@ proofs, doc sync).
 - **#29 Drawing commands**: `n` continues the outline without closing (vs `m`
   which splits); `s` cubic B-spline evaluation; `p` spline extension; `c`
   spline+outline close; all covered by tests.
-- **#30 `\pbo`**: parsed (`DrawingBaseline`), applied as a baseline Y offset
-  (positive moves the drawing up), in script units.
+- **#30 `\pbo`**: parsed (`DrawingBaseline`) and folded into libass-style
+  drawing ascent/descent line metrics, in script units.
 - **#31/#32 Mixed drawing/text**: per-segment drawing state (any `\pN>0`);
   drawing segments render inline at the pen with measured bounds and advance;
   wrapping never splits drawing runs (verbatim passthrough).
@@ -233,7 +233,7 @@ proofs, doc sync).
   demo typecheck, fuzz smoke.
 - **#62 Reference tests: done.** `tests/reference.rs` compares subrass output
   against libass-rendered frames (ffmpeg `ass` filter, pinned build recorded
-  in `tests/reference/provenance.json`). 48/48 gated fixtures pass on
+  in `tests/reference/provenance.json`). 67/67 gated fixtures pass on
   structural gates (bbox IoU ≥ 0.70, ink ratio 0.5–2.0, block mean error ≤ 25,
   hard-error fraction ≤ 0.15); 3 legacy/fallback fixtures are measured but
   known-divergent; 0 pending (every manifest fixture has a libass frame, and
@@ -363,8 +363,9 @@ proofs, doc sync).
   rustybuzz+bidi roadmap rather than a half-integration.
 - **Doc accuracy**: fixed stale counts everywhere (see table), the
   `shear-rotation` IoU inconsistency (0.972→0.988), and the false README /
-  `CONFORMANCE.md` claim that `\t` animates clip/position (the
-  transformability matrix in `apply_transform_tags` ignores them).
+  `CONFORMANCE.md` claim that `\t` ignores libass's recursive discrete and
+  rectangular clip handling; those tags are now consumed by the bounded
+  transform evaluator.
 - **Robustness re-audit**: production code has no `unwrap`/`expect`/
   `panic!`/`todo!`/`unsafe` except one guard-adjacent `expect` in
   `smart_wrap_lines` (safe by construction); all 171 pedantic cast
@@ -511,7 +512,5 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
     while default libass builds without unibreak break at ASCII
     spaces only and overflow (measured as known-divergent, never
     gated).
-11. `\pbo` shifts single-line drawing ink by −pbo here, while libass's
-    asc/desc model cancels out on single-drawing lines (probed
-    pixel-identical); mixed-line behavior differs too. Pinned by
-    `test_pbo_shifts_drawing` pending pbo-aware line metrics.
+11. `\pbo` uses libass ascent/descent metrics: single-drawing lines preserve
+    their ink anchor and mixed lines use the adjusted drawing ascent.

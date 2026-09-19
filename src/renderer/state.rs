@@ -85,11 +85,6 @@ pub struct ResolvedStyle {
     /// Script `Kerning:` flag (default off, like libass): enables the
     /// OpenType `kern` feature during shaping.
     pub kerning: bool,
-    /// In the RGB output API, libass maps TV-range script colors from
-    /// full-range RGB into 16..235. The 601/709 coefficient distinction
-    /// belongs to a later RGB<->YCbCr video conversion, which this renderer
-    /// deliberately does not perform; PC-range and None stay unchanged.
-    pub tv_range_colors: bool,
 }
 
 /// Vector clip shape in script coordinates with a drawing scale.

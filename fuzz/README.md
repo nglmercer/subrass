@@ -8,6 +8,7 @@ rustup toolchain install nightly-2026-09-17
 cargo install cargo-fuzz --version 0.13.2 --locked
 cd fuzz
 cargo +nightly-2026-09-17 fuzz run parse_ass -- -max_total_time=60
+cargo +nightly-2026-09-17 fuzz run parse_ass_bytes -- -max_total_time=60
 cargo +nightly-2026-09-17 fuzz run drawing  -- -max_total_time=60
 cargo +nightly-2026-09-17 fuzz run render   -- -max_total_time=60
 ```
@@ -19,6 +20,8 @@ Targets:
 
 - `parse_ass`: `AssDocument::parse` over arbitrary bytes (never panics,
   hangs, or over-allocates; seed corpus in `fuzz/corpus/parse_ass/`).
+- `parse_ass_bytes`: `AssDocument::parse_bytes` over arbitrary raw bytes,
+  including malformed UTF-8 and legacy-encoded event payloads.
 - `drawing`: `DrawingParser::measure` over hostile command streams
   (subdivision/contour caps stay bounded).
 - `render`: full `SubtitleRenderer` frame render over hostile documents

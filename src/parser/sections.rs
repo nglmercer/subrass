@@ -73,6 +73,37 @@ pub(super) fn process_section(
     Ok(())
 }
 
+/// Dispatch a byte-preserving section. Event text is parsed from its original
+/// bytes; the other bounded section parsers receive lossy UTF-8 views because
+/// their syntax is metadata, ASCII attachment data, or validated text fields.
+pub(super) fn process_section_bytes(
+    doc: &mut AssDocument,
+    section: Section,
+    lines: &[Vec<u8>],
+    first_content_line: usize,
+) -> Result<(), ParseError> {
+    if matches!(section, Section::Events) {
+        let raw_lines: Vec<&[u8]> = lines.iter().map(Vec::as_slice).collect();
+        let parsed = event::parse_events_bytes(&raw_lines, first_content_line)?;
+        check_global_count(
+            doc.events.len(),
+            parsed.len(),
+            event::MAX_EVENTS,
+            "events",
+            first_content_line,
+        )?;
+        doc.events.extend(parsed);
+        return Ok(());
+    }
+
+    let decoded: Vec<String> = lines
+        .iter()
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect();
+    let text_lines: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    process_section(doc, section, &text_lines, first_content_line)
+}
+
 /// Enforce a per-document count cap across appended sections with
 /// checked arithmetic. Pure over lengths, so boundaries (including
 /// `usize` overflow) are unit-testable without huge inputs.

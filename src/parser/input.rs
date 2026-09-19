@@ -1,5 +1,5 @@
 use super::errors::{ParseError, Section};
-use super::sections::process_section;
+use super::sections::{process_section, process_section_bytes};
 use super::AssDocument;
 
 /// Parse the current UTF-8 text representation of an ASS document.
@@ -58,4 +58,69 @@ pub(super) fn parse_text(input: &str) -> Result<AssDocument, ParseError> {
     }
 
     Ok(doc)
+}
+
+/// Parse raw ASS bytes without replacing an invalid event payload before the
+/// charset decoder sees it. Valid UTF-8 (including a UTF-8 BOM) takes the
+/// existing string path unchanged; only genuinely non-UTF-8 input uses the
+/// byte-preserving section scan.
+pub(super) fn parse_bytes(input: &[u8]) -> Result<AssDocument, ParseError> {
+    let input = strip_utf8_bom(input);
+    if let Ok(text) = std::str::from_utf8(input) {
+        return parse_text(text);
+    }
+
+    let mut doc = AssDocument::new();
+    let mut current_section: Option<Section> = None;
+    let mut section_lines: Vec<Vec<u8>> = Vec::new();
+    let mut line_number = 0;
+    let mut section_start_line = 0;
+    let mut found_section = false;
+
+    for line in split_lines(input) {
+        line_number += 1;
+        let decoded = String::from_utf8_lossy(line);
+        let trimmed = decoded.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if let Some(section) = current_section {
+                process_section_bytes(&mut doc, section, &section_lines, section_start_line + 1)?;
+            }
+            current_section = Section::from_header(trimmed);
+            if current_section.is_some() {
+                found_section = true;
+            }
+            section_lines.clear();
+            section_start_line = line_number;
+            continue;
+        }
+
+        if current_section.is_some() {
+            section_lines.push(line.to_vec());
+        }
+    }
+
+    if let Some(section) = current_section {
+        process_section_bytes(&mut doc, section, &section_lines, section_start_line + 1)?;
+    }
+
+    if !found_section
+        && split_lines(input).any(|line| !String::from_utf8_lossy(line).trim().is_empty())
+    {
+        return Err(ParseError::Unexpected(
+            "No valid ASS sections found".to_string(),
+        ));
+    }
+
+    Ok(doc)
+}
+
+fn strip_utf8_bom(input: &[u8]) -> &[u8] {
+    input.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(input)
+}
+
+fn split_lines(input: &[u8]) -> impl Iterator<Item = &[u8]> {
+    input
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
 }

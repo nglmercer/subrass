@@ -43,6 +43,7 @@ fn parse_key_value(line: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::YCbCrMatrix;
 
     #[test]
     fn test_parse_script_info_basic() {
@@ -81,5 +82,26 @@ mod tests {
         let lines = vec!["This is not valid"];
         let result = parse_script_info(&lines, 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_all_libass_ycbcr_matrix_values() {
+        for (value, expected) in [
+            ("Default", YCbCrMatrix::Default),
+            ("Unknown", YCbCrMatrix::Unknown),
+            ("None", YCbCrMatrix::None),
+            ("TV.601", YCbCrMatrix::TV601),
+            ("PC.601", YCbCrMatrix::PC601),
+            ("TV.709", YCbCrMatrix::TV709),
+            ("PC.709", YCbCrMatrix::PC709),
+            ("TV.240m", YCbCrMatrix::TV240M),
+            ("PC.240m", YCbCrMatrix::PC240M),
+            ("TV.FCC", YCbCrMatrix::TVFCC),
+            ("PC.FCC", YCbCrMatrix::PCFCC),
+        ] {
+            let line = format!("YCbCr Matrix: {value}");
+            let info = parse_script_info(&[line.as_str()], 1).unwrap();
+            assert_eq!(info.y_cb_cr_matrix, expected, "{value}");
+        }
     }
 }

@@ -24,6 +24,13 @@ impl AssDoc {
         Ok(Self { inner })
     }
 
+    /// Create a document from raw ASS bytes, preserving legacy event bytes
+    /// until charset/`\fe` handling in the renderer.
+    pub fn from_bytes(content: &[u8]) -> Result<AssDoc, JsError> {
+        let inner = AssDocument::parse_bytes(content).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self { inner })
+    }
+
     /// Get script information as a JavaScript object
     pub fn get_script_info(&self) -> Result<JsValue, JsError> {
         to_js(&self.inner.script_info)
@@ -231,6 +238,14 @@ impl SubtitleRenderer {
     #[wasm_bindgen(constructor)]
     pub fn new(ass_content: &str) -> Result<SubtitleRenderer, JsError> {
         let inner = InnerRenderer::new(ass_content).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Create a renderer from raw ASS bytes, retaining legacy event bytes for
+    /// charset-aware decoding.
+    pub fn from_bytes(ass_content: &[u8]) -> Result<SubtitleRenderer, JsError> {
+        let inner =
+            InnerRenderer::from_bytes(ass_content).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
     }
 

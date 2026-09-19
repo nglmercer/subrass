@@ -40,6 +40,40 @@ pub fn parse_events(lines: &[&str], start_line: usize) -> Result<Vec<Event>, Par
     Ok(events)
 }
 
+/// Byte-preserving event parser used by `AssDocument::parse_bytes`.
+/// Non-event section data may be decoded lossily, but the Text field is kept
+/// on `Event` until the renderer knows the active ASS charset/`\fe` state.
+pub fn parse_events_bytes(lines: &[&[u8]], start_line: usize) -> Result<Vec<Event>, ParseError> {
+    let mut events = Vec::new();
+    let mut format: Option<Vec<String>> = None;
+
+    for (i, raw_line) in lines.iter().enumerate() {
+        let line = trim_ascii_bytes(raw_line);
+        if line.is_empty() || line.first() == Some(&b';') {
+            continue;
+        }
+
+        if let Some(fmt) = strip_prefix_ci_bytes(line, b"Format:") {
+            format = Some(parse_format_columns(&String::from_utf8_lossy(fmt)));
+            continue;
+        }
+
+        if starts_with_ci_bytes(line, b"Dialogue:") || starts_with_ci_bytes(line, b"Comment:") {
+            if events.len() >= MAX_EVENTS {
+                return Err(ParseError::line_error(
+                    start_line + i,
+                    format!("Too many events (limit {MAX_EVENTS})"),
+                ));
+            }
+            let event = Event::parse_from_bytes_with_format(line, format.as_deref())
+                .map_err(|e| ParseError::line_error(start_line + i, e))?;
+            events.push(event);
+        }
+    }
+
+    Ok(events)
+}
+
 fn parse_format_columns(fmt: &str) -> Vec<String> {
     fmt.split(',')
         .map(|c| c.trim().to_lowercase())
@@ -62,6 +96,29 @@ fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn starts_with_ci_bytes(line: &[u8], prefix: &[u8]) -> bool {
+    line.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn strip_prefix_ci_bytes<'a>(line: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if starts_with_ci_bytes(line, prefix) {
+        Some(&line[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 pub fn get_events_at_time(events: &[Event], time_ms: u64) -> Vec<&Event> {

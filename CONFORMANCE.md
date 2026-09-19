@@ -21,10 +21,12 @@ Different rasterizers never match byte-exact, so the harness compares structure:
 
 - **Ink masks**: ours keys on alpha > 0 (a black outline/shadow/opaque box is
   real ink even with zero RGB); the opaque reference frame keys on raw RGB > 0.
-- **Range normalization**: legacy fixtures without an explicit matrix are
-  expanded from 16..235 with `(v - 16) * 255 / 219`. The five explicit YCbCr
-  fixtures compare raw RGB instead, so they gate the matrix/range semantics
-  themselves rather than normalizing those semantics away.
+- **Range normalization**: legacy FFmpeg/libass fixtures without an explicit
+  matrix are expanded from 16..235 with `(v - 16) * 255 / 219`. The
+  `ycbcr-*` files are retained as explicitly documented host/video-conversion
+  artifacts and are not evidence of raw subtitle RGB behavior. Raw YCbCr
+  semantics are gated by direct `SubtitleRenderer` RGBA tests; explicit
+  downstream conversion is covered by `types::color_space` tests.
 - **Intensity on 4x4 block averages**: absorbs ~1px placement/AA differences
   between unhinted `ab_glyph` coverage and hinted FreeType outlines while
   color/alpha/coverage bugs still fail.
@@ -197,7 +199,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
 | Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning/indic G+L | Supported |
 | `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_committed_collection_matches_styles_and_preserves_face_indices` | font-collection G+L | Supported; regular/bold-italic/Indic face indices gated |
-| `YCbCr Matrix` RGB behavior | ✓ | `ycbcr_rgb_reference_semantics_are_explicit` | ycbcr-{none,tv601,tv709,pc601,pc709} G+L | Supported at RGB boundary; 601/709 coefficient distinction belongs to downstream YCbCr conversion |
+| `YCbCr Matrix` metadata and raw RGB behavior | ✓ | `test_parse_all_libass_ycbcr_matrix_values`, `raw_rgba_ignores_ycbcr_matrix_metadata_without_host_conversion` | ycbcr-* retained as host-conversion artifacts | Raw RGBA supported; explicit downstream conversion requires a supplied `VideoColorSpace` |
 
 ## Known divergences (intentional)
 

@@ -18,6 +18,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "parse_ass_bytes"
+path = "fuzz_targets/parse_ass_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "drawing"
 path = "fuzz_targets/drawing.rs"
 test = false

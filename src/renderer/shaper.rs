@@ -12,7 +12,7 @@ mod line_break;
 #[path = "shaper/opentype.rs"]
 mod opentype;
 
-use self::encoding::ass_encoding;
+use self::encoding::{ass_encoding, decode_ass_bytes};
 pub use self::fallback::cluster_font_picks;
 pub use self::line_break::{
     cjk_break_between, is_cjk_breakable, is_cjk_nobreak_before, is_cjk_open, is_combining_mark,
@@ -113,6 +113,11 @@ impl TextShaper {
         }
         flush(&mut output, &mut bytes);
         output
+    }
+
+    /// Decode byte-preserving event text, including mid-event `\fe` changes.
+    pub fn decode_ass_bytes(bytes: &[u8], encoding: i32) -> String {
+        decode_ass_bytes(bytes, encoding)
     }
 
     /// Shape a text string into positioned glyphs (supports multi-line with \n).
@@ -562,6 +567,22 @@ mod tests {
             "\u{84}A"
         );
         assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 999), "ð");
+    }
+
+    #[test]
+    fn test_raw_byte_decoding_preserves_utf8_and_switches_fe_state() {
+        // These are actual legacy bytes, not Unicode strings containing
+        // lookalike code points: CP1252 E9 is é and CP1253 E1 is α.
+        assert_eq!(TextShaper::decode_ass_bytes(b"caf\xE9", 1), "café");
+        assert_eq!(TextShaper::decode_ass_bytes(b"\x82\xA0", 128), "あ");
+        assert_eq!(
+            TextShaper::decode_ass_bytes(b"{\\fe161}\xE1{\\fe0}\xE9", 1),
+            "{\\fe161}α{\\fe0}é"
+        );
+        assert_eq!(
+            TextShaper::decode_ass_bytes("日本語".as_bytes(), 128),
+            "日本語"
+        );
     }
 
     #[test]

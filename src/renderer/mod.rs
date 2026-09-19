@@ -45,7 +45,18 @@ impl SubtitleRenderer {
     pub fn new(ass_content: &str) -> Result<Self, String> {
         let doc =
             AssDocument::parse(ass_content).map_err(|e| format!("Failed to parse ASS: {}", e))?;
+        Self::from_document(doc)
+    }
 
+    /// Create a renderer from raw ASS bytes. Valid UTF-8 is preserved, while
+    /// legacy event bytes remain available to the charset/`\fe` decoder.
+    pub fn from_bytes(ass_content: &[u8]) -> Result<Self, String> {
+        let doc = AssDocument::parse_bytes(ass_content)
+            .map_err(|e| format!("Failed to parse ASS bytes: {}", e))?;
+        Self::from_document(doc)
+    }
+
+    fn from_document(doc: AssDocument) -> Result<Self, String> {
         let mut font_manager = FontManager::new();
 
         // Load built-in fallback font
@@ -251,11 +262,6 @@ impl SubtitleRenderer {
             resolved.layout_res_x = self.doc.script_info.layout_res_x.unwrap_or(0);
             resolved.layout_res_y = self.doc.script_info.layout_res_y.unwrap_or(0);
             resolved.kerning = self.doc.script_info.kerning;
-            resolved.tv_range_colors = matches!(
-                self.doc.script_info.y_cb_cr_matrix,
-                crate::types::YCbCrMatrix::TV601 | crate::types::YCbCrMatrix::TV709
-            );
-
             self.compositor.composite_event(
                 &mut self.buffer,
                 event,

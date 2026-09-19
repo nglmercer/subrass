@@ -33,25 +33,42 @@ impl std::str::FromStr for ScriptType {
     }
 }
 
-/// YCbCr matrix type
+/// ASS/libass YCbCr matrix metadata.
+///
+/// This is metadata for the host/video integration boundary. The subtitle
+/// renderer itself emits authored RGB values unchanged; `Default` maps to
+/// libass's default TV.601 source matrix only when an explicit downstream
+/// conversion is requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum YCbCrMatrix {
     #[default]
+    Default,
+    Unknown,
     None,
     TV601,
-    TV709,
     PC601,
+    TV709,
     PC709,
+    TV240M,
+    PC240M,
+    TVFCC,
+    PCFCC,
 }
 
 impl std::fmt::Display for YCbCrMatrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Default => write!(f, "Default"),
+            Self::Unknown => write!(f, "Unknown"),
             Self::None => write!(f, "None"),
             Self::TV601 => write!(f, "TV.601"),
-            Self::TV709 => write!(f, "TV.709"),
             Self::PC601 => write!(f, "PC.601"),
+            Self::TV709 => write!(f, "TV.709"),
             Self::PC709 => write!(f, "PC.709"),
+            Self::TV240M => write!(f, "TV.240m"),
+            Self::PC240M => write!(f, "PC.240m"),
+            Self::TVFCC => write!(f, "TV.FCC"),
+            Self::PCFCC => write!(f, "PC.FCC"),
         }
     }
 }
@@ -60,12 +77,18 @@ impl std::str::FromStr for YCbCrMatrix {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "None" | "none" => Ok(Self::None),
-            "TV.601" | "tv.601" => Ok(Self::TV601),
-            "TV.709" | "tv.709" => Ok(Self::TV709),
-            "PC.601" | "pc.601" => Ok(Self::PC601),
-            "PC.709" | "pc.709" => Ok(Self::PC709),
+        match s.trim().to_ascii_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "unknown" => Ok(Self::Unknown),
+            "none" => Ok(Self::None),
+            "tv.601" => Ok(Self::TV601),
+            "pc.601" => Ok(Self::PC601),
+            "tv.709" => Ok(Self::TV709),
+            "pc.709" => Ok(Self::PC709),
+            "tv.240m" => Ok(Self::TV240M),
+            "pc.240m" => Ok(Self::PC240M),
+            "tv.fcc" => Ok(Self::TVFCC),
+            "pc.fcc" => Ok(Self::PCFCC),
             _ => Err(format!("Unknown YCbCr matrix: {}", s)),
         }
     }
@@ -108,7 +131,7 @@ impl Default for ScriptInfo {
             layout_res_y: None,
             scaled_border_and_shadow: true,
             kerning: false,
-            y_cb_cr_matrix: YCbCrMatrix::None,
+            y_cb_cr_matrix: YCbCrMatrix::Default,
             wrap_style: 0,
             original_script: None,
             original_translation: None,
@@ -236,6 +259,7 @@ mod tests {
         assert_eq!(info.play_res_y, 1080);
         assert!(info.scaled_border_and_shadow);
         assert!(!info.kerning);
+        assert_eq!(info.y_cb_cr_matrix, YCbCrMatrix::Default);
     }
 
     #[test]
@@ -281,5 +305,30 @@ mod tests {
         // Unknown keys still accepted
         assert!(info.set_field("CustomKey", "anything").is_ok());
         assert_eq!(info.extra_fields.get("CustomKey").unwrap(), "anything");
+    }
+
+    #[test]
+    fn test_all_libass_ycbcr_matrix_values_parse() {
+        for (text, expected) in [
+            ("Default", YCbCrMatrix::Default),
+            ("Unknown", YCbCrMatrix::Unknown),
+            ("None", YCbCrMatrix::None),
+            ("TV.601", YCbCrMatrix::TV601),
+            ("PC.601", YCbCrMatrix::PC601),
+            ("TV.709", YCbCrMatrix::TV709),
+            ("PC.709", YCbCrMatrix::PC709),
+            ("TV.240m", YCbCrMatrix::TV240M),
+            ("PC.240m", YCbCrMatrix::PC240M),
+            ("TV.FCC", YCbCrMatrix::TVFCC),
+            ("PC.FCC", YCbCrMatrix::PCFCC),
+        ] {
+            assert_eq!(text.parse::<YCbCrMatrix>().unwrap(), expected, "{text}");
+            assert_eq!(expected.to_string(), text);
+        }
+        assert_eq!(
+            "tv.240M".parse::<YCbCrMatrix>().unwrap(),
+            YCbCrMatrix::TV240M
+        );
+        assert!("bogus".parse::<YCbCrMatrix>().is_err());
     }
 }

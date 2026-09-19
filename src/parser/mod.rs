@@ -38,6 +38,13 @@ impl AssDocument {
         input::parse_text(input)
     }
 
+    /// Parse an ASS document from raw bytes. Valid UTF-8 is preserved
+    /// exactly; invalid event payload bytes remain attached to their Event
+    /// until the renderer applies the style/`\fe` charset state.
+    pub fn parse_bytes(input: &[u8]) -> Result<Self, ParseError> {
+        input::parse_bytes(input)
+    }
+
     pub fn get_event_count(&self) -> usize {
         self.events.len()
     }
@@ -145,6 +152,34 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
         assert_eq!(doc.script_info.play_res_y, 216);
         assert_eq!(doc.styles.len(), 1);
         assert_eq!(doc.events.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_bytes_retains_actual_non_utf8_event_payload() {
+        let mut input = b"[Script Info]\nPlayResX: 384\nPlayResY: 216\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,caf".to_vec();
+        // Windows-1252 byte E9 (é), intentionally not a Unicode UTF-8
+        // encoding. The source payload must survive parsing unchanged.
+        input.push(0xE9);
+        input.push(b'\n');
+
+        let doc = AssDocument::parse_bytes(&input).unwrap();
+        assert_eq!(doc.script_info.play_res_x, 384);
+        assert_eq!(doc.events.len(), 1);
+        assert_eq!(doc.events[0].text, "caf�");
+        assert_eq!(
+            doc.events[0].source_text_bytes.as_deref(),
+            Some(b"caf\xE9".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_parse_bytes_utf8_bom_uses_lossless_text_path() {
+        let mut input = vec![0xEF, 0xBB, 0xBF];
+        input.extend_from_slice(TEST_ASS.as_bytes());
+        let doc = AssDocument::parse_bytes(&input).unwrap();
+        assert_eq!(doc.script_info.title.as_deref(), Some("Test"));
+        assert_eq!(doc.events[0].text, "Hello World!");
+        assert!(doc.events[0].source_text_bytes.is_none());
     }
 
     #[test]

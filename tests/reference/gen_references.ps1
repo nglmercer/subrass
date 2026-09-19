@@ -20,6 +20,11 @@ $ffmpeg = if ($env:FFMPEG) { $env:FFMPEG } else { 'ffmpeg' }
 if ($LASTEXITCODE -ne 0) { throw 'ffmpeg with libass ass filter not found' }
 
 $manifest = Get-Content 'tests/golden/manifest.json' -Raw | ConvertFrom-Json
+$referenceFilter = if ($env:REFERENCE_FILTER) {
+    @($env:REFERENCE_FILTER -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+} else {
+    @()
+}
 New-Item -ItemType Directory -Force -Path 'tests/reference' | Out-Null
 $collectionFonts = 'target/reference-font-collection'
 New-Item -ItemType Directory -Force -Path $collectionFonts | Out-Null
@@ -31,6 +36,9 @@ $buildconf = & $ffmpeg -hide_banner -buildconf 2>&1 | Out-String
 
 foreach ($prop in $manifest.fixtures.PSObject.Properties) {
     $name = $prop.Name
+    if ($referenceFilter.Count -gt 0 -and $referenceFilter -notcontains $name) {
+        continue
+    }
     $timeMs = $prop.Value.time_ms
     $sec = [double]$timeMs / 1000.0
     $ass = "tests/golden/$name.ass"
@@ -39,10 +47,21 @@ foreach ($prop in $manifest.fixtures.PSObject.Properties) {
     # fontsdir isolated prevents the standalone source fonts from masking a
     # collection face while still using the same deterministic direct provider.
     $fontsDir = if ($name -eq 'font-collection') { $collectionFonts } else { 'fonts' }
+    $isYcbcr = $name.StartsWith('ycbcr-')
+    # YCbCr fixtures are downstream host/video-conversion artifacts, not raw
+    # libass color proofs. Keep every colorspace/range choice explicit so a
+    # regenerated artifact documents the layer being measured.
+    $filter = if ($isYcbcr) {
+        "colorspace=iall=bt709:irange=tv:all=bt709:range=tv,ass='$ass':fontsdir='$fontsDir',colorspace=iall=bt709:irange=tv:all=bt709:range=tv,format=rgba"
+    } else {
+        "format=rgba,ass='$ass':fontsdir='$fontsDir'"
+    }
+    $outputColorArgs = if ($isYcbcr) { @('-colorspace', 'bt709', '-color_range', 'tv') } else { @() }
     Write-Host "rendering $name @ ${timeMs}ms"
     & $ffmpeg -hide_banner -loglevel error -y `
         -f lavfi -i 'color=c=black:s=256x144:r=10:d=6' `
-        -vf "format=rgba,ass='$ass':fontsdir='$fontsDir'" `
+        -vf $filter `
+        $outputColorArgs `
         -ss $sec -frames:v 1 -f rawvideo -pix_fmt rgba $out
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $name" }
 }
@@ -73,11 +92,16 @@ $prov = [ordered]@{
     video          = @(256, 144)
     background     = 'black (ass composited over opaque black)'
     generated_utc  = (Get-Date).ToUniversalTime().ToString('o')
-    note           = 'effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent); font-collection uses the isolated committed TTC only'
+    note           = 'effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent); font-collection uses the isolated committed TTC only; ycbcr-* references are host/video conversion artifacts and are not raw libass color proofs'
+    ycbcr_reference_layer = 'FFmpeg final-composited video RGB; raw subtitle colors are tested by direct SubtitleRenderer RGBA tests'
+    ycbcr_input_colorspace = 'BT.709'
+    ycbcr_input_range = 'TV/limited'
+    ycbcr_output_colorspace = 'BT.709'
+    ycbcr_output_range = 'TV/limited'
 }
 $json = ($prov | ConvertTo-Json) -replace "`r`n", "`n"
 [System.IO.File]::WriteAllText(
-    (Join-Path $repo 'tests/reference/provenance.json'),
+    (Join-Path $root 'tests/reference/provenance.json'),
     "$json`n",
     [System.Text.UTF8Encoding]::new($false))
 Write-Host 'wrote tests/reference/provenance.json'

@@ -4,6 +4,8 @@
 // (via ffmpeg's `ass` filter; see tests/reference/provenance.json).
 // References live in tests/reference/*.rgba (raw RGBA over black);
 // fixtures mirror tests/golden (same .ass inputs and manifest times).
+// YCbCr fixtures are retained as explicitly host/video-converted artifacts;
+// raw subtitle RGB semantics are tested directly without FFmpeg below.
 //
 // Different rasterizers never match byte-exact, so this gates on
 // structural similarity instead: ink bounding boxes must overlap
@@ -57,6 +59,17 @@ const KNOWN_DIVERGENT: &[(&str, &str)] = &[
 /// that list is `KNOWN_DIVERGENT` above. Currently empty: every
 /// manifest fixture has a generated libass frame.
 const PENDING_REFERENCES: &[&str] = &[];
+
+/// These frames include an FFmpeg video-colorspace stage and therefore cannot
+/// prove libass's raw `ASS_Image.color` semantics. They remain integrity-gated
+/// artifacts, but are excluded from the raw renderer comparison.
+const HOST_CONVERTED_FIXTURES: &[&str] = &[
+    "ycbcr-none",
+    "ycbcr-tv601",
+    "ycbcr-tv709",
+    "ycbcr-pc601",
+    "ycbcr-pc709",
+];
 
 /// Gate thresholds (see CONFORMANCE.md): bbox IoU over full-res ink
 /// masks, ink-count ratio bounds, and block-averaged intensity error.
@@ -310,6 +323,12 @@ fn libass_reference_comparison() {
     let mut failures = Vec::new();
     let mut report = Vec::new();
     for (name, time_ms) in manifest_times() {
+        if HOST_CONVERTED_FIXTURES.contains(&name.as_str()) {
+            report.push(format!(
+                "{name:14} [host/video conversion artifact; raw RGBA tested directly]"
+            ));
+            continue;
+        }
         let ass = std::fs::read_to_string(golden_dir.join(format!("{name}.ass")))
             .expect("golden fixture");
         let mut renderer = SubtitleRenderer::new(&ass).expect("fixture parses");
@@ -354,9 +373,9 @@ fn libass_reference_comparison() {
         };
         // The legacy corpus omits `YCbCr Matrix`, and FFmpeg/libass emits
         // its subtitle colors through TV range; normalize that historical
-        // corpus back to full RGB. Explicit YCbCr fixtures instead test the
-        // raw RGB API semantics themselves and must remain unnormalized.
-        let Some(stats) = compare(&ours, &ref_bytes, 256, !name.starts_with("ycbcr-")) else {
+        // corpus back to full RGB. YCbCr host-conversion artifacts are
+        // excluded above and never claim raw subtitle-color parity.
+        let Some(stats) = compare(&ours, &ref_bytes, 256, true) else {
             failures.push(format!("{name}: one side rendered blank"));
             continue;
         };
@@ -526,24 +545,79 @@ fn nondefault_playres_samples_are_visible_and_change() {
 }
 
 #[test]
-fn ycbcr_rgb_reference_semantics_are_explicit() {
+fn ycbcr_reference_layer_is_explicitly_host_converted() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let load = |name: &str| {
-        std::fs::read(root.join(format!("tests/reference/{name}.rgba")))
-            .expect("committed YCbCr libass sample")
-    };
-    let none = load("ycbcr-none");
-    let tv601 = load("ycbcr-tv601");
-    let tv709 = load("ycbcr-tv709");
-    let pc601 = load("ycbcr-pc601");
-    let pc709 = load("ycbcr-pc709");
-    assert_eq!(none, pc601, "PC.601 is full-range RGB in this API");
-    assert_eq!(none, pc709, "PC.709 is full-range RGB in this API");
-    assert_eq!(
-        tv601, tv709,
-        "601/709 coefficients need a YCbCr video stage"
+    let provenance = std::fs::read_to_string(root.join("tests/reference/provenance.json"))
+        .expect("reference provenance");
+    assert!(
+        provenance.contains("host/video conversion")
+            || provenance.contains("host_video_conversion"),
+        "YCbCr reference provenance must identify its host/video conversion layer"
     );
-    assert_ne!(none, tv601, "TV range must map RGB into studio swing");
+    for name in HOST_CONVERTED_FIXTURES {
+        assert!(
+            root.join(format!("tests/reference/{name}.rgba")).exists(),
+            "host-converted reference exists: {name}"
+        );
+    }
+}
+
+#[test]
+fn raw_rgba_ignores_ycbcr_matrix_metadata_without_host_conversion() {
+    // This is intentionally a direct SubtitleRenderer test. It does not use
+    // FFmpeg or a composited video frame, so it proves the libass-style raw
+    // RGBA boundary rather than a downstream video conversion result.
+    let render = |matrix: Option<&str>| {
+        let matrix_line = matrix
+            .map(|value| format!("YCbCr Matrix: {value}\n"))
+            .unwrap_or_default();
+        let ass = format!(
+            "[Script Info]\nPlayResX: 384\nPlayResY: 216\n{matrix_line}\n\
+[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+Style: Default,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1\n\
+[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{{\\an7\\pos(24,30)\\bord0\\shad0\\1c&H2080F0&\\p1}}m 0 0 l 90 0 l 90 38 l 0 38"
+        );
+        let mut renderer = SubtitleRenderer::new(&ass).expect("fixture parses");
+        renderer.set_video_size(256, 144).expect("video size");
+        renderer.render_frame(1000).expect("frame renders");
+        renderer.frame_data().to_vec()
+    };
+
+    let raw = render(None);
+    for matrix in [
+        "Default", "Unknown", "None", "TV.601", "PC.601", "TV.709", "PC.709", "TV.240m", "PC.240m",
+        "TV.FCC", "PC.FCC",
+    ] {
+        assert_eq!(raw, render(Some(matrix)), "raw RGBA changed for {matrix}");
+    }
+    assert!(
+        raw.chunks_exact(4)
+            .any(|pixel| pixel == [240, 128, 32, 255]),
+        "visible authored RGB sample"
+    );
+}
+
+#[test]
+fn renderer_from_bytes_decodes_real_legacy_event_bytes() {
+    let header = b"[Script Info]\nPlayResX: 384\nPlayResY: 216\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,";
+    let mut legacy = header.to_vec();
+    legacy.extend_from_slice(b"caf");
+    legacy.push(0xE9); // actual CP1252 byte for é
+
+    let utf8 = [header.as_slice(), "café".as_bytes()].concat();
+    let mut from_bytes = SubtitleRenderer::from_bytes(&legacy).expect("legacy bytes parse");
+    let mut from_utf8 =
+        SubtitleRenderer::new(std::str::from_utf8(&utf8).unwrap()).expect("UTF-8 text parse");
+    from_bytes.set_video_size(256, 144).expect("video size");
+    from_utf8.set_video_size(256, 144).expect("video size");
+    from_bytes.render_frame(1000).expect("legacy frame renders");
+    from_utf8.render_frame(1000).expect("UTF-8 frame renders");
+    assert_eq!(from_bytes.frame_data(), from_utf8.frame_data());
+    assert!(from_bytes
+        .frame_data()
+        .chunks_exact(4)
+        .any(|pixel| pixel[3] > 0));
 }
 
 #[test]

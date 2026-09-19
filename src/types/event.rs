@@ -34,6 +34,13 @@ pub struct Event {
     pub effect: String,
     pub text: String,
     pub parsed_tags: Vec<OverrideTag>,
+    /// Original event text bytes for `AssDocument::parse_bytes`.
+    ///
+    /// This is intentionally skipped from serde/WASM document output. The
+    /// renderer consumes it before lossy display text is used, so legacy
+    /// encodings can be decoded after the style/`\fe` state is known.
+    #[serde(skip)]
+    pub(crate) source_text_bytes: Option<Vec<u8>>,
 }
 
 impl Event {
@@ -51,6 +58,7 @@ impl Event {
             effect: String::new(),
             text: String::new(),
             parsed_tags: Vec::new(),
+            source_text_bytes: None,
         }
     }
 
@@ -172,6 +180,125 @@ impl Event {
             effect: field("effect").unwrap_or("").to_string(),
             text,
             parsed_tags,
+            source_text_bytes: None,
+        })
+    }
+
+    /// Parse an event line while retaining the raw bytes of its Text field.
+    /// Metadata fields are ASCII/UTF-8 decoded for the document model; the
+    /// renderer uses `source_text_bytes` for legacy charset handling.
+    pub(crate) fn parse_from_bytes_with_format(
+        line: &[u8],
+        format: Option<&[String]>,
+    ) -> Result<Self, String> {
+        let line = trim_ascii_bytes(line);
+        let (event_type, content) = if let Some(rest) = strip_prefix_ci_bytes(line, b"Dialogue:") {
+            (EventType::Dialogue, rest)
+        } else if let Some(rest) = strip_prefix_ci_bytes(line, b"Comment:") {
+            (EventType::Comment, rest)
+        } else {
+            return Err(format!(
+                "Invalid event type: {}",
+                String::from_utf8_lossy(line)
+            ));
+        };
+
+        let columns: Vec<String> = match format {
+            Some(cols) if !cols.is_empty() => cols.to_vec(),
+            _ => DEFAULT_EVENT_COLUMNS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        if let Some(text_pos) = columns.iter().position(|c| c == "text") {
+            if text_pos != columns.len() - 1 {
+                return Err(format!(
+                    "Text column must be last in Events Format, got: {}",
+                    columns.join(", ")
+                ));
+            }
+        } else {
+            return Err("Events Format is missing the required Text column".to_string());
+        }
+        for required in ["start", "end", "style"] {
+            if !columns.iter().any(|c| c == required) {
+                return Err(format!(
+                    "Events Format is missing the required {} column",
+                    capitalize(required)
+                ));
+            }
+        }
+        if !columns.iter().any(|c| c == "layer" || c == "marked") {
+            return Err("Events Format is missing the required Layer column".to_string());
+        }
+
+        let fields = splitn_commas(content, columns.len());
+        if fields.len() < columns.len() {
+            return Err(format!(
+                "Expected {} fields in event, got {}",
+                columns.len(),
+                fields.len()
+            ));
+        }
+        let field = |name: &str| -> Option<&[u8]> {
+            columns
+                .iter()
+                .position(|c| c == name)
+                .map(|i| trim_ascii_bytes(fields[i]))
+        };
+        let parse_i32 = |name: &str, what: &str| -> Result<i32, String> {
+            match field(name) {
+                None | Some([]) => Ok(0),
+                Some(v) => String::from_utf8_lossy(v)
+                    .parse()
+                    .map_err(|_| format!("Invalid {} value: {}", what, String::from_utf8_lossy(v))),
+            }
+        };
+        let layer = if columns.iter().any(|c| c == "layer") {
+            parse_i32("layer", "Layer")?
+        } else {
+            0
+        };
+        let start_text = field("start").unwrap_or(&[]);
+        let start: Time = String::from_utf8_lossy(start_text).parse().map_err(|e| {
+            format!(
+                "Invalid Start value {:?}: {}",
+                String::from_utf8_lossy(start_text),
+                e
+            )
+        })?;
+        let end_text = field("end").unwrap_or(&[]);
+        let end: Time = String::from_utf8_lossy(end_text).parse().map_err(|e| {
+            format!(
+                "Invalid End value {:?}: {}",
+                String::from_utf8_lossy(end_text),
+                e
+            )
+        })?;
+        let text_bytes = field("text").unwrap_or(&[]).to_vec();
+        let text = String::from_utf8_lossy(&text_bytes).into_owned();
+        let parsed_tags = OverrideTag::parse_from_text(&text);
+
+        Ok(Self {
+            event_type,
+            layer,
+            start,
+            end,
+            style: field("style")
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .unwrap_or_default(),
+            name: field("name")
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .unwrap_or_default(),
+            margin_l: parse_i32("marginl", "MarginL")?,
+            margin_r: parse_i32("marginr", "MarginR")?,
+            margin_v: parse_i32("marginv", "MarginV")?,
+            effect: field("effect")
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .unwrap_or_default(),
+            text,
+            parsed_tags,
+            source_text_bytes: Some(text_bytes),
         })
     }
 
@@ -245,6 +372,35 @@ fn capitalize(s: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn strip_prefix_ci_bytes<'a>(line: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    line.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &line[prefix.len()..])
+}
+
+fn splitn_commas(line: &[u8], max: usize) -> Vec<&[u8]> {
+    let mut fields = Vec::with_capacity(max);
+    let mut start = 0;
+    for (index, byte) in line.iter().enumerate() {
+        if *byte == b',' && fields.len() + 1 < max {
+            fields.push(&line[start..index]);
+            start = index + 1;
+        }
+    }
+    fields.push(&line[start..]);
+    fields
 }
 
 #[cfg(test)]

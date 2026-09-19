@@ -132,8 +132,11 @@ proofs, doc sync).
   threaded to the OpenType shaper (`kern` feature; `liga`/`clig` off
   under non-zero spacing, like libass). System-font discovery is
   explicit (`load_system_fonts`, `system-fonts` feature, never WASM).
-- **#27 YCbCr matrix**: parsed and validated; documented as not applicable to
-  this RGB pipeline.
+- **#27 YCbCr matrix (historical)**: the old audit claim that TV-range mapping
+  belonged inside the RGB compositor is superseded. Current code preserves all
+  libass matrix metadata, leaves raw RGBA colors untouched, and exposes
+  explicit conversion through `types::convert_ass_rgb` only when a destination
+  `VideoColorSpace` is supplied.
 - **#28 Drawing scale**: corrected to `res_scale / 2^(mode-1)` (was multiplied);
   `\p2` units render half the size of `\p1` units.
 - **#29 Drawing commands**: `n` continues the outline without closing (vs `m`
@@ -573,9 +576,10 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
   Devanagari) is generated from the licensed committed fonts. Alias matching
   now retains every face in a family rather than only the first. The isolated
   TTC-only libass fixture gates family/style selection and face-index shaping.
-- **YCbCr**: explicit `None`, `TV.601`, `TV.709`, `PC.601`, and `PC.709`
-  fixtures prove the RGB API boundary: TV modes map into 16–235; PC/None are
-  full-range; 601/709 coefficients require a downstream YCbCr video stage.
+- **YCbCr (historical reference note)**: the existing `ycbcr-*` FFmpeg frames
+  are host/video-conversion artifacts and are not used to claim raw libass
+  subtitle-color parity. Direct RGBA tests cover metadata pass-through; the
+  explicit converter covers downstream matrix/range handling.
 - **Legacy charsets**: Windows-1250/51/52/53/54/55/56/57/58, Thai,
   Shift-JIS, CP949, GBK, and Big5 byte-like runs decode before shaping;
   Unicode is preserved and invalid sequences use U+FFFD. Johab and

@@ -5,13 +5,16 @@ PlayResX: 384
 PlayResY: 216
 WrapStyle: 0
 ScaledBorderAndShadow: yes
+YCbCr Matrix: PC.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans Devanagari,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,2,10,10,10,1
+Style: Default,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
 Style: Box,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,0,0,0,0,100,100,0,0,3,6,0,5,10,10,10,1
 Style: Missing,NoSuchFamilyXYZ,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,नमस्ते दुनिया
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\an7\pos(24,30)\bord0\shad0\1c&H2080F0&\p1}m 0 0 l 90 0 l 90 38 l 0 38
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\an7\pos(147,30)\bord0\shad0\1c&HE03040&\p1}m 0 0 l 90 0 l 90 38 l 0 38
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\an7\pos(85,92)\bord0\shad0\1c&H30E070&\p1}m 0 0 l 90 0 l 90 38 l 0 38

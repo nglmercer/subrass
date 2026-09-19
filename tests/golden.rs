@@ -19,6 +19,8 @@ const VIDEO_H: u32 = 144;
 const HEADER: &str = "[Script Info]\nTitle: golden\nScriptType: v4.00+\nPlayResX: 384\nPlayResY: 216\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n";
 
 const DEFAULT_STYLE: &str = "Style: Default,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n";
+const DEFAULT_STYLE_INDIC: &str = "Style: Default,Noto Sans Devanagari,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,2,10,10,10,1\n";
+const COLLECTION_STYLES: &str = "Style: Default,Subrass One,32,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1\nStyle: CollectionBI,Subrass One,32,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,-1,0,0,100,100,0,0,1,0,0,7,10,10,10,1\nStyle: Indic,Noto Sans Devanagari,32,&H00FFFF00,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1\n";
 const BOX_STYLE: &str = "Style: Box,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,0,0,0,0,100,100,0,0,3,6,0,5,10,10,10,1\n";
 const MISSING_FONT_STYLE: &str = "Style: Missing,NoSuchFamilyXYZ,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n";
 
@@ -41,6 +43,28 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
         format!("Dialogue: {layer},0:00:00.00,0:00:05.00,{style},,0,0,0,{effect},{text}")
     };
     let one = |style: &str, text: &str| vec![ev(0, style, "", text)];
+    let ycbcr = || {
+        vec![
+            ev(
+                0,
+                "Default",
+                "",
+                "{\\an7\\pos(24,30)\\bord0\\shad0\\1c&H2080F0&\\p1}m 0 0 l 90 0 l 90 38 l 0 38",
+            ),
+            ev(
+                0,
+                "Default",
+                "",
+                "{\\an7\\pos(147,30)\\bord0\\shad0\\1c&HE03040&\\p1}m 0 0 l 90 0 l 90 38 l 0 38",
+            ),
+            ev(
+                0,
+                "Default",
+                "",
+                "{\\an7\\pos(85,92)\\bord0\\shad0\\1c&H30E070&\\p1}m 0 0 l 90 0 l 90 38 l 0 38",
+            ),
+        ]
+    };
     vec![
         ("plain".to_string(), one("Default", "Hello golden"), 1000),
         (
@@ -540,7 +564,11 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             "transform-iclip".to_string(),
             one(
                 "Default",
-                "{\\t(0,2000,\\iclip(120,80,300,180))}Inverse",
+                // Leave a meaningful part of the glyphs outside the
+                // interpolated inverse rectangle. The old y2=180 sample
+                // retained only a two-row AA tail, so its bbox measured
+                // rasterizer hinting instead of clip interpolation.
+                "{\\t(0,2000,\\iclip(120,80,300,140))}Inverse",
             ),
             1000,
         ),
@@ -572,13 +600,30 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
         ),
         (
             // Non-default PlayRes exercises the transform clip canvas
-            // (full script canvas, not a hard-coded default).
+            // (full script canvas, not a hard-coded default). Position and
+            // clip move together across a visible center-aligned label.
             "transform-nondefault-playres".to_string(),
             one(
                 "Default",
-                "{\\t(0,2000,\\clip(100,100,700,500))}HiRes",
+                "{\\an5\\pos(880,360)\\t(0,2000,\\clip(700,250,880,470))}HiRes transform",
             ),
             1000,
+        ),
+        (
+            "transform-nondefault-playres-early".to_string(),
+            one(
+                "Default",
+                "{\\an5\\pos(880,360)\\t(0,2000,\\clip(700,250,880,470))}HiRes transform",
+            ),
+            250,
+        ),
+        (
+            "transform-nondefault-playres-late".to_string(),
+            one(
+                "Default",
+                "{\\an5\\pos(880,360)\\t(0,2000,\\clip(700,250,880,470))}HiRes transform",
+            ),
+            1750,
         ),
         (
             "pbo-positive".to_string(),
@@ -627,8 +672,8 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             1000,
         ),
         (
-            // DejaVu Sans has no Devanagari: both sides render .notdef,
-            // gating missing-glyph advance parity.
+            // The harness explicitly loads the committed OFL Noto face;
+            // libass receives the same file through `fontsdir`.
             "indic".to_string(),
             one("Default", "नमस्ते दुनिया"),
             1000,
@@ -654,23 +699,60 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             ),
             1000,
         ),
+        (
+            // A single committed TTC supplies the renamed Latin regular
+            // and bold-italic faces plus Devanagari. Separate positioned
+            // events make every selected collection face visible.
+            "font-collection".to_string(),
+            vec![
+                ev(0, "Default", "", "{\\pos(20,20)}office AV"),
+                ev(0, "CollectionBI", "", "{\\pos(20,65)}BoldItalic"),
+                ev(0, "Indic", "", "{\\pos(20,110)}नमस्ते"),
+            ],
+            1000,
+        ),
+        ("ycbcr-none".to_string(), ycbcr(), 1000),
+        ("ycbcr-tv601".to_string(), ycbcr(), 1000),
+        ("ycbcr-tv709".to_string(), ycbcr(), 1000),
+        ("ycbcr-pc601".to_string(), ycbcr(), 1000),
+        ("ycbcr-pc709".to_string(), ycbcr(), 1000),
     ]
 }
 
 fn assemble(name: &str, events: &[String]) -> String {
-    let (header, default, box_style, missing) = if name == "transform-nondefault-playres" {
+    let (header, default, box_style, missing) = if name.starts_with("transform-nondefault-playres")
+    {
         (
             HEADER_720P,
             DEFAULT_STYLE_72,
             BOX_STYLE_72,
             MISSING_FONT_STYLE_72,
         )
+    } else if name == "font-collection" {
+        (HEADER, COLLECTION_STYLES, BOX_STYLE, MISSING_FONT_STYLE)
+    } else if name == "indic" {
+        (HEADER, DEFAULT_STYLE_INDIC, BOX_STYLE, MISSING_FONT_STYLE)
     } else if name == "kerning" {
         (HEADER_KERNING, DEFAULT_STYLE, BOX_STYLE, MISSING_FONT_STYLE)
     } else {
         (HEADER, DEFAULT_STYLE, BOX_STYLE, MISSING_FONT_STYLE)
     };
-    let mut doc = String::from(header);
+    let matrix = match name {
+        "ycbcr-none" => Some("None"),
+        "ycbcr-tv601" => Some("TV.601"),
+        "ycbcr-tv709" => Some("TV.709"),
+        "ycbcr-pc601" => Some("PC.601"),
+        "ycbcr-pc709" => Some("PC.709"),
+        _ => None,
+    };
+    let mut doc = match matrix {
+        Some(matrix) => header.replacen(
+            "ScaledBorderAndShadow: yes\n",
+            &format!("ScaledBorderAndShadow: yes\nYCbCr Matrix: {matrix}\n"),
+            1,
+        ),
+        None => String::from(header),
+    };
     doc.push_str(default);
     doc.push_str(box_style);
     doc.push_str(missing);
@@ -743,6 +825,7 @@ fn write_artifacts(name: &str, actual: &[u8], expected: &[u8]) {
 fn golden_images_match() {
     let dir = golden_dir();
     let update = std::env::var("UPDATE_GOLDENS").is_ok();
+    let filter = std::env::var("GOLDEN_FILTER").ok();
     if update {
         std::fs::create_dir_all(&dir).expect("create tests/golden");
     }
@@ -751,8 +834,31 @@ fn golden_images_match() {
     let mut manifest = String::from("{\"video\": [256, 144], \"fixtures\": {\n");
     let mut failures = Vec::new();
     for (name, events, time_ms) in fixtures() {
+        if filter
+            .as_deref()
+            .is_some_and(|names| !names.split(',').any(|candidate| candidate.trim() == name))
+        {
+            continue;
+        }
         let ass = assemble(&name, &events);
         let mut renderer = SubtitleRenderer::new(&ass).expect("fixture parses");
+        if name == "indic" {
+            renderer
+                .load_font(
+                    "NotoSansDevanagari.ttf",
+                    include_bytes!("../fonts/NotoSansDevanagari.ttf"),
+                )
+                .expect("load committed Indic fixture font");
+        }
+        if name == "font-collection" {
+            renderer
+                .load_font(
+                    "SubrassTestCollection.ttc",
+                    include_bytes!("../fonts/SubrassTestCollection.ttc"),
+                )
+                .expect("load committed collection fixture font");
+            assert_eq!(renderer.font_count(), 4, "fallback plus three TTC faces");
+        }
         renderer
             .set_video_size(VIDEO_W, VIDEO_H)
             .expect("video size");
@@ -782,7 +888,7 @@ fn golden_images_match() {
             failures.push(stats);
         }
     }
-    if update {
+    if update && filter.is_none() {
         let manifest = manifest.trim_end_matches(",\n").to_string() + "\n}}\n";
         std::fs::write(dir.join("manifest.json"), &manifest).expect("write manifest");
     }

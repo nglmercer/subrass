@@ -85,6 +85,8 @@
   "transform-nested": {"time_ms": 2000},
   "transform-nested-accel": {"time_ms": 2000},
   "transform-nondefault-playres": {"time_ms": 1000},
+  "transform-nondefault-playres-early": {"time_ms": 250},
+  "transform-nondefault-playres-late": {"time_ms": 1750},
   "pbo-positive": {"time_ms": 1000},
   "pbo-negative": {"time_ms": 1000},
   "pbo-mixed": {"time_ms": 1000},
@@ -95,5 +97,11 @@
   "indic": {"time_ms": 1000},
   "ligature": {"time_ms": 1000},
   "kerning": {"time_ms": 1000},
-  "fe-charset": {"time_ms": 1000}
+  "fe-charset": {"time_ms": 1000},
+  "font-collection": {"time_ms": 1000},
+  "ycbcr-none": {"time_ms": 1000},
+  "ycbcr-tv601": {"time_ms": 1000},
+  "ycbcr-tv709": {"time_ms": 1000},
+  "ycbcr-pc601": {"time_ms": 1000},
+  "ycbcr-pc709": {"time_ms": 1000}
 }}

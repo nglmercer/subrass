@@ -23,7 +23,9 @@ Targets:
   (subdivision/contour caps stay bounded).
 - `render`: full `SubtitleRenderer` frame render over hostile documents
   (extreme positions/clips/rotations/shears/blurs/dimensions degrade to
-  empty output or errors, never panic).
+  empty output or errors, never panic). This path includes legacy charset
+  decoding, OpenType shaping/bidi, collection-face selection, nested
+  transforms, and glyph/clip allocation limits.
 
 Short smoke runs (build + 20s per target) are CI-gated
 (`fuzz-smoke` job); run longer sessions locally for real coverage.

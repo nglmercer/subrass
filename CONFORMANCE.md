@@ -21,10 +21,10 @@ Different rasterizers never match byte-exact, so the harness compares structure:
 
 - **Ink masks**: ours keys on alpha > 0 (a black outline/shadow/opaque box is
   real ink even with zero RGB); the opaque reference frame keys on raw RGB > 0.
-- **Range normalization**: every stored reference frame spans 16..235 (opaque
-  black renders as 16, opaque white as 235 — the ffmpeg filter chain blends in
-  limited-range YUV). The harness expands reference channels with
-  `(v - 16) * 255 / 219` before comparing intensities.
+- **Range normalization**: legacy fixtures without an explicit matrix are
+  expanded from 16..235 with `(v - 16) * 255 / 219`. The five explicit YCbCr
+  fixtures compare raw RGB instead, so they gate the matrix/range semantics
+  themselves rather than normalizing those semantics away.
 - **Intensity on 4x4 block averages**: absorbs ~1px placement/AA differences
   between unhinted `ab_glyph` coverage and hinted FreeType outlines while
   color/alpha/coverage bugs still fail.
@@ -34,7 +34,7 @@ Gates: bbox IoU ≥ 0.70, ink-count ratio within [0.5, 2.0], block mean error
 (`tests/golden.rs`, byte-exact self-comparison) provide exact regression
 detection on top.
 
-## Latest reference results (87 pass, 7 known-divergent measured, 3 open failures, 0 pending)
+## Latest reference results (98 gated pass, 7 known-divergent measured, 0 open failures, 0 pending)
 
 | Fixture | IoU | Ink ratio | Mean | Hard |
 |---|---|---|---|---|
@@ -65,7 +65,8 @@ detection on top.
 | fe-charset | 0.954 | 0.92 | 13.15 | 0.0089 |
 | font-fallback | 0.856 | 0.80 | 57.80 | 0.5043 |
 | hebrew | 0.900 | 0.94 | 7.85 | 0.0000 |
-| indic | 0.523 | 1.55 | 65.04 | 0.7079 |
+| font-collection | 0.986 | 1.22 | 8.16 | 0.0000 |
+| indic | 0.867 | 1.33 | 7.06 | 0.0000 |
 | karaoke | 0.939 | 0.94 | 12.04 | 0.0280 |
 | karaoke-early | 0.939 | 0.94 | 10.90 | 0.0132 |
 | karaoke-kf | 0.918 | 0.93 | 12.25 | 0.0000 |
@@ -117,10 +118,13 @@ detection on top.
 | transform-clip | 0.975 | 0.98 | 10.53 | 0.0000 |
 | transform-discrete | 0.913 | 0.95 | 15.21 | 0.0000 |
 | transform-fade | 0.945 | 0.89 | 11.86 | 0.0130 |
-| transform-iclip | 0.649 | 0.61 | 11.51 | 0.0000 |
+| transform-iclip | 0.913 | 0.92 | 11.23 | 0.0000 |
 | transform-karaoke | 0.939 | 0.95 | 12.38 | 0.0000 |
 | transform-nested | 0.887 | 1.00 | 9.60 | 0.0000 |
 | transform-nested-accel | 0.921 | 0.93 | 7.95 | 0.0000 |
+| transform-nondefault-playres | 1.000 | 0.82 | 6.48 | 0.0000 |
+| transform-nondefault-playres-early | 0.990 | 0.81 | 5.65 | 0.0000 |
+| transform-nondefault-playres-late | 0.967 | 0.86 | 8.11 | 0.0227 |
 | transform-org | 0.967 | 1.03 | 8.05 | 0.0000 |
 | transform-pos | 0.945 | 0.93 | 10.97 | 0.0286 |
 | transform-q | 0.958 | 0.94 | 13.06 | 0.0042 |
@@ -134,15 +138,17 @@ detection on top.
 | wrap-mixed | 0.377 | 1.32 | 58.34 | 0.5165 |
 | wrap-nbsp | 0.946 | 0.91 | 12.64 | 0.0000 |
 | wrap-zwsp | 0.373 | 0.91 | 66.44 | 0.6212 |
+| ycbcr-none | 0.985 | 0.94 | 2.54 | 0.0000 |
+| ycbcr-pc601 | 0.985 | 0.94 | 2.54 | 0.0000 |
+| ycbcr-pc709 | 0.985 | 0.94 | 2.54 | 0.0000 |
+| ycbcr-tv601 | 0.985 | 0.94 | 2.50 | 0.0000 |
+| ycbcr-tv709 | 0.985 | 0.94 | 2.50 | 0.0000 |
 
-Open failures (not passing, not known-divergent): `indic` (reference used a
-fontconfig fallback Devanagari font, so it is environment-dependent; the fix
-is an embedded-Noto fixture plus a regenerated reference),
-`transform-iclip` (one faint AA-tail row: libass vector strokes leave levels
-1–5 where bitmap dilation cuts hard; bbox IoU on a 2-row sliver amplifies it),
-`transform-nondefault-playres` (both sides render blank; the fixture proves
-nothing and needs retargeting plus a regenerated reference). No
-`font-collection` reference fixture exists yet.
+Open failures: none. `indic` loads the committed OFL Noto file in both
+renderers; `transform-iclip` retains meaningful glyph area; and the
+non-default-PlayRes transform has visible early/mid/late samples whose
+committed libass frames are asserted to differ. The TTC fixture uses an
+isolated collection-only libass fonts directory.
 
 Known-divergent (measured, not gated): `effect-banner`, `effect-scroll`
 (libass ignores legacy effects and renders static text), `font-fallback`
@@ -175,7 +181,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `ScaledBorderAndShadow` yes/no (unscaled = 1:1 video px: VSFilter/legacy-libass; current libass without storage size ignores the flag) | ✓ | `test_scaled_*` | — | Supported |
 | `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators; unset = video size) | ✓ | `test_layout_res_drives_unscaled_borders_like_libass` | — | Supported |
 | `Kerning:` header (default off, like libass `calloc` track); `liga`/`clig` off under non-zero `\fsp` | ✓ | `test_opentype_kerning_matches_libass_default_off`, `test_kerning_header_parses_like_libass_bool` | alignment G+L (mean_err 8.87) | Supported |
-| OpenType shaping (`harfrust` GSUB/GPOS + bidi visual runs; `.ttc`/`.otc` all faces; explicit native system fonts) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_system_font_discovery_is_explicit_and_idempotent` | — | Supported |
+| OpenType shaping (`harfrust` GSUB/GPOS + bidi visual runs; `.ttc`/`.otc` all faces; explicit native system fonts) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_system_font_discovery_is_explicit_and_idempotent` | arabic/hebrew/mixed-bidi/indic/font-collection G+L | Supported |
 | `\clip`, `\iclip` rect + vector (separate state: later rect replaces + flips mode, first vector retained, both render) | ✓ | `test_clip_libass_rect_vector_semantics` | clip/vector-clip/rect-vector-clip/vector-rect-clip/vector-vector-clip G+L | Supported |
 | Drawings `\pN`, `\pbo`, `m n l b s p c` (bbox min preserved: advance = width, ink at pen + min; `\kf` splits at ink-left + frac × advance) | ✓ | `test_drawing_preserves_min_*`, `test_pbo_shifts_drawing`, `test_kf_drawing_split_at_fractional_scale` | drawing G+L (IoU 0.828), reset-drawing G+L (IoU 0.889) | Supported (B-splines are subdivided; `\pbo` uses libass asc/desc line metrics) |
 | `\fad`, `\fade` (first fade tag wins, libass `PARSED_FADE`) | ✓ | `test_fad_fade_first_wins_both_orders` | fade/fad-fade/fade-fad G+L | Supported |
@@ -187,10 +193,11 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\an`, legacy `\a` (first tag wins, libass `PARSED_A`; `\a4`/`\a8` quirk; bare/out-of-range resets to style) | ✓ | `test_alignment_first_tag_applies_event_wide`, `test_parse_legacy_a_quirk_and_range` | alignment/an-an/a-an/an-a G+L | Supported |
 | `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
-| `\fe` (legacy-byte charset bridge; Unicode text render-neutral; parsed/stored/reset) | ✓ | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_fe_encoding_is_render_neutral`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Supported (byte decoding; no charset-based font linking) |
+| `\fe` (legacy-byte charset bridge; Unicode text preserved; parsed/stored/reset) | ✓ | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_fe_encoding_is_render_neutral`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Supported for Windows-125x, Shift-JIS, CP949, GBK, Big5, Thai; invalid bytes become U+FFFD. Johab/font linking unsupported |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
-| Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning G+L; indic G, L open (fallback-font reference) | Supported; Indic reference pending an embedded-Noto fixture |
-| `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_invalid_font_collections_rejected` | — | Supported (no reference fixture yet) |
+| Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning/indic G+L | Supported |
+| `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_committed_collection_matches_styles_and_preserves_face_indices` | font-collection G+L | Supported; regular/bold-italic/Indic face indices gated |
+| `YCbCr Matrix` RGB behavior | ✓ | `ycbcr_rgb_reference_semantics_are_explicit` | ycbcr-{none,tv601,tv709,pc601,pc709} G+L | Supported at RGB boundary; 601/709 coefficient distinction belongs to downstream YCbCr conversion |
 
 ## Known divergences (intentional)
 
@@ -206,12 +213,9 @@ the harness reports it as pending (never as a pass) in normal mode, and
    (libass blurs combined-bitmap runs, subrass the whole event buffer,
    so minor accumulation differences remain at glyph overlaps; inside
    gate thresholds: border-shadow IoU 0.891).
-5. `\fe` does not remap charsets (parses, stores, resets, render-neutral;
-   probe-grounded: `\fe129` matches default rendering both here and in
-   libass, but non-Unicode byte remapping is not implemented). Decorations
-   now match libass: per-glyph underline/strikeout bars follow shear and
-   rotation, keep primary color under `\kf` swipes, and use post/OS/2
-   metrics; only minor AA edge differences remain.
+5. `\fe` has no charset-based font linking and Johab remains Unicode-neutral;
+   supported byte streams decode before shaping, invalid sequences become
+   U+FFFD, and already-valid Unicode is never re-encoded.
 6. No implicit system-font discovery: WASM builds stay deterministic
    (built-in fallback, `[Fonts]` auto-loads, and explicit `load_font`
    faces in load order). Native builds may opt in with the
@@ -239,7 +243,7 @@ Shaping uses `harfrust` for GSUB/GPOS substitution/positioning plus
 wrapping, layout, karaoke, and rendering all consume the same shaped
 advances. Gated by `test_opentype_shaping_uses_gsub_bidi_and_marks`
 and the arabic/hebrew/mixed-bidi/ligature/kerning fixtures (G+L);
-`indic` renders real Devanagari through Noto (`fonts/`, OFL) with
-`test_noto_advances_use_win_divisor` pinning the FreeType Win-metrics
-scale, but its libass reference still needs an embedded-Noto fixture
-plus regeneration (see open failures above).
+`indic` renders real Devanagari through the same committed Noto bytes in
+both renderers and is gated. `test_noto_advances_use_win_divisor` pins the
+FreeType Win-metrics scale; `font-collection` additionally gates shaping
+from the preserved TTC face index.

@@ -204,7 +204,7 @@ fn reference_ink_mask(ref_rgba: &[u8]) -> Vec<bool> {
         .collect()
 }
 
-fn compare(ours_rgba: &[u8], ref_rgba: &[u8], w: u32) -> Option<Stats> {
+fn compare(ours_rgba: &[u8], ref_rgba: &[u8], w: u32, normalize_reference: bool) -> Option<Stats> {
     // Ink masks: our side keys on alpha (a black outline, shadow, or
     // opaque box is real ink even though its RGB is zero); the
     // reference frame is opaque, so it keys on deviation from its
@@ -224,9 +224,21 @@ fn compare(ours_rgba: &[u8], ref_rgba: &[u8], w: u32) -> Option<Stats> {
         .chunks_exact(4)
         .flat_map(|p| {
             [
-                normalize_ref(p[0]),
-                normalize_ref(p[1]),
-                normalize_ref(p[2]),
+                if normalize_reference {
+                    normalize_ref(p[0])
+                } else {
+                    p[0]
+                },
+                if normalize_reference {
+                    normalize_ref(p[1])
+                } else {
+                    p[1]
+                },
+                if normalize_reference {
+                    normalize_ref(p[2])
+                } else {
+                    p[2]
+                },
             ]
         })
         .collect();
@@ -301,6 +313,23 @@ fn libass_reference_comparison() {
         let ass = std::fs::read_to_string(golden_dir.join(format!("{name}.ass")))
             .expect("golden fixture");
         let mut renderer = SubtitleRenderer::new(&ass).expect("fixture parses");
+        if name == "indic" {
+            renderer
+                .load_font(
+                    "NotoSansDevanagari.ttf",
+                    include_bytes!("../fonts/NotoSansDevanagari.ttf"),
+                )
+                .expect("load committed Indic fixture font");
+        }
+        if name == "font-collection" {
+            renderer
+                .load_font(
+                    "SubrassTestCollection.ttc",
+                    include_bytes!("../fonts/SubrassTestCollection.ttc"),
+                )
+                .expect("load committed collection fixture font");
+            assert_eq!(renderer.font_count(), 4, "fallback plus three TTC faces");
+        }
         renderer.set_video_size(256, 144).expect("video size");
         renderer.render_frame(time_ms).expect("render");
         let ours = renderer.frame_data().to_vec();
@@ -323,7 +352,11 @@ fn libass_reference_comparison() {
                 continue;
             }
         };
-        let Some(stats) = compare(&ours, &ref_bytes, 256) else {
+        // The legacy corpus omits `YCbCr Matrix`, and FFmpeg/libass emits
+        // its subtitle colors through TV range; normalize that historical
+        // corpus back to full RGB. Explicit YCbCr fixtures instead test the
+        // raw RGB API semantics themselves and must remain unnormalized.
+        let Some(stats) = compare(&ours, &ref_bytes, 256, !name.starts_with("ycbcr-")) else {
             failures.push(format!("{name}: one side rendered blank"));
             continue;
         };
@@ -464,6 +497,53 @@ fn harness_manifest_and_references_are_consistent() {
         problems.len(),
         problems.join("\n")
     );
+}
+
+#[test]
+fn nondefault_playres_samples_are_visible_and_change() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let load = |name: &str| {
+        std::fs::read(root.join(format!("tests/reference/{name}.rgba")))
+            .expect("committed libass sample")
+    };
+    let early = load("transform-nondefault-playres-early");
+    let mid = load("transform-nondefault-playres");
+    let late = load("transform-nondefault-playres-late");
+    for (name, frame) in [("early", &early), ("mid", &mid), ("late", &late)] {
+        assert!(
+            reference_ink_mask(frame).into_iter().any(|ink| ink),
+            "{name} non-default-PlayRes sample must contain visible ink"
+        );
+    }
+    assert_ne!(
+        early, mid,
+        "early and mid samples must exercise interpolation"
+    );
+    assert_ne!(
+        mid, late,
+        "mid and late samples must exercise interpolation"
+    );
+}
+
+#[test]
+fn ycbcr_rgb_reference_semantics_are_explicit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let load = |name: &str| {
+        std::fs::read(root.join(format!("tests/reference/{name}.rgba")))
+            .expect("committed YCbCr libass sample")
+    };
+    let none = load("ycbcr-none");
+    let tv601 = load("ycbcr-tv601");
+    let tv709 = load("ycbcr-tv709");
+    let pc601 = load("ycbcr-pc601");
+    let pc709 = load("ycbcr-pc709");
+    assert_eq!(none, pc601, "PC.601 is full-range RGB in this API");
+    assert_eq!(none, pc709, "PC.709 is full-range RGB in this API");
+    assert_eq!(
+        tv601, tv709,
+        "601/709 coefficients need a YCbCr video stage"
+    );
+    assert_ne!(none, tv601, "TV range must map RGB into studio swing");
 }
 
 #[test]

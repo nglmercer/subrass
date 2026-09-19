@@ -1,7 +1,7 @@
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont};
 use encoding_rs::{
-    Encoding, BIG5, EUC_KR, GBK, ISO_8859_2, ISO_8859_7, ISO_8859_8, SHIFT_JIS, WINDOWS_1251,
-    WINDOWS_1252, WINDOWS_1254, WINDOWS_1256, WINDOWS_1257, WINDOWS_1258, WINDOWS_874,
+    Encoding, BIG5, EUC_KR, GBK, SHIFT_JIS, WINDOWS_1250, WINDOWS_1251, WINDOWS_1252, WINDOWS_1253,
+    WINDOWS_1254, WINDOWS_1255, WINDOWS_1256, WINDOWS_1257, WINDOWS_1258, WINDOWS_874,
 };
 use harfrust::{
     BufferClusterLevel, Direction, Feature, FontRef, ShapeOptions, ShaperData, Tag, UnicodeBuffer,
@@ -71,27 +71,26 @@ pub struct ShapingFont<'a> {
 
 /// Map the numeric ASS/SSA `Encoding`/`\fe` value to the corresponding
 /// Windows code page.  Subtitle text arrives here as Rust Unicode, so the
-/// only safe compatibility bridge is to reinterpret legacy single-byte
-/// values (`U+0000..U+00FF`) while leaving already-Unicode scripts intact.
-/// Multibyte legacy characters must already have been decoded by the caller;
-/// this bridge still handles their ASCII-compatible portions correctly.
+/// compatibility bridge reinterprets contiguous byte-like Unicode values
+/// (`U+0000..U+00FF`) as the original byte stream, including multibyte
+/// encodings, while leaving already-Unicode scripts intact.
 fn ass_encoding(value: i32) -> Option<&'static Encoding> {
     match value {
         0 | 1 | 77 => Some(WINDOWS_1252),
         128 => Some(SHIFT_JIS),
         129 => Some(EUC_KR),
-        130 => Some(WINDOWS_1252), // Johab is not in encoding_rs.
+        130 => None, // Johab is not provided by encoding_rs.
         134 => Some(GBK),
         136 => Some(BIG5),
-        161 => Some(ISO_8859_7),
+        161 => Some(WINDOWS_1253),
         162 => Some(WINDOWS_1254),
         163 => Some(WINDOWS_1258),
-        177 => Some(ISO_8859_8),
+        177 => Some(WINDOWS_1255),
         178 => Some(WINDOWS_1256),
         186 => Some(WINDOWS_1257),
         204 => Some(WINDOWS_1251),
         222 => Some(WINDOWS_874),
-        238 => Some(ISO_8859_2),
+        238 => Some(WINDOWS_1250),
         _ => None,
     }
 }
@@ -341,19 +340,17 @@ pub fn cjk_break_between(prev: char, next: char) -> bool {
     true
 }
 
-/// Shaping policy: one cluster per Unicode scalar value — no ligatures,
-/// kerning, mark reordering, or complex-script shaping. Advances come
-/// from the face that provides each glyph; `\fsp` spacing is added
-/// between glyphs (the trailing unit is stripped per line). Per-glyph
-/// fallback runs are tracked via [`ShapedGlyph::font_id`]; wrap and
-/// karaoke measurement use the same fallback-aware widths as shaping.
+/// Text shaping entry points. The scalar fallback path remains available for
+/// faces without OpenType bytes; normal rendering uses the HarfBuzz-compatible
+/// GSUB/GPOS+bidi path below, and layout/rendering share its cluster advances.
 pub struct TextShaper;
 
 impl TextShaper {
     /// Apply an ASS charset to the legacy byte-like portion of subtitle text.
-    /// ASCII and non-legacy Unicode scalars are preserved.  Unknown and
-    /// Symbol encodings intentionally remain Unicode-neutral because there
-    /// is no portable code-page mapping for them in the current renderer.
+    /// ASCII and non-legacy Unicode scalars are preserved. Unknown, Symbol,
+    /// and Johab encodings intentionally remain Unicode-neutral. Invalid
+    /// byte sequences decode with the WHATWG replacement character, while a
+    /// following real Unicode scalar starts a fresh, unaffected run.
     pub fn decode_font_encoding(text: &str, encoding: i32) -> String {
         let Some(codec) = ass_encoding(encoding) else {
             return text.to_string();
@@ -364,12 +361,8 @@ impl TextShaper {
             if bytes.is_empty() {
                 return;
             }
-            let (decoded, had_errors) = codec.decode_without_bom_handling(bytes);
-            if had_errors {
-                output.extend(bytes.iter().copied().map(char::from));
-            } else {
-                output.push_str(&decoded);
-            }
+            let (decoded, _) = codec.decode_without_bom_handling(bytes);
+            output.push_str(&decoded);
             bytes.clear();
         };
         for ch in text.chars() {
@@ -1024,8 +1017,22 @@ mod tests {
         assert_eq!(TextShaper::decode_font_encoding("\u{3b1}", 161), "α");
         // A real Unicode scalar outside the legacy-byte bridge is left alone.
         assert_eq!(TextShaper::decode_font_encoding("日本語", 128), "日本語");
+        // Windows single-byte charsets (not ISO lookalikes): bytes whose
+        // mappings differ catch accidental regressions to ISO-8859 tables.
+        assert_eq!(TextShaper::decode_font_encoding("\u{80}", 161), "€");
+        assert_eq!(TextShaper::decode_font_encoding("\u{80}", 177), "€");
+        assert_eq!(TextShaper::decode_font_encoding("\u{80}", 238), "€");
+        // Multibyte runs decode as one byte stream; incomplete sequences use
+        // U+FFFD and never consume or corrupt later genuine Unicode.
+        assert_eq!(TextShaper::decode_font_encoding("\u{a4}\u{40}", 136), "一");
+        assert_eq!(TextShaper::decode_font_encoding("\u{82}α", 128), "�α");
         // Symbol/unknown values have no portable code-page mapping here.
         assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 2), "ð");
+        // Johab is not provided by encoding_rs and remains explicitly neutral.
+        assert_eq!(
+            TextShaper::decode_font_encoding("\u{84}\u{41}", 130),
+            "\u{84}A"
+        );
         assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 999), "ð");
     }
 
@@ -1441,9 +1448,9 @@ mod tests {
     }
 
     #[test]
-    fn test_shaping_is_scalar_per_glyph() {
-        // No ligation, no kerning, no cluster merging: one glyph per
-        // scalar, spacing between glyphs, trailing unit stripped.
+    fn test_scalar_fallback_is_one_glyph_per_scalar() {
+        // This exercises the deliberately simple `shape` fallback, not the
+        // normal HarfRust path. It remains one glyph per Unicode scalar.
         let font = fallback_font();
         let shaped = TextShaper::shape(
             "fi A",

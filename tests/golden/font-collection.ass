@@ -8,10 +8,14 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans Devanagari,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,2,10,10,10,1
+Style: Default,Subrass One,32,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1
+Style: CollectionBI,Subrass One,32,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,-1,0,0,100,100,0,0,1,0,0,7,10,10,10,1
+Style: Indic,Noto Sans Devanagari,32,&H00FFFF00,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,0,0,7,10,10,10,1
 Style: Box,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,0,0,0,0,100,100,0,0,3,6,0,5,10,10,10,1
 Style: Missing,NoSuchFamilyXYZ,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,नमस्ते दुनिया
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\pos(20,20)}office AV
+Dialogue: 0,0:00:00.00,0:00:05.00,CollectionBI,,0,0,0,,{\pos(20,65)}BoldItalic
+Dialogue: 0,0:00:00.00,0:00:05.00,Indic,,0,0,0,,{\pos(20,110)}नमस्ते

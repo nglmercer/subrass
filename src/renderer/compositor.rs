@@ -94,6 +94,11 @@ pub struct ResolvedStyle {
     /// Script `Kerning:` flag (default off, like libass): enables the
     /// OpenType `kern` feature during shaping.
     pub kerning: bool,
+    /// In the RGB output API, libass maps TV-range script colors from
+    /// full-range RGB into 16..235. The 601/709 coefficient distinction
+    /// belongs to a later RGB<->YCbCr video conversion, which this renderer
+    /// deliberately does not perform; PC-range and None stay unchanged.
+    pub tv_range_colors: bool,
 }
 
 /// Vector clip shape in script coordinates with a drawing scale.
@@ -1990,6 +1995,30 @@ impl Compositor {
         }
     }
 
+    /// Map an ASS full-range RGB color into studio swing. This is the
+    /// observable libass behavior for `YCbCr Matrix: TV.*` when the render
+    /// target itself is RGB: 0..255 becomes 16..235, rounded to nearest.
+    fn tv_range_color(mut color: Color, enabled: bool) -> Color {
+        if enabled {
+            let map = |value: u8| -> u8 { ((u32::from(value) * 219 + 127) / 255 + 16) as u8 };
+            color.red = map(color.red);
+            color.green = map(color.green);
+            color.blue = map(color.blue);
+        }
+        color
+    }
+
+    fn apply_output_color_range(resolved: &mut ResolvedStyle) {
+        if !resolved.tv_range_colors {
+            return;
+        }
+        resolved.color = Self::tv_range_color(resolved.color, true);
+        resolved.secondary_color = Self::tv_range_color(resolved.secondary_color, true);
+        resolved.outline_color = Self::tv_range_color(resolved.outline_color, true);
+        resolved.shadow_color = Self::tv_range_color(resolved.shadow_color, true);
+        resolved.back_color = Self::tv_range_color(resolved.back_color, true);
+    }
+
     /// Interpolate between two colors
     fn interpolate_color(from: Color, to: Color, t: f64) -> Color {
         let t = t.clamp(0.0, 1.0);
@@ -2507,6 +2536,7 @@ impl Compositor {
             blur: 0.0,
             scaled_border_and_shadow: true,
             kerning: false,
+            tv_range_colors: false,
         };
 
         // Apply override tags (skip Transform tags - they're handled separately)
@@ -3012,9 +3042,10 @@ impl Compositor {
 
         for segment in segments {
             let skipped = segment.text.is_empty();
-            let seg_resolved = Self::resolve_segment_style(
+            let mut seg_resolved = Self::resolve_segment_style(
                 resolved, segment, event, styles, time_ms, start_ms, end_ms,
             );
+            Self::apply_output_color_range(&mut seg_resolved);
             let font_match = font_manager.find_font_with_weight(
                 &seg_resolved.font_name,
                 seg_resolved.font_weight,
@@ -3590,7 +3621,8 @@ impl Compositor {
         // only affects the shadow. Boxes stay axis-aligned under
         // rotation (references do not rotate them; text may spill).
         if resolved.border_style == 3 {
-            let box_color = resolved.outline_color.to_ass_components();
+            let box_color = Self::tv_range_color(resolved.outline_color, resolved.tv_range_colors)
+                .to_ass_components();
             let clamp_i32 = |v: f64| {
                 finite_to_i32(v.clamp(f64::from(i32::MIN), f64::from(i32::MAX))).unwrap_or(0)
             };
@@ -3619,7 +3651,8 @@ impl Compositor {
             // Box shadow (references shadow the padded box): same
             // offset/color model as glyph shadows, drawn first so all
             // boxes paint over all shadows.
-            let shadow_c = resolved.shadow_color.to_ass_components();
+            let shadow_c = Self::tv_range_color(resolved.shadow_color, resolved.tv_range_colors)
+                .to_ass_components();
             let shadow_fill = [
                 shadow_c[0],
                 shadow_c[1],
@@ -5702,11 +5735,9 @@ mod tests {
 
     #[test]
     fn test_fe_encoding_is_render_neutral() {
-        // `\fe` parses and stores (libass parity at the tag level),
-        // but charset remapping stays partial by design: shaping
-        // consumes Unicode text, so the tag must not change
-        // rendering. Byte-identical frames pin the neutrality (see
-        // the support matrix).
+        // ASCII is shared by the supported Windows encodings, so a charset
+        // switch must be byte-identical for this text. Legacy byte-like runs
+        // are decoded before shaping; genuine Unicode stays Unicode.
         let base = render_text("Hello", 1000);
         let tagged = render_text("{\\fe129}Hello", 1000);
         assert_eq!(base.as_bytes(), tagged.as_bytes());
@@ -6960,7 +6991,7 @@ mod tests {
         // \fax1 slants each glyph horizontally first, and the 90°
         // rotation turns that extra width into extra HEIGHT: the
         // column must grow TALLER with width roughly unchanged.
-        // (temp_plan #8 claimed post-rotation shear; that claim was
+        // (#8 claimed post-rotation shear; that claim was
         // wrong — verified against libass source — so this test pins
         // the reference pre-rotation order instead.)
         // Centered (\an5) so rotation cannot push ink off-screen and
@@ -7221,7 +7252,7 @@ mod tests {
         let second =
             Compositor::resolve_segment_style(&resolved, &segments[1], &event, &[], 0, 0, 2000);
         assert_eq!(second.font_encoding, 1);
-        // \fe renders (no charset remapping, but never breaks shaping).
+        // A charset switch still renders normally after decoding.
         let buf = render_text("{\\fe128}Hi", 1000);
         assert!(ink_bbox(&buf).is_some());
     }

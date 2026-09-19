@@ -45,9 +45,8 @@ pub enum OverrideTag {
     /// Bare `\fs` (no argument): reset to the event style size (libass).
     FontSizeReset,
     LetterSpacing(f64),
-    /// `\fe<id>` font encoding/charset override (stored in the resolved
-    /// style; shaping stays Unicode-based, so charset remapping itself
-    /// is partial — see the support matrix).
+    /// `\fe<id>` font encoding/charset override. Legacy byte-like runs are
+    /// decoded before shaping; shaping input remains Unicode.
     FontEncoding(i32),
     /// Restore one property from the active style (bare or invalid value).
     PropertyReset(String),

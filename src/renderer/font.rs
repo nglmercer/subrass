@@ -23,7 +23,7 @@ pub struct FontMatch<'a> {
 pub struct FontManager {
     fonts: Vec<LoadedFont>,
     /// Additional family names (from font metadata) mapping to a font.
-    aliases: HashMap<String, usize>,
+    aliases: HashMap<String, Vec<usize>>,
     fallback_index: Option<usize>,
 }
 
@@ -203,7 +203,7 @@ impl FontManager {
                     if family.is_empty() || family == base_name {
                         continue;
                     }
-                    self.aliases.entry(family).or_insert(idx);
+                    self.aliases.entry(family).or_default().push(idx);
                 }
             }
         }
@@ -286,11 +286,13 @@ impl FontManager {
             .filter(|(_, f)| f.name == lower)
             .map(|(i, _)| i)
             .collect();
-        if let Some(&alias_idx) = self.aliases.get(&lower) {
-            if !members.contains(&alias_idx) {
-                members.push(alias_idx);
-                members.sort_unstable();
+        if let Some(alias_indices) = self.aliases.get(&lower) {
+            for &alias_idx in alias_indices {
+                if !members.contains(&alias_idx) {
+                    members.push(alias_idx);
+                }
             }
+            members.sort_unstable();
         }
         // 1-2. Exact family (prefer italic match), nearest weight.
         if !members.is_empty() {
@@ -879,6 +881,18 @@ mod tests {
     }
 
     #[test]
+    fn test_noto_auto_load_matches_declared_family() {
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", get_fallback_font(), false, false)
+            .unwrap();
+        let noto = std::fs::read("fonts/NotoSansDevanagari.ttf").unwrap();
+        fm.load_font_auto("NotoSansDevanagari.ttf", &noto).unwrap();
+        let matched = fm.find_font_with_match("Noto Sans Devanagari", false, false);
+        assert_eq!(matched.id, 1, "declared Noto family must select face 1");
+        assert!((fm.px_ratio(matched.id) - 1304.0 / 1906.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_auto_load_registers_family_alias() {
         let mut fm = FontManager::new();
         // Filename stem differs from the declared family name
@@ -1187,6 +1201,30 @@ mod tests {
         assert!(fm.get_font(1).is_some());
         assert_eq!(fm.shaping_data(0).unwrap().1, 0);
         assert_eq!(fm.shaping_data(1).unwrap().1, 1);
+    }
+
+    #[test]
+    fn test_committed_collection_matches_styles_and_preserves_face_indices() {
+        let ttc = include_bytes!("../../fonts/SubrassTestCollection.ttc");
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", get_fallback_font(), false, false)
+            .unwrap();
+        assert_eq!(
+            fm.load_font_auto("SubrassTestCollection.ttc", ttc).unwrap(),
+            1
+        );
+        assert_eq!(fm.font_count(), 4);
+
+        let regular = fm.find_font_with_weight("Subrass One", 400, false);
+        let bold_italic = fm.find_font_with_weight("Subrass One", 700, true);
+        let indic = fm.find_font_with_weight("Noto Sans Devanagari", 400, false);
+        assert_eq!((regular.id, bold_italic.id, indic.id), (1, 2, 3));
+        assert_eq!(fm.shaping_data(regular.id).unwrap().1, 0);
+        assert_eq!(fm.shaping_data(bold_italic.id).unwrap().1, 1);
+        assert_eq!(fm.shaping_data(indic.id).unwrap().1, 2);
+        assert!(!regular.faux_bold && !regular.faux_italic);
+        assert!(!bold_italic.faux_bold && !bold_italic.faux_italic);
+        assert!(fm.has_glyph(indic.id, 'न'));
     }
 
     #[test]

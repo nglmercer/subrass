@@ -1,6 +1,6 @@
 # Audit Remediation Log
 
-Remediation of the 100-item audit in `temp_plan.md`, grouped by phase,
+Remediation of the 100-item audit, grouped by phase,
 plus follow-up review passes. All Rust behavior changes carry regression
 tests; run `cargo test`. `CONFORMANCE.md` is the test-backed
 compatibility statement; this file is the history of how it got there.
@@ -8,7 +8,7 @@ compatibility statement; this file is the history of how it got there.
 Applies to HEAD after `ff336a4` (second-pass remediation), the
 follow-up passes described below, the precedence/clip/server pass
 (first-wins semantics, libass clip state, dev-server rewrite,
-attachment budgets, 13 new reference fixtures), and the temp_plan.md
+attachment budgets, 13 new reference fixtures), and the
 remediation pass at the bottom (move timing, exact arity, wrap 3≡0,
 `\r` keeps drawing, per-glyph decorations, CJK/ZWSP breaking, harness
 proofs, doc sync).
@@ -383,7 +383,7 @@ proofs, doc sync).
   bounds-checked indices, clamped casts, checked allocation math,
   capped drawing/blur/gap budgets, wasm32-safe `usize` conversions.
 
-## temp_plan.md remediation pass (final remaining fixes)
+## Historical: final remaining fixes from the pre-shaping audit
 
 - **P0 `\move` timing** (`src/renderer/compositor.rs`,
   `src/types/override_tag.rs`): reversed times swap (`t1 > t2` behaves
@@ -525,7 +525,7 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
 11. `\pbo` uses libass ascent/descent metrics: single-drawing lines preserve
     their ink anchor and mixed lines use the adjusted drawing ascent.
 
-## temp_plan.md completion pass (FreeType Win-metrics sizing, 2026-09-19)
+## Historical: (FreeType Win-metrics sizing, 2026-09-19)
 
 - **Win-metrics sizing** (`src/renderer/font.rs`, `shaper.rs`,
   `glyph_cache.rs`, `compositor.rs`): FreeType sizes SFNT faces by the
@@ -548,7 +548,7 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
   `tests/dbg_bold.rs`, `tests/dbg_indic.rs`, `probe_tmp/`
   (Noto OFL kept at `fonts/OFL-NotoSansDevanagari.txt` beside the
   committed subset both new tests load).
-- **Reference state**: 87 pass, 7 known-divergent measured, 3 open
+- **Historical reference state at that commit**: 87 pass, 7 known-divergent measured, 3 open
   failures (`indic`: reference used a fontconfig fallback font, needs
   an embedded-Noto fixture + regen; `transform-iclip`: one faint
   levels-1–5 AA-tail row from vector-vs-bitmap stroke edges;
@@ -562,3 +562,21 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
   Environmental gaps (pre-existing, unrelated): `wasm-pack test`
   needs Chrome (not installed); `cargo fuzz` hits MSVC LNK2001 on
   cdylib link; ffmpeg reference regen needs a local ffmpeg binary.
+
+## Current completion pass (2026-09-19)
+
+- **Reference state**: 98 gated pass, 7 intentional measured divergences,
+  0 open failures, 0 pending. Indic now pins the committed Noto bytes on both
+  sides; inverse-clip retains a meaningful glyph region; non-default PlayRes
+  has visible and byte-distinct early/mid/late samples.
+- **Collections**: a deterministic three-face TTC (regular, bold-italic,
+  Devanagari) is generated from the licensed committed fonts. Alias matching
+  now retains every face in a family rather than only the first. The isolated
+  TTC-only libass fixture gates family/style selection and face-index shaping.
+- **YCbCr**: explicit `None`, `TV.601`, `TV.709`, `PC.601`, and `PC.709`
+  fixtures prove the RGB API boundary: TV modes map into 16–235; PC/None are
+  full-range; 601/709 coefficients require a downstream YCbCr video stage.
+- **Legacy charsets**: Windows-1250/51/52/53/54/55/56/57/58, Thai,
+  Shift-JIS, CP949, GBK, and Big5 byte-like runs decode before shaping;
+  Unicode is preserved and invalid sequences use U+FFFD. Johab and
+  charset-based font linking remain explicitly unsupported.

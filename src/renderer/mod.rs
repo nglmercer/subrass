@@ -19,21 +19,6 @@ use crate::types::Event;
 /// and collection stops here so hostile documents cannot grow memory.
 const MAX_WARNINGS: usize = 64;
 
-/// True for characters in right-to-left scripts (Hebrew, Arabic
-/// blocks, RTL controls). Used only to emit a shaping diagnostic;
-/// layout itself stays left-to-right.
-fn is_right_to_left(ch: char) -> bool {
-    matches!(ch,
-        '\u{0590}'..='\u{05FF}'
-        | '\u{0600}'..='\u{06FF}'
-        | '\u{0750}'..='\u{077F}'
-        | '\u{08A0}'..='\u{08FF}'
-        | '\u{200F}' | '\u{202B}' | '\u{202E}'
-        | '\u{2066}'..='\u{2069}'
-        | '\u{FB50}'..='\u{FDFF}'
-        | '\u{FE70}'..='\u{FEFE}')
-}
-
 /// Main subtitle renderer
 pub struct SubtitleRenderer {
     doc: AssDocument,
@@ -119,9 +104,8 @@ impl SubtitleRenderer {
     /// Non-fatal diagnostics collected while building the renderer:
     /// embedded fonts that decoded but failed to load, unsupported
     /// override tags, unsupported `Effect` fields, requested fonts
-    /// with no loaded face (fallback is used), and right-to-left
-    /// text (laid out left-to-right). Each distinct message appears
-    /// once; the list is capped at [`MAX_WARNINGS`].
+    /// with no loaded face (fallback is used). Each distinct message
+    /// appears once; the list is capped at [`MAX_WARNINGS`].
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -177,12 +161,6 @@ impl SubtitleRenderer {
                         "Font '{}' has no loaded face (using fallback)",
                         resolved.font_name
                     ),
-                );
-            }
-            if event.text.chars().any(is_right_to_left) {
-                Self::push_warning(
-                    warnings,
-                    "Right-to-left text is laid out left-to-right (no bidi shaping)".to_string(),
                 );
             }
         }
@@ -272,6 +250,10 @@ impl SubtitleRenderer {
             resolved.layout_res_x = self.doc.script_info.layout_res_x.unwrap_or(0);
             resolved.layout_res_y = self.doc.script_info.layout_res_y.unwrap_or(0);
             resolved.kerning = self.doc.script_info.kerning;
+            resolved.tv_range_colors = matches!(
+                self.doc.script_info.y_cb_cr_matrix,
+                crate::types::YCbCrMatrix::TV601 | crate::types::YCbCrMatrix::TV709
+            );
 
             self.compositor.composite_event(
                 &mut self.buffer,
@@ -454,10 +436,6 @@ mod tests {
         );
         assert!(
             warnings.iter().any(|w| w.contains("MissingFamilyXYZ")),
-            "{warnings:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("Right-to-left")),
             "{warnings:?}"
         );
         // Supported legacy effects and known tags stay silent.

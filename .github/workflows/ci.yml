@@ -30,7 +30,7 @@ jobs:
         run: cargo test --locked --all-features
       - name: Tests (no default features)
         run: cargo test --locked --no-default-features
-      - name: References (strict release mode: pending fails)
+      - name: References (strict release mode pending fails)
         run: cargo test --locked --test reference
         env:
           SUBRASS_STRICT_REFERENCES: "1"

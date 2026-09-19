@@ -28,5 +28,13 @@
   "karaoke-kf-frx": {"time_ms": 1500},
   "karaoke-kf-fax": {"time_ms": 1500},
   "karaoke-kf-fay": {"time_ms": 1500},
+  "karaoke-kf-fry": {"time_ms": 1500},
+  "karaoke-kf-combined": {"time_ms": 1500},
+  "karaoke-early": {"time_ms": 250},
+  "karaoke-late": {"time_ms": 1750},
+  "karaoke-kf-early": {"time_ms": 500},
+  "karaoke-kf-late": {"time_ms": 1900},
+  "relative-fs-early": {"time_ms": 500},
+  "relative-fs-late": {"time_ms": 1500},
   "opaque-box-multiline": {"time_ms": 1000}
 }}

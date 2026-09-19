@@ -9,6 +9,9 @@ pub struct ShapedGlyph {
     /// Stable [`FontManager`](super::font::FontManager) id of the face
     /// that provided this glyph (primary or fallback).
     pub font_id: usize,
+    /// Source scalar (for whitespace-trimmed karaoke spans; libass
+    /// excludes trimmed leading/trailing whitespace from sweep spans).
+    pub ch: char,
     pub x: f64,
     pub y: f64,
     pub advance: f64,
@@ -30,16 +33,221 @@ pub struct ShapedLine {
     pub width: f64,
     pub height: f64,
     pub baseline: f64,
+    /// Per-row height (primary face line height, scaled): every shaper
+    /// row advances `y` by this, so row `k` tops at `k * line_height`
+    /// even across empty rows (which emit no glyphs). Zero when empty.
+    pub line_height: f64,
     /// Characters missing from every shaping font (rendered as the
     /// primary face's .notdef). Zero when the chain covers the text.
     pub missing_glyphs: u32,
 }
 
-/// Pick the shaping font for one character: the first font whose glyph
-/// id is nonzero (`.notdef` is id 0). When every font misses, index 0
-/// (the primary face's .notdef) wins so rendering stays defined.
-fn pick_font(glyph_ids: &[GlyphId]) -> usize {
-    glyph_ids.iter().position(|g| g.0 != 0).unwrap_or(0)
+/// True for combining marks (Mn/Me-only blocks plus the two Mn kana
+/// marks): these attach to the preceding base for cluster-aware
+/// fallback and never start a wrapped line. Only fully-combining,
+/// long-stable ranges are listed; marks mixed into letter blocks
+/// (Indic, Thai, …) need a real shaper and stay per-character.
+pub fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0300..=0x036F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+            | 0x3099..=0x309A
+    )
+}
+
+/// Resolve the fallback pick for every scalar in `text`: a base char
+/// plus its following combining marks prefer the first face containing
+/// the whole cluster (marks stay on the base's face instead of being
+/// stolen by an earlier mark-only — or split from a base-only — face);
+/// when no face holds the cluster, each char falls back independently.
+/// Breaks resolve to 0 (callers skip them). Deterministic: shaping and
+/// measurement share this, so widths always match.
+pub fn cluster_font_picks<F>(text: &str, font_count: usize, mut has_glyph: F) -> Vec<usize>
+where
+    F: FnMut(usize, char) -> bool,
+{
+    let chars: Vec<char> = text.chars().collect();
+    let mut picks = vec![0usize; chars.len()];
+    let first_with =
+        |ch: char, has_glyph: &mut F| (0..font_count).find(|&f| has_glyph(f, ch)).unwrap_or(0);
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\n' || ch == '\r' {
+            i += 1;
+            continue;
+        }
+        if is_combining_mark(ch) {
+            // Lone mark (no base before it): independent fallback.
+            picks[i] = first_with(ch, &mut has_glyph);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && is_combining_mark(chars[j]) {
+            j += 1;
+        }
+        let whole = (0..font_count)
+            .find(|&f| has_glyph(f, ch) && (i + 1..j).all(|k| has_glyph(f, chars[k])));
+        match whole {
+            Some(f) => {
+                picks[i..j].fill(f);
+            }
+            None => {
+                for (slot, &ch) in picks[i..j].iter_mut().zip(&chars[i..j]) {
+                    *slot = first_with(ch, &mut has_glyph);
+                }
+            }
+        }
+        i = j;
+    }
+    picks
+}
+
+/// True for wide CJK characters that allow line breaks around them
+/// (conservative UAX #14 approximation for wrapping only): unified and
+/// compatibility ideographs, hiragana/katakana, Hangul syllables, and
+/// wide symbols. Excludes U+3000 (ideographic space: handled as a
+/// stick-to-previous break), conjoining jamo/bopomofo (kept glued),
+/// halfwidth forms (narrow), and ASCII-mirroring fullwidth
+/// alphanumerics (unbreakable like their ASCII halves).
+pub fn is_cjk_breakable(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2E80..=0x2FD5
+            | 0x3001..=0x303F
+            | 0x3040..=0x30FF
+            | 0x31F0..=0x31FF
+            | 0x3200..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE44
+            | 0xFF01..=0xFF0F
+            | 0xFF1A..=0xFF20
+            | 0xFF3B..=0xFF40
+            | 0xFF5B..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x20000..=0x2FFFF
+            | 0x30000..=0x3FFFF
+    )
+}
+
+/// Opening brackets: no break after (they stick to what follows).
+pub fn is_cjk_open(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3008
+            | 0x300A
+            | 0x300C
+            | 0x300E
+            | 0x3010
+            | 0x3014
+            | 0x3016
+            | 0x3018
+            | 0x301A
+            | 0x301D
+            | 0xFF08
+            | 0xFF3B
+            | 0xFF5B
+            | 0xFF5F
+            | 0xFF62
+    )
+}
+
+/// Closing punctuation, non-starters (small kana, iteration and sound
+/// marks), and fullwidth mirrors of ASCII `!?,;:«»…`: no break before
+/// (they stick to what precedes).
+pub fn is_cjk_nobreak_before(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3001..=0x3003
+            | 0x3005
+            | 0x3009
+            | 0x300B
+            | 0x300D
+            | 0x300F
+            | 0x3011
+            | 0x3015
+            | 0x3017
+            | 0x3019
+            | 0x301B..=0x301C
+            | 0x301E..=0x301F
+            | 0x3030..=0x3035
+            | 0x3041
+            | 0x3043
+            | 0x3045
+            | 0x3047
+            | 0x3049
+            | 0x3063
+            | 0x3083
+            | 0x3085
+            | 0x3087
+            | 0x308E
+            | 0x3095..=0x3096
+            | 0x309D..=0x309E
+            | 0x30A1
+            | 0x30A3
+            | 0x30A5
+            | 0x30A7
+            | 0x30A9
+            | 0x30C3
+            | 0x30E3
+            | 0x30E5
+            | 0x30E7
+            | 0x30EE
+            | 0x30F5..=0x30F6
+            | 0x30FB..=0x30FE
+            | 0x31F0..=0x31FF
+            | 0xFE30..=0xFE36
+            | 0xFF01
+            | 0xFF0C
+            | 0xFF0E
+            | 0xFF1A..=0xFF1B
+            | 0xFF1F
+            | 0xFF60..=0xFF61
+            | 0xFF63..=0xFF65
+            | 0xFFE6
+    )
+}
+
+/// Break opportunity between two adjacent in-word characters for the
+/// wrapper: breaks around CJK wide chars (subject to open/close glues),
+/// never inside combining sequences, around joiners, or between a
+/// currency sign and its digits — and never between two non-CJK chars
+/// (spaces own those).
+pub fn cjk_break_between(prev: char, next: char) -> bool {
+    if prev == '\u{200C}'
+        || next == '\u{200C}'
+        || prev == '\u{200D}'
+        || next == '\u{200D}'
+        || prev == '\u{00A0}'
+        || next == '\u{00A0}'
+    {
+        return false;
+    }
+    if is_combining_mark(next) {
+        return false;
+    }
+    if matches!(
+        prev as u32,
+        0x0024 | 0x00A2 | 0x00A3 | 0x00A5 | 0xFFE0 | 0xFFE1 | 0xFFE5
+    ) && matches!(next as u32, 0x0030..=0x0039 | 0xFF10..=0xFF19)
+    {
+        return false;
+    }
+    if !is_cjk_breakable(prev) && !is_cjk_breakable(next) {
+        return false;
+    }
+    if is_cjk_open(prev) || is_cjk_nobreak_before(next) {
+        return false;
+    }
+    true
 }
 
 /// Shaping policy: one cluster per Unicode scalar value — no ligatures,
@@ -112,6 +320,7 @@ impl TextShaper {
             width: 0.0,
             height: 0.0,
             baseline: 0.0,
+            line_height: 0.0,
             missing_glyphs: 0,
         };
         // Raw degenerate sizes shape to nothing instead of feeding
@@ -142,7 +351,15 @@ impl TextShaper {
         let line_height = primary_scaled.height() as f64 * scale_y;
         let mut max_x = 0.0_f64;
 
-        for ch in text.chars() {
+        // Cluster-aware fallback: base + combining marks prefer one
+        // face holding the whole cluster (stable per-char picks shared
+        // with measurement, so widths always match shaping).
+        let faces: Vec<&FontArc> = fonts.iter().map(|(_, f)| *f).collect();
+        let picks = cluster_font_picks(text, fonts.len(), |fi, ch| {
+            faces.get(fi).is_some_and(|f| f.glyph_id(ch).0 != 0)
+        });
+        for (char_idx, ch) in text.chars().enumerate() {
+            let pick = picks.get(char_idx).copied().unwrap_or(0);
             if ch == '\n' || ch == '\r' {
                 // Line break: close this line (stripping its own trailing
                 // spacing unit), advance y, reset x.
@@ -153,11 +370,14 @@ impl TextShaper {
                 continue;
             }
 
-            // Cascade: first face with a real glyph wins; advances come
-            // from the selected face.
-            let ids: Vec<GlyphId> = fonts.iter().map(|(_, f)| f.glyph_id(ch)).collect();
-            let pick = pick_font(&ids);
-            let (font_id, glyph_id) = (fonts[pick].0, ids[pick]);
+            // Cascade: the cluster pick wins; the glyph id comes from
+            // the selected face and advances are measured from it.
+            let pick = pick.min(fonts.len().saturating_sub(1));
+            let glyph_id = fonts
+                .get(pick)
+                .map(|(_, f)| f.glyph_id(ch))
+                .unwrap_or(GlyphId(0));
+            let font_id = fonts.get(pick).map(|(id, _)| *id).unwrap_or(0);
             if glyph_id.0 == 0 {
                 missing_glyphs += 1;
             }
@@ -166,6 +386,7 @@ impl TextShaper {
             glyphs.push(ShapedGlyph {
                 glyph_id,
                 font_id,
+                ch,
                 x,
                 y,
                 advance: advance * scale_x,
@@ -193,6 +414,7 @@ impl TextShaper {
             width: max_x,
             height: y + line_height,
             baseline,
+            line_height,
             missing_glyphs,
         }
     }
@@ -221,19 +443,40 @@ impl TextShaper {
         }
         let scale = PxScale::from(font_size as f32);
         let scaled: Vec<_> = fonts.iter().map(|f| f.as_scaled(scale)).collect();
+        // Same cluster-aware picks as shaping (computed over the full
+        // text so mark attachments match); per-line char offsets index
+        // into it. Widths always match shaping exactly.
+        let picks = cluster_font_picks(text, fonts.len(), |fi, ch| {
+            fonts.get(fi).is_some_and(|f| f.glyph_id(ch).0 != 0)
+        });
+        let mut char_idx = 0usize;
         let mut widest = 0.0_f64;
         for line in text.split(['\n', '\r']) {
             let mut width = 0.0_f64;
             let mut first = true;
             for ch in line.chars() {
-                let ids: Vec<GlyphId> = fonts.iter().map(|f| f.glyph_id(ch)).collect();
-                let pick = pick_font(&ids);
+                let pick = picks
+                    .get(char_idx)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(fonts.len().saturating_sub(1));
+                char_idx += 1;
+                let glyph_id = fonts
+                    .get(pick)
+                    .map(|f| f.glyph_id(ch))
+                    .unwrap_or(GlyphId(0));
                 if !first {
                     width += spacing;
                 }
-                width += scaled[pick].h_advance(ids[pick]) as f64;
+                width += scaled
+                    .get(pick)
+                    .map(|s| s.h_advance(glyph_id) as f64)
+                    .unwrap_or(0.0);
                 first = false;
             }
+            // Account for the split-off break char (except after the
+            // last line, where there is none to skip).
+            char_idx += 1;
             widest = widest.max(width);
         }
         widest
@@ -299,13 +542,27 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_font_cascade_order() {
-        // First nonzero glyph id wins; all-missing falls back to 0.
-        assert_eq!(pick_font(&[GlyphId(3), GlyphId(0)]), 0);
-        assert_eq!(pick_font(&[GlyphId(0), GlyphId(7)]), 1);
-        assert_eq!(pick_font(&[GlyphId(0), GlyphId(0)]), 0);
-        assert_eq!(pick_font(&[GlyphId(0), GlyphId(0), GlyphId(9)]), 2);
-        assert_eq!(pick_font(&[]), 0);
+    fn test_cluster_picks_cascade_and_stick() {
+        // First face holding the char wins; all-missing falls back to 0.
+        let has = |face: usize, ch: char| match (face, ch) {
+            (0, 'a') => true,
+            (1, 'b') => true,
+            // Face 1 holds the mark but not the base: the cluster must
+            // not split (base-only face 0 wins the pair over mark-only
+            // face 1, and no face holds both so each falls back alone).
+            (1, '\u{301}') => true,
+            _ => false,
+        };
+        assert_eq!(cluster_font_picks("a", 2, has), vec![0]);
+        assert_eq!(cluster_font_picks("b", 2, has), vec![1]);
+        assert_eq!(cluster_font_picks("z", 2, has), vec![0]);
+        // Base on face 0 + mark on face 1, neither holding both:
+        // independent fallback keeps each char's own face.
+        assert_eq!(cluster_font_picks("a\u{301}", 2, has), vec![0, 1]);
+        // Whole-cluster preference: face 1 holds base AND mark, so the
+        // pair sticks to face 1 even though face 0 holds the base.
+        let both = |face: usize, ch: char| face == 1 && (ch == 'a' || ch == '\u{301}');
+        assert_eq!(cluster_font_picks("xa\u{301}", 2, both), vec![0, 1, 1]);
     }
 
     #[test]

@@ -573,6 +573,17 @@ fn split_tag_name(raw: &str) -> (&str, &str) {
     (raw, "")
 }
 
+/// Parse a karaoke duration parameter: missing/empty means the libass
+/// bare-tag default, otherwise a strict unsigned centisecond count
+/// (negatives and non-numerics are malformed, not clamped).
+fn parse_karaoke_param(params: Option<&str>, bare_default: u64) -> Option<u64> {
+    match params {
+        None => Some(bare_default),
+        Some(p) if p.trim().is_empty() => Some(bare_default),
+        Some(p) => p.trim().parse().ok(),
+    }
+}
+
 fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag> {
     match name {
         "b" => {
@@ -860,22 +871,16 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             let val = params?.parse().ok()?;
             Some(OverrideTag::WrapStyle(val))
         }
-        "k" => {
-            let val = params?.parse().ok()?;
-            Some(OverrideTag::KaraokeDuration(val))
-        }
-        "K" | "kf" => {
-            let val = params?.parse().ok()?;
-            Some(OverrideTag::KaraokeSweep(val))
-        }
-        "ko" => {
-            let val = params?.parse().ok()?;
-            Some(OverrideTag::KaraokeOutline(val))
-        }
-        "kt" => {
-            let val = params?.parse().ok()?;
-            Some(OverrideTag::KaraokeStart(val))
-        }
+        // Bare karaoke tags carry libass defaults (`\k`/`\K`/`\kf`/`\ko`
+        // default to 100cs, bare `\kt` to 0); empty parens count as bare.
+        "k" => Some(OverrideTag::KaraokeDuration(parse_karaoke_param(
+            params, 100,
+        )?)),
+        "K" | "kf" => Some(OverrideTag::KaraokeSweep(parse_karaoke_param(params, 100)?)),
+        "ko" => Some(OverrideTag::KaraokeOutline(parse_karaoke_param(
+            params, 100,
+        )?)),
+        "kt" => Some(OverrideTag::KaraokeStart(parse_karaoke_param(params, 0)?)),
         _ => {
             // Reconstruct tag string for unknown tags
             let tag_str = match params {
@@ -1113,6 +1118,28 @@ mod tests {
         assert!(matches!(tags[0], OverrideTag::KaraokeDuration(50)));
         assert!(matches!(tags[1], OverrideTag::KaraokeStart(120)));
         assert!(matches!(tags[2], OverrideTag::KaraokeSweep(30)));
+    }
+
+    #[test]
+    fn test_bare_karaoke_tags_take_libass_defaults() {
+        // libass: bare \k/\K/\kf/\ko default to 100cs, bare \kt to 0.
+        let tags = OverrideTag::parse_from_text("{\\k}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeDuration(100)));
+        let tags = OverrideTag::parse_from_text("{\\K}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeSweep(100)));
+        let tags = OverrideTag::parse_from_text("{\\kf}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeSweep(100)));
+        let tags = OverrideTag::parse_from_text("{\\ko}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeOutline(100)));
+        let tags = OverrideTag::parse_from_text("{\\k()}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeDuration(100)));
+        let tags = OverrideTag::parse_from_text("{\\kt}x");
+        assert!(matches!(tags[0], OverrideTag::KaraokeStart(0)));
+        // Malformed durations stay Unknown (never half-applied).
+        let tags = OverrideTag::parse_from_text("{\\k-5}x");
+        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
+        let tags = OverrideTag::parse_from_text("{\\kfoo}x");
+        assert!(matches!(tags[0], OverrideTag::Unknown(_)));
     }
 
     #[test]

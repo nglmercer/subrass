@@ -463,9 +463,9 @@ Dialogue: Marked=0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello SSA
             filename: "b.bmp".to_string(),
             data: vec![0u8; 5],
         };
-        check_global_attachments(&doc, &[one.clone()], 0).unwrap();
+        check_global_attachments(&doc, std::slice::from_ref(&one), 0).unwrap();
         doc.attachments.push(one);
-        check_global_attachments(&doc, &[two.clone()], 0).unwrap();
+        check_global_attachments(&doc, std::slice::from_ref(&two), 0).unwrap();
         doc.attachments.push(two);
         assert_eq!(doc.total_attachment_bytes(), 8);
         // Count cap enforced across the accumulated vec: 257 empty

@@ -335,17 +335,19 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
    region.
 2. `\r` preserves only line-global tags (position, move, origin, clips,
    fades); everything else, including drawing mode, resets.
-3. Rotation uses a fixed perspective distance (500 × vertical resolution
-   ratio); extreme angles degrade to empty glyphs instead of over-allocating.
+3. Rotation uses libass's perspective distance (312.5 × vertical
+   resolution ratio); extreme angles degrade to empty glyphs instead of
+   over-allocating. (`frx`/`fry` inverse-map and `\fay` per-run shear
+   reset verified against libass references; all 35 gated fixtures pass.)
 4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
-   Indic/Arabic contextual forms); no system-font lookup. Per-glyph fallback
-   covers already-loaded faces.
+   Indic/Arabic contextual forms); no system-font lookup. Cluster-aware
+   deterministic fallback covers already-loaded faces.
 5. Unhinted coverage rasterizer: ~1px placement/AA differences versus
    libass/FreeType hinted outlines (measured, not gated, in reference tests).
-6. Multi-line opaque boxes cover the whole block; libass draws per-line boxes.
+6. Multi-line opaque boxes draw per-line boxes like libass (gated:
+   `opaque-box-multiline` IoU 1.000).
 7. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent) rather than
    libass's rebalance (libass itself marks styles 0/3 handling FIXME).
-8. `\K`/`\kf` sweep edges map proportionally across the transformed glyph
-   bitmap under rotation/perspective (exact when unrotated); combination
-   fixtures will gate this against libass once generated.
+8. `\K`/`\kf` sweep edges split at one device-space vertical line like
+   libass (gated incl. rotation/shear/perspective combinations).
 9. `\fe` parses/stores/resets but does not remap charsets.

@@ -32,27 +32,15 @@ const KNOWN_DIVERGENT: &[(&str, &str)] = &[
         "font-fallback",
         "fontconfig fallback is environment-dependent",
     ),
-    (
-        "opaque-box-multiline",
-        "whole-block box vs libass per-line boxes (known divergence)",
-    ),
 ];
 
-/// Fixtures whose libass reference frames have not been generated yet
-/// (no ffmpeg+libass in this environment). Missing `.rgba` files for
-/// these names are reported as pending, not failures; once
-/// `gen_references.ps1` produces them, they gate like all others.
-/// Never add an existing divergence here to silence it — that list
-/// is `KNOWN_DIVERGENT` above.
-const PENDING_REFERENCES: &[&str] = &[
-    "relative-fs",
-    "shear-rotation",
-    "karaoke-kf-frz",
-    "karaoke-kf-frx",
-    "karaoke-kf-fax",
-    "karaoke-kf-fay",
-    "opaque-box-multiline",
-];
+/// Fixtures whose libass reference frames have not been generated yet.
+/// Missing `.rgba` files for these names are reported as pending, not
+/// failures; once `gen_references.ps1` produces them, they gate like
+/// all others. Never add an existing divergence here to silence it —
+/// that list is `KNOWN_DIVERGENT` above. Currently empty: every
+/// manifest fixture has a generated libass frame.
+const PENDING_REFERENCES: &[&str] = &[];
 
 /// Gate thresholds (see CONFORMANCE.md): bbox IoU over full-res ink
 /// masks, ink-count ratio bounds, and block-averaged intensity error.
@@ -280,6 +268,12 @@ fn libass_reference_comparison() {
             Ok(b) => b,
             Err(_) => {
                 if PENDING_REFERENCES.contains(&name.as_str()) {
+                    // Strict release mode: pending references fail the
+                    // gate instead of skipping it.
+                    if std::env::var("SUBRASS_STRICT_REFERENCES").is_ok() {
+                        failures.push(format!("{name}: pending reference (strict mode)"));
+                        continue;
+                    }
                     report.push(format!(
                         "{name:14} [pending: no libass frame yet; run gen_references.ps1]"
                     ));
@@ -337,5 +331,92 @@ fn libass_reference_comparison() {
         "{} reference failure(s):\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+#[test]
+fn harness_manifest_and_references_are_consistent() {
+    // CI validation for the fixture harness itself: every manifest
+    // entry must have its .ass + golden .rgba; no orphan fixture or
+    // reference files may linger; every manifest entry needs a libass
+    // frame unless it is genuinely pending; and pending entries must
+    // actually be missing (no stale pending to silence a gate).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let names: Vec<String> = manifest_times().into_iter().map(|(n, _)| n).collect();
+    assert!(!names.is_empty(), "manifest must list fixtures");
+    let mut problems = Vec::new();
+    for name in &names {
+        if !root.join(format!("tests/golden/{name}.ass")).exists() {
+            problems.push(format!(
+                "{name}: manifest entry lacks tests/golden/{name}.ass"
+            ));
+        }
+        if !root.join(format!("tests/golden/{name}.rgba")).exists() {
+            problems.push(format!(
+                "{name}: manifest entry lacks tests/golden/{name}.rgba"
+            ));
+        }
+        let has_ref = root.join(format!("tests/reference/{name}.rgba")).exists();
+        let pending = PENDING_REFERENCES.contains(&name.as_str());
+        if !has_ref && !pending {
+            problems.push(format!("{name}: missing reference frame and not pending"));
+        }
+    }
+    for pending in PENDING_REFERENCES {
+        if root
+            .join(format!("tests/reference/{pending}.rgba"))
+            .exists()
+        {
+            problems.push(format!(
+                "{pending}: stale pending entry (reference exists; gate it)"
+            ));
+        }
+        if !names.iter().any(|n| n == pending) {
+            problems.push(format!("{pending}: pending entry has no manifest fixture"));
+        }
+    }
+    for (n, _) in KNOWN_DIVERGENT {
+        if !names.iter().any(|m| m == n) {
+            problems.push(format!(
+                "{n}: known-divergent entry has no manifest fixture"
+            ));
+        }
+    }
+    let orphans = |dir: &str, ext: &str| {
+        let mut orphans = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root.join(dir)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_file = path.extension().and_then(|e| e.to_str()) == Some(ext);
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if is_file && !names.iter().any(|n| n == &stem) {
+                    orphans.push(format!("{dir}/{stem}.{ext}"));
+                }
+            }
+        }
+        orphans
+    };
+    for orphan in orphans("tests/golden", "ass") {
+        problems.push(format!("{orphan}: orphan fixture (not in manifest)"));
+    }
+    for orphan in orphans("tests/golden", "rgba") {
+        problems.push(format!("{orphan}: orphan golden (not in manifest)"));
+    }
+    for orphan in orphans("tests/reference", "rgba") {
+        problems.push(format!("{orphan}: orphan reference (not in manifest)"));
+    }
+    let provenance = root.join("tests/reference/provenance.json");
+    if !provenance.exists() {
+        problems.push("tests/reference/provenance.json: missing".to_string());
+    }
+    assert!(
+        problems.is_empty(),
+        "{} harness problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 }

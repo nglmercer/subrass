@@ -539,10 +539,56 @@ impl DrawingParser {
         scale: f64,
         color: [u8; 4],
     ) {
+        Self::fill_polygons_clipped(buffer, polygons, offset_x, offset_y, scale, color, None);
+    }
+
+    /// Fill with an optional device-space column range `[x_lo, x_hi)`.
+    /// Karaoke sweeps draw drawings in two non-overlapping vertical
+    /// halves (libass splits drawing runs exactly like text runs).
+    fn fill_polygons_clipped(
+        buffer: &mut RenderBuffer,
+        polygons: &[Vec<(f64, f64)>],
+        offset_x: f64,
+        offset_y: f64,
+        scale: f64,
+        color: [u8; 4],
+        x_range: Option<(i64, i64)>,
+    ) {
         let (w, h) = (buffer.width, buffer.height);
         Self::scan_polygons(w, h, polygons, offset_x, offset_y, scale, |px, py| {
+            if let Some((lo, hi)) = x_range {
+                if i64::from(px) < lo || i64::from(px) >= hi {
+                    return;
+                }
+            }
             buffer.blend_pixel(px as u32, py as u32, color[0], color[1], color[2], color[3]);
         });
+    }
+
+    /// Render a drawing clipped to device columns `[x_lo, x_hi)`.
+    /// `None` bounds are open; a fully-open range draws everything.
+    pub fn render_drawing_clipped(
+        buffer: &mut RenderBuffer,
+        text: &str,
+        x: f64,
+        y: f64,
+        scale: f64,
+        color: [u8; 4],
+        x_range: (Option<i64>, Option<i64>),
+    ) {
+        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let range = match x_range {
+            (None, None) => None,
+            (lo, hi) => Some((lo.unwrap_or(i64::MIN), hi.unwrap_or(i64::MAX))),
+        };
+        if let Some((lo, hi)) = range {
+            if lo >= hi {
+                return;
+            }
+        }
+        Self::fill_polygons_clipped(buffer, &Self::polygons(text), x, y, scale, color, range);
     }
 
     fn fill_polygons_mask(

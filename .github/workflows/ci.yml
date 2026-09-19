@@ -30,6 +30,10 @@ jobs:
         run: cargo test --locked --all-features
       - name: Tests (no default features)
         run: cargo test --locked --no-default-features
+      - name: References (strict release mode: pending fails)
+        run: cargo test --locked --test reference
+        env:
+          SUBRASS_STRICT_REFERENCES: "1"
       - name: WASM test target compiles
         run: cargo check --target wasm32-unknown-unknown --tests --locked
 
@@ -67,9 +71,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-17
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build fuzz targets
         run: cd fuzz && cargo fuzz build
       - name: Smoke each target briefly

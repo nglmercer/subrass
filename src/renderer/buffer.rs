@@ -554,13 +554,16 @@ impl RenderBuffer {
                 let px = f64::from(dx) + f64::from(off_x) + 0.5;
                 let py = f64::from(dy) + f64::from(off_y) + 0.5;
 
-                // Solve for z3: 0 = m31*px*(d+z3)/d + m32*py*(d+z3)/d + m33*z3
-                let denom = m[6] * px / perspective + m[7] * py / perspective + m[8];
+                // Solve for z3 from the source-plane constraint: the
+                // source has z=0, and (sx,sy,0) = M^T*(x3,y3,z3), so
+                // 0 = m13*x3 + m23*y3 + m33*z3 with x3 = px*(d+z3)/d
+                // (third COLUMN of M: m[2], m[5], m[8]).
+                let denom = m[2] * px / perspective + m[5] * py / perspective + m[8];
                 if !denom.is_finite() || denom.abs() < 1e-6 {
                     continue;
                 }
 
-                let z3 = -(m[6] * px + m[7] * py) / denom;
+                let z3 = -(m[2] * px + m[5] * py) / denom;
                 if !z3.is_finite() {
                     continue;
                 }
@@ -985,6 +988,63 @@ mod tests {
             (f64::NAN, 0.0),
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_projective_frx_fry_compress_along_tilt_axis() {
+        // Two-pixel impulse pair 12px apart: under a 30-degree tilt the
+        // peaks move TOWARD each other (~12*cos30 = 10.4px apart). The
+        // old inverse map (third matrix row instead of column) pushed
+        // them apart (~15px); frz is unaffected either way (row == col).
+        for (axis, m) in [
+            ("frx", Matrix3x3::rotation_x((-30f64).to_radians())),
+            ("fry", Matrix3x3::rotation_y((-30f64).to_radians())),
+        ] {
+            let mut bmp = vec![0u8; 21 * 21];
+            if axis == "frx" {
+                bmp[4 * 21 + 10] = 255;
+                bmp[16 * 21 + 10] = 255;
+            } else {
+                bmp[10 * 21 + 4] = 255;
+                bmp[10 * 21 + 16] = 255;
+            }
+            let (out, ow, oh, _, _) = RenderBuffer::projective_transform_coverage_bitmap(
+                &bmp,
+                21,
+                21,
+                &m,
+                312.5,
+                (0.0, 0.0),
+                (0.0, 0.0),
+            );
+            assert_eq!(out.len(), ow as usize * oh as usize);
+            // Peak rows/cols along the tilt axis (max coverage per line).
+            let span = if axis == "frx" { oh } else { ow };
+            let mut peaks = Vec::new();
+            for i in 0..span {
+                let mut best = 0u8;
+                for j in 0..(if axis == "frx" { ow } else { oh }) {
+                    let idx = if axis == "frx" {
+                        i as usize * ow as usize + j as usize
+                    } else {
+                        j as usize * ow as usize + i as usize
+                    };
+                    best = best.max(out[idx]);
+                }
+                if best >= 128 {
+                    peaks.push(i);
+                }
+            }
+            assert!(
+                peaks.len() >= 2,
+                "{axis}: impulses must survive the warp ({peaks:?})"
+            );
+            let dist = peaks[peaks.len() - 1] - peaks[0];
+            assert!(
+                (8..=12).contains(&dist),
+                "{axis}: impulse pair must compress toward ~10.4px, got {dist} ({peaks:?})"
+            );
+        }
     }
 
     #[test]

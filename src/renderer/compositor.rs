@@ -155,6 +155,10 @@ struct WrapWord {
     /// in the original text. Used to avoid inserting phantom spaces between
     /// words that were only split by override-tag boundaries (e.g. karaoke).
     preceded_by_space: bool,
+    /// True for CJK continuation pieces: split from the previous word at
+    /// a CJK break opportunity, so no space is emitted or measured
+    /// between them (unlike `preceded_by_space`, which measures one).
+    glued_to_prev: bool,
 }
 
 /// Insert '\n' at word boundaries per the ASS wrap style:
@@ -165,8 +169,9 @@ struct WrapWord {
 /// Tag groups are opaque and travel with the word that follows them;
 /// explicit `\N` breaks (and `\n` in mode 2) split the text into
 /// independently wrapped runs. `\n` elsewhere acts as a space. Drawing
-/// runs pass through verbatim and are never wrapped. Words wider than
-/// `max_width` stay on their own line (no character-level splitting).
+/// runs pass through verbatim and are never wrapped. Non-CJK words
+/// wider than `max_width` stay on their own line; CJK runs split at
+/// break opportunities (glued pieces, no phantom spaces).
 ///
 /// `fonts` is the measurement chain (primary first): word widths use
 /// the same per-glyph fallback cascade as shaping, so wrap decisions
@@ -222,29 +227,51 @@ fn wrap_event_text(
     let mut prefix = String::new();
     let mut word = String::new();
 
-    let mut preceded_by_space = false; // first word is not preceded by a space
+    // First word is not preceded by a space; the current word holds
+    // drawing commands when verbatim (never wrapped).
+    let mut preceded_by_space = false;
+    let mut word_is_drawing = false;
 
-    let flush =
-        |prefix: &mut String, word: &mut String, words: &mut Vec<WrapWord>, pbys: &mut bool| {
-            // Flush when there is text, or when a tag prefix must be preserved
-            // (e.g. {\b0} between "Bold" and the following space).
-            if word.is_empty() && prefix.is_empty() {
-                return;
-            }
-            let has_text = !word.is_empty();
-            let width = TextShaper::measure_text_with_fallback(word, fonts, font_size, spacing);
-            words.push(WrapWord {
-                prefix: std::mem::take(prefix),
-                text: std::mem::take(word),
-                width,
-                preceded_by_space: *pbys,
-            });
-            // Only reset when there's actual text — prefix-only entries don't
-            // "consume" the space flag.
-            if has_text {
-                *pbys = false;
-            }
+    let flush = |prefix: &mut String,
+                 word: &mut String,
+                 words: &mut Vec<WrapWord>,
+                 pbys: &mut bool,
+                 is_drawing: &mut bool| {
+        // Flush when there is text, or when a tag prefix must be preserved
+        // (e.g. {\b0} between "Bold" and the following space).
+        if word.is_empty() && prefix.is_empty() {
+            return;
+        }
+        let has_text = !word.is_empty();
+        // Drawing words measure geometric width, never the advances of
+        // their command letters: text-measuring "m 0 0 l 100 ..." forces
+        // bogus line breaks before drawings (and strands karaoke timing
+        // on the break). Unit scale is unavailable here, so this is in
+        // drawing units (exact for the common scale-1/mode-1 case).
+        let width = if *is_drawing && has_text {
+            let commands = word.split('{').next().unwrap_or(word);
+            super::drawing::DrawingParser::measure(commands)
+                .map(|(_, _, w, _)| w)
+                .filter(|w| w.is_finite())
+                .map(|w| w.max(0.0))
+                .unwrap_or(0.0)
+        } else {
+            TextShaper::measure_text_with_fallback(word, fonts, font_size, spacing)
         };
+        *is_drawing = false;
+        words.push(WrapWord {
+            prefix: std::mem::take(prefix),
+            text: std::mem::take(word),
+            width,
+            preceded_by_space: *pbys,
+            glued_to_prev: false,
+        });
+        // Only reset when there's actual text — prefix-only entries don't
+        // "consume" the space flag.
+        if has_text {
+            *pbys = false;
+        }
+    };
 
     let mut chars = text.chars().peekable();
     let mut in_drawing = false;
@@ -261,8 +288,15 @@ fn wrap_event_text(
                 if in_drawing {
                     // Verbatim: drawing runs are never wrapped or split.
                     word.push_str(&group);
+                    word_is_drawing = true;
                 } else {
-                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                    flush(
+                        &mut prefix,
+                        &mut word,
+                        &mut words,
+                        &mut preceded_by_space,
+                        &mut word_is_drawing,
+                    );
                     prefix.push_str(&group);
                 }
                 if let Some(drawing) = drawing_state_after_group(&group) {
@@ -275,11 +309,18 @@ fn wrap_event_text(
                     word.push(n);
                     chars.next();
                 }
+                word_is_drawing = true;
             }
             '\\' => match chars.peek() {
                 Some('N') => {
                     chars.next();
-                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                    flush(
+                        &mut prefix,
+                        &mut word,
+                        &mut words,
+                        &mut preceded_by_space,
+                        &mut word_is_drawing,
+                    );
                     preceded_by_space = true;
                     run_starts.push(words.len());
                 }
@@ -287,11 +328,23 @@ fn wrap_event_text(
                     chars.next();
                     // Soft break: a hard break only in mode 2, else a space.
                     if wrap_style == 2 {
-                        flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                        flush(
+                            &mut prefix,
+                            &mut word,
+                            &mut words,
+                            &mut preceded_by_space,
+                            &mut word_is_drawing,
+                        );
                         preceded_by_space = true;
                         run_starts.push(words.len());
                     } else {
-                        flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                        flush(
+                            &mut prefix,
+                            &mut word,
+                            &mut words,
+                            &mut preceded_by_space,
+                            &mut word_is_drawing,
+                        );
                         preceded_by_space = true;
                     }
                 }
@@ -309,17 +362,33 @@ fn wrap_event_text(
             ' ' | '\t' => {
                 if in_drawing {
                     word.push(c);
+                    word_is_drawing = true;
                 } else {
-                    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+                    flush(
+                        &mut prefix,
+                        &mut word,
+                        &mut words,
+                        &mut preceded_by_space,
+                        &mut word_is_drawing,
+                    );
                     preceded_by_space = true;
                 }
             }
             _ => {
                 word.push(c);
+                if in_drawing {
+                    word_is_drawing = true;
+                }
             }
         }
     }
-    flush(&mut prefix, &mut word, &mut words, &mut preceded_by_space);
+    flush(
+        &mut prefix,
+        &mut word,
+        &mut words,
+        &mut preceded_by_space,
+        &mut word_is_drawing,
+    );
     // Trailing tag groups with no word attach as a zero-width word
     if !prefix.is_empty() {
         words.push(WrapWord {
@@ -327,8 +396,13 @@ fn wrap_event_text(
             text: String::new(),
             width: 0.0,
             preceded_by_space: false,
+            glued_to_prev: false,
         });
     }
+    // CJK break opportunities inside words (conservative UAX #14):
+    // overlong CJK runs wrap without spaces. Continuation pieces glue
+    // with no gap; run starts remap to the split indices.
+    let words = split_cjk_words(words, &mut run_starts, fonts, font_size, spacing);
 
     let space_width = TextShaper::measure_text_with_fallback(" ", fonts, font_size, spacing);
 
@@ -357,6 +431,104 @@ fn wrap_event_text(
     out
 }
 
+/// Split plain-text words at CJK break opportunities
+/// ([`cjk_break_between`](super::shaper::cjk_break_between)); the first
+/// piece keeps the word's prefix/flags, continuations glue with no gap.
+/// Skips drawing words (verbatim text with groups), empty words, and
+/// breaks right after a backslash (would split `\x` escapes across
+/// lines). Remaps `run_starts` to the split indices in place.
+fn split_cjk_words(
+    words: Vec<WrapWord>,
+    run_starts: &mut [usize],
+    fonts: &[&FontArc],
+    font_size: f64,
+    spacing: f64,
+) -> Vec<WrapWord> {
+    use super::shaper::cjk_break_between;
+    let mut out: Vec<WrapWord> = Vec::with_capacity(words.len());
+    let mut index_of: Vec<usize> = Vec::with_capacity(words.len() + 1);
+    for mut word in words {
+        index_of.push(out.len());
+        let chars: Vec<char> = word.text.chars().collect();
+        let splittable = !chars.is_empty() && !word.text.contains('{');
+        let mut cuts = vec![false; chars.len()];
+        if splittable {
+            for i in 0..chars.len().saturating_sub(1) {
+                if chars[i] != '\\' && cjk_break_between(chars[i], chars[i + 1]) {
+                    cuts[i] = true;
+                }
+            }
+        }
+        if !cuts.iter().any(|c| *c) {
+            out.push(word);
+            continue;
+        }
+        let mut start = 0usize;
+        let mut first = true;
+        for (i, cut) in cuts.iter().enumerate() {
+            if !cut {
+                continue;
+            }
+            let piece: String = chars[start..=i].iter().collect();
+            let width = TextShaper::measure_text_with_fallback(&piece, fonts, font_size, spacing);
+            if first {
+                out.push(WrapWord {
+                    prefix: std::mem::take(&mut word.prefix),
+                    text: piece,
+                    width,
+                    preceded_by_space: word.preceded_by_space,
+                    glued_to_prev: false,
+                });
+                first = false;
+            } else {
+                out.push(WrapWord {
+                    prefix: String::new(),
+                    text: piece,
+                    width,
+                    preceded_by_space: false,
+                    glued_to_prev: true,
+                });
+            }
+            start = i + 1;
+        }
+        let piece: String = chars[start..].iter().collect();
+        let width = TextShaper::measure_text_with_fallback(&piece, fonts, font_size, spacing);
+        if first {
+            out.push(WrapWord {
+                prefix: word.prefix,
+                text: piece,
+                width,
+                preceded_by_space: word.preceded_by_space,
+                glued_to_prev: false,
+            });
+        } else {
+            out.push(WrapWord {
+                prefix: String::new(),
+                text: piece,
+                width,
+                preceded_by_space: false,
+                glued_to_prev: true,
+            });
+        }
+    }
+    index_of.push(out.len());
+    for start in run_starts.iter_mut() {
+        *start = index_of.get(*start).copied().unwrap_or(out.len());
+    }
+    out
+}
+
+/// Width charged between a line's previous word and `word`: a full
+/// space, except CJK continuation pieces glue with no gap (they were
+/// split from one word, not separated by a space).
+fn gap_before(word: &WrapWord, space_width: f64) -> f64 {
+    if word.glued_to_prev {
+        0.0
+    } else {
+        space_width
+    }
+}
+
 /// Greedy line grouping. Forward fill makes the top line the widest;
 /// filling from the end (style 3) makes the bottom the widest.
 /// Prefix-only entries ride along without consuming width budget.
@@ -383,8 +555,8 @@ fn greedy_wrap_lines(
         if cur.is_empty() {
             cur_w = ww;
             cur.push(idx);
-        } else if cur_w + space_width + ww <= max_width {
-            cur_w += space_width + ww;
+        } else if cur_w + gap_before(&words[idx], space_width) + ww <= max_width {
+            cur_w += gap_before(&words[idx], space_width) + ww;
             cur.push(idx);
         } else {
             lines.push(std::mem::take(&mut cur));
@@ -424,7 +596,7 @@ fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec
                 continue;
             }
             if text_words > 0 {
-                w += space_width;
+                w += gap_before(word, space_width);
             }
             w += word.width;
             text_words += 1;
@@ -541,95 +713,700 @@ fn complex_fade_opacity(cf: &ComplexFade, elapsed: u64) -> f64 {
     (1.0 - ass_transparency / 255.0).clamp(0.0, 1.0)
 }
 
-/// A karaoke syllable: timing relative to event start plus measured width
-#[derive(Debug, Clone)]
-struct KaraokeSyllable {
-    start_ms: u64,
-    dur_ms: u64,
-    kind: KaraokeKind,
-    width: f64,
-}
-
-/// `\k` fill rule: secondary before the syllable starts, primary from the
-/// exact start instant (not at the end).
-fn karaoke_is_primary(syl: &KaraokeSyllable, elapsed_ms: u64) -> bool {
-    debug_assert_eq!(syl.kind, KaraokeKind::Hard);
-    elapsed_ms >= syl.start_ms
-}
-
-/// `\ko` outline rule: the outline is suppressed *before* the syllable
+/// `\ko` outline rule: the outline is suppressed *before* the run
 /// begins (`elapsed < start`, secondary fill + no outline) and becomes
 /// visible from the exact start instant (primary fill + normal outline).
 fn karaoke_outline_suppressed(elapsed_ms: u64, start_ms: u64) -> bool {
     elapsed_ms < start_ms
 }
 
-/// Build the karaoke syllable timeline for segmented event text.
-///
-/// `seg_widths` must hold the already-resolved layout width of each
-/// segment (shaped text width or drawing width, in the same space the
-/// renderer consumes), so karaoke timing widths match actual rendering
-/// even with inline `\fs`/`\fn`/`\fscx`/`\fsp` changes.
-///
-/// Returns the syllables (times in ms relative to event start, with
-/// measured widths) and, per segment, the index of the syllable it belongs
-/// to (`None` for text before the first karaoke tag). Segments after a
-/// karaoke tag keep belonging to that syllable until the next karaoke tag.
-///
-/// Timing is relative-duration based (`\k` / `\K` / `\kf` / `\ko`
-/// advance the clock), except `\kt<cs>` sets the clock to an explicit
-/// absolute start for the next syllable (gaps and overlaps allowed).
-fn build_karaoke_timeline(
-    segments: &[TextSegment],
-    seg_widths: &[f64],
-) -> (Vec<KaraokeSyllable>, Vec<Option<usize>>) {
-    let mut syllables: Vec<KaraokeSyllable> = Vec::new();
-    let mut seg_syllable: Vec<Option<usize>> = vec![None; segments.len()];
-    let mut clock = 0u64;
-    let mut prev_tag_count = 0usize;
+/// Leading karaoke state a segment's tag group contributes, mirroring
+/// libass's per-glyph effect fields at segment granularity: the state
+/// the segment's first emitted glyph would carry. Empty (non-emitting)
+/// segments pass accumulated state through untouched.
+#[derive(Debug, Clone, Copy, Default)]
+struct KaraokeLead {
+    kind: Option<KaraokeKind>,
+    /// `\k` duration in ms (`effect_timing`; nonzero starts a new run).
+    dur_ms: u64,
+    /// Accumulated dead time in ms (`effect_skip_timing`).
+    skip_ms: u64,
+    /// `\kt` clock reset (`reset_effect`).
+    reset: bool,
+}
 
-    for (i, segment) in segments.iter().enumerate() {
-        // Segments carry the accumulated tag list, so only tags added by
-        // this segment can start a new syllable.
-        let from = prev_tag_count.min(segment.tags.len());
-        let new_tags = &segment.tags[from..];
-        prev_tag_count = segment.tags.len();
+/// One piece of a karaoke run: a (segment, line) span. Runs never cross
+/// event lines, style keys, drawings, or nonzero `\k` durations.
+#[derive(Debug, Clone)]
+struct RunPiece {
+    seg_idx: usize,
+    /// Shaper row (`glyph.y`) for text pieces; `None` for drawings and
+    /// empty leading pieces.
+    line_y: Option<f64>,
+    event_line: usize,
+    /// Full pen width of this piece (max glyph edge / drawing width).
+    width: f64,
+    /// Leading/trailing whitespace trim (visible-span computation).
+    trim_front: f64,
+    trim_back: f64,
+    lead: KaraokeLead,
+    is_drawing: bool,
+}
 
-        // Tags apply in order within the group: `\kt` sets the
-        // absolute clock, and a `\k`-family tag records a syllable at
-        // the clock then current (last karaoke tag in the group wins).
-        // A trailing `\kt` past the syllable end sticks for the next
-        // syllable (explicit gaps/overlaps allowed).
-        let mut started: Option<(KaraokeKind, u64, u64)> = None;
-        for tag in new_tags {
-            match tag {
-                OverrideTag::KaraokeStart(t) => clock = t.saturating_mul(10),
-                OverrideTag::KaraokeDuration(d) => started = Some((KaraokeKind::Hard, *d, clock)),
-                OverrideTag::KaraokeSweep(d) => started = Some((KaraokeKind::Sweep, *d, clock)),
-                OverrideTag::KaraokeOutline(d) => started = Some((KaraokeKind::Outline, *d, clock)),
-                _ => {}
-            }
+/// One karaoke run: maximal same-style, same-line span (libass
+/// `starts_new_run` semantics) with its timing window. Sweep
+/// interpolation, pop timing, and the frz fill-flip are all per-run.
+#[derive(Debug, Clone)]
+struct KaraokeRun {
+    kind: KaraokeKind,
+    /// Window `[start_ms, end_ms)`; `end_ms == start_ms` pops.
+    start_ms: u64,
+    end_ms: u64,
+    /// Visible sweep span in layout px (whitespace-trimmed).
+    span: f64,
+    /// `\frz` in (90, 270): mirror the sweep and swap the colors.
+    flip: bool,
+    /// True when this run interpolates a sweep (vs whole-run pop).
+    sweep: bool,
+    /// Last member glyph `(seg_idx, glyph_idx)` for buffer flushing;
+    /// `None` for runs with no text glyphs (timing only / drawings).
+    last_glyph: Option<(usize, usize)>,
+    /// First member glyph `(seg_idx, glyph_idx)` for baseline-shear
+    /// resets (libass `apply_baseline_shear` restarts the accumulator
+    /// at every run start); `None` when the run has no text glyphs.
+    first_glyph: Option<(usize, usize)>,
+}
+
+impl KaraokeRun {
+    /// Sweep fraction at `elapsed_ms`: 0 before the window, 1 from its
+    /// end, linear inside. Only meaningful when `sweep` is true.
+    fn sweep_frac(&self, elapsed_ms: u64) -> f64 {
+        if elapsed_ms < self.start_ms {
+            0.0
+        } else if self.end_ms <= self.start_ms || elapsed_ms >= self.end_ms {
+            1.0
+        } else {
+            (elapsed_ms - self.start_ms) as f64 / (self.end_ms - self.start_ms) as f64
         }
+    }
+}
 
-        if let Some((kind, dur_cs, start_ms)) = started {
-            let dur_ms = dur_cs.saturating_mul(10);
-            syllables.push(KaraokeSyllable {
-                start_ms,
-                dur_ms,
-                kind,
-                width: 0.0,
-            });
-            clock = clock.max(start_ms.saturating_add(dur_ms));
-        }
+/// Cap on buffered sweep bitmaps per event render (bytes of coverage).
+/// Legit runs hold kilobytes; past this, remaining members fall back to
+/// whole-glyph midpoint coloring against the flushed edge.
+const MAX_SWEEP_BUFFER_BYTES: usize = 16 << 20;
 
-        if !syllables.is_empty() {
-            let idx = syllables.len() - 1;
-            syllables[idx].width += seg_widths.get(i).copied().unwrap_or(0.0).max(0.0);
-            seg_syllable[i] = Some(idx);
+/// One transformed glyph awaiting its run's device-space sweep split.
+/// All placement and color state is captured so the flush paints in
+/// document order with no re-transform.
+struct BufferedSweepGlyph {
+    bitmap: Vec<u8>,
+    w: u32,
+    h: u32,
+    gx: i32,
+    gy: i32,
+    primary: [u8; 4],
+    primary_alpha: u8,
+    secondary: [u8; 4],
+    secondary_alpha: u8,
+    /// Outline `(rgba, radius_x, radius_y)` when active.
+    outline: Option<([u8; 4], f64, f64)>,
+    /// Shadow `(rgba, offset_x, offset_y)` when active.
+    shadow: Option<([u8; 4], f64, f64)>,
+}
+
+/// Buffer for the in-window sweep run currently being transformed.
+/// libass splits the run's transformed bitmaps at one device-space x,
+/// so the run's ink left edge must be known before any member draws.
+/// The buffer holds at most one run (runs are contiguous in document
+/// order) and flushes at the run's last glyph, preserving exact
+/// paint order.
+struct SweepState {
+    buf: Vec<BufferedSweepGlyph>,
+    bytes: usize,
+    run: Option<usize>,
+    /// Degraded run `(id, edge, flip)`: members past the buffer cap
+    /// paint whole-glyph by center against the flushed edge.
+    degraded: Option<(usize, i64, bool)>,
+}
+
+impl SweepState {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            bytes: 0,
+            run: None,
+            degraded: None,
         }
     }
 
-    (syllables, seg_syllable)
+    /// Drop the degraded fallback when leaving its run.
+    fn note_run(&mut self, run_id: Option<usize>) {
+        if self.degraded.map(|(id, _, _)| id) != run_id {
+            self.degraded = None;
+        }
+    }
+
+    /// Paint buffered members, split at the run's device-space edge:
+    /// `round(ink_left + frac * span)` (mirrored when `flip`), with a
+    /// hard boundary (verified against ffmpeg/libass probes: adjacent
+    /// primary/secondary columns, outline unsplit). No-op when empty.
+    fn flush(
+        &mut self,
+        buffer: &mut RenderBuffer,
+        runs: &[KaraokeRun],
+        elapsed_ms: u64,
+        fade_alpha: u8,
+    ) {
+        let run_id = self.run.take();
+        if self.buf.is_empty() {
+            self.bytes = 0;
+            return;
+        }
+        let Some(run_id) = run_id else {
+            self.buf.clear();
+            self.bytes = 0;
+            return;
+        };
+        let Some(run) = runs.get(run_id) else {
+            self.buf.clear();
+            self.bytes = 0;
+            return;
+        };
+        // Device ink bounds over the transformed bitmaps.
+        let mut ink: Option<(i64, i64)> = None;
+        for glyph in &self.buf {
+            let (mut first, mut last) = (u32::MAX, 0u32);
+            for (idx, coverage) in glyph.bitmap.iter().enumerate() {
+                if *coverage > 0 {
+                    let px = (idx as u64 % u64::from(glyph.w.max(1))) as u32;
+                    first = first.min(px);
+                    last = last.max(px);
+                }
+            }
+            if first != u32::MAX {
+                let left = i64::from(glyph.gx) + i64::from(first);
+                let right = i64::from(glyph.gx) + i64::from(last) + 1;
+                ink = Some(match ink {
+                    Some((lo, hi)) => (lo.min(left), hi.max(right)),
+                    None => (left, right),
+                });
+            }
+        }
+        // `span` is layout units, which match device pixels 1:1 here
+        // (shaping already absorbed resolution scale and `\fsc`).
+        let edge = match ink {
+            Some((left, _)) if run.span.is_finite() && run.span >= 0.0 => {
+                let offset = run.sweep_frac(elapsed_ms) * run.span;
+                let raw = if run.flip {
+                    left as f64 + run.span - offset
+                } else {
+                    left as f64 + offset
+                };
+                raw.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+            }
+            // Blank run (whitespace only): nothing paints anyway.
+            _ => ink.map(|(left, _)| left).unwrap_or(0),
+        };
+        for glyph in self.buf.drain(..) {
+            if let Some((rgba, rx, ry)) = glyph.outline {
+                effects::apply_outline_xy(
+                    buffer,
+                    &glyph.bitmap,
+                    glyph.w,
+                    glyph.h,
+                    glyph.gx,
+                    glyph.gy,
+                    rx,
+                    ry,
+                    rgba,
+                );
+            }
+            if let Some((rgba, ox, oy)) = glyph.shadow {
+                effects::apply_shadow(
+                    buffer,
+                    &glyph.bitmap,
+                    glyph.w,
+                    glyph.h,
+                    glyph.gx,
+                    glyph.gy,
+                    ox,
+                    oy,
+                    rgba,
+                );
+            }
+            let (primary, primary_alpha) = (glyph.primary, glyph.primary_alpha);
+            let (secondary, secondary_alpha) = (glyph.secondary, glyph.secondary_alpha);
+            let flip = run.flip;
+            let geom = GlyphGeom {
+                w: glyph.w,
+                h: glyph.h,
+                gx: glyph.gx,
+                gy: glyph.gy,
+            };
+            paint_glyph_fill(buffer, &glyph.bitmap, geom, fade_alpha, |px| {
+                let left_side = i64::from(glyph.gx) + i64::from(px) < edge;
+                if left_side != flip {
+                    (primary, primary_alpha)
+                } else {
+                    (secondary, secondary_alpha)
+                }
+            });
+        }
+        self.bytes = 0;
+        // A degraded run keeps its edge for whole-glyph members.
+        if self.degraded.map(|(id, _, _)| id) == Some(run_id) {
+            self.degraded = Some((run_id, edge, run.flip));
+        }
+    }
+}
+
+/// Placement of one transformed coverage bitmap: size + device origin.
+#[derive(Debug, Clone, Copy)]
+struct GlyphGeom {
+    w: u32,
+    h: u32,
+    gx: i32,
+    gy: i32,
+}
+
+/// Paint one transformed glyph's fill: per-pixel coverage blend, the
+/// color per bitmap column chosen by `pick` (solid fill and karaoke
+/// splits share this path, so blending can never diverge).
+fn paint_glyph_fill(
+    buffer: &mut RenderBuffer,
+    bitmap: &[u8],
+    geom: GlyphGeom,
+    fade_alpha: u8,
+    pick: impl Fn(u32) -> ([u8; 4], u8),
+) {
+    for py in 0..geom.h {
+        for px in 0..geom.w {
+            let idx = (u64::from(py) * u64::from(geom.w) + u64::from(px)) as usize;
+            let coverage = bitmap.get(idx).copied().unwrap_or(0);
+            if coverage > 0 {
+                let (color, color_alpha) = pick(px);
+                let a = ((u32::from(coverage) * u32::from(color_alpha) / 255)
+                    * u32::from(fade_alpha)
+                    / 255) as u8;
+                // Widen through i64 and bounds-check before u32
+                // conversion: never wrap i32 or rely on casts.
+                let (Some(sx), Some(sy)) = (
+                    add_coord(geom.gx, px, buffer.width),
+                    add_coord(geom.gy, py, buffer.height),
+                ) else {
+                    continue;
+                };
+                buffer.blend_pixel(sx, sy, color[0], color[1], color[2], a);
+            }
+        }
+    }
+}
+
+impl ResolvedStyle {
+    /// libass `split_style_runs` key: two segments share a karaoke run
+    /// only when every render-affecting field matches. Line-global
+    /// state (position, clips, fades, alignment, margins) is excluded,
+    /// exactly like upstream.
+    fn same_karaoke_run(&self, other: &Self) -> bool {
+        self.font_name == other.font_name
+            && self.font_size == other.font_size
+            && self.color == other.color
+            && self.secondary_color == other.secondary_color
+            && self.outline_color == other.outline_color
+            && self.shadow_color == other.shadow_color
+            && self.back_color == other.back_color
+            && self.font_weight == other.font_weight
+            && self.italic == other.italic
+            && self.underline == other.underline
+            && self.strike_out == other.strike_out
+            && self.scale_x == other.scale_x
+            && self.scale_y == other.scale_y
+            && self.spacing == other.spacing
+            && self.angle == other.angle
+            && self.rotation_x == other.rotation_x
+            && self.rotation_y == other.rotation_y
+            && self.border_style == other.border_style
+            && self.outline == other.outline
+            && self.outline_x == other.outline_x
+            && self.outline_y == other.outline_y
+            && self.shadow == other.shadow
+            && self.shadow_x == other.shadow_x
+            && self.shadow_y == other.shadow_y
+            && self.shear_x == other.shear_x
+            && self.shear_y == other.shear_y
+            && self.blur == other.blur
+    }
+}
+
+/// Sanitize a measured layout width for sweep math: finite and
+/// non-negative, else 0.
+fn clean_width(v: f64) -> f64 {
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Karaoke run build product: the runs, a per-segment per-glyph run
+/// assignment (by glyph index into the shaped line), and a
+/// per-segment drawing run assignment. `None` means "no karaoke here"
+/// (normal rendering).
+type KaraokeBuild = (Vec<KaraokeRun>, Vec<Vec<Option<usize>>>, Vec<Option<usize>>);
+
+/// Build karaoke runs for segmented event text, replicating libass
+/// (`split_style_runs` + `ass_process_karaoke_effects`, verified against
+/// ffmpeg-rendered probes):
+///
+/// * Tag groups accumulate effect state in order: `\kt` assigns skip
+///   and resets, each `\k`-family tag adds the previous duration to
+///   skip and sets the new duration (stacked tags accumulate dead
+///   time). State clears at the next emitting segment, so `\k0`
+///   mid-run adds skip without breaking the run.
+/// * Runs break at nonzero durations, effect-type changes, style-key
+///   changes, drawings, and event-line changes. Later runs in a
+///   syllable pop at the window end instead of sweeping; `\N` runs
+///   consume timing invisibly.
+/// * Sweep spans exclude trimmed leading/trailing ASCII spaces.
+fn build_karaoke_runs(segments: &[TextSegment], items: &[LayoutItem]) -> KaraokeBuild {
+    // ---- Pass 1: accumulate tag state, cut (segment, line) pieces. ----
+    let mut pieces: Vec<RunPiece> = Vec::new();
+    let mut seg_pieces: Vec<Vec<usize>> = vec![Vec::new(); segments.len()];
+    let mut pending = KaraokeLead::default();
+    let mut prev_tag_count = 0usize;
+    // Event-line tracker mirroring the render loop: leading breaks and
+    // internal row changes advance, trailing breaks advance at the end.
+    let mut event_line = 0usize;
+
+    for (seg_idx, segment) in segments.iter().enumerate() {
+        let from = prev_tag_count.min(segment.tags.len());
+        for tag in &segment.tags[from..] {
+            match tag {
+                // `\kt` assigns (wiping stacked durations) and resets.
+                OverrideTag::KaraokeStart(t) => {
+                    pending.skip_ms = t.saturating_mul(10);
+                    pending.dur_ms = 0;
+                    pending.reset = true;
+                }
+                // Each `\k` banks the previous duration as skip, then
+                // takes over (last tag in the group wins the duration).
+                OverrideTag::KaraokeDuration(d) => {
+                    pending.skip_ms = pending.skip_ms.saturating_add(pending.dur_ms);
+                    pending.dur_ms = d.saturating_mul(10);
+                    pending.kind = Some(KaraokeKind::Hard);
+                }
+                OverrideTag::KaraokeSweep(d) => {
+                    pending.skip_ms = pending.skip_ms.saturating_add(pending.dur_ms);
+                    pending.dur_ms = d.saturating_mul(10);
+                    pending.kind = Some(KaraokeKind::Sweep);
+                }
+                OverrideTag::KaraokeOutline(d) => {
+                    pending.skip_ms = pending.skip_ms.saturating_add(pending.dur_ms);
+                    pending.dur_ms = d.saturating_mul(10);
+                    pending.kind = Some(KaraokeKind::Outline);
+                }
+                _ => {}
+            }
+        }
+        prev_tag_count = segment.tags.len();
+
+        let item = match items.get(seg_idx) {
+            Some(item) => item,
+            None => continue,
+        };
+        let emits = !segment.text.is_empty() || item.drawing.is_some();
+        if !emits {
+            // Tag carrier: state passes through uncleared.
+            continue;
+        }
+        let mut first_piece = true;
+        let mut take_lead = || {
+            if first_piece {
+                first_piece = false;
+                std::mem::take(&mut pending)
+            } else {
+                KaraokeLead::default()
+            }
+        };
+
+        if item.drawing.is_some() {
+            let width = clean_width(item.drawing.as_ref().map(|d| d.width).unwrap_or(0.0));
+            let pid = pieces.len();
+            pieces.push(RunPiece {
+                seg_idx,
+                line_y: None,
+                event_line,
+                width,
+                trim_front: 0.0,
+                trim_back: 0.0,
+                lead: take_lead(),
+                is_drawing: true,
+            });
+            seg_pieces[seg_idx].push(pid);
+        } else {
+            // Group shaped glyphs by row (exact `y`, like the render
+            // loop's row marker).
+            let mut rows: Vec<(f64, Vec<usize>)> = Vec::new();
+            for (glyph_idx, glyph) in item.shaped.glyphs.iter().enumerate() {
+                match rows.last_mut() {
+                    Some((y, idxs)) if *y == glyph.y => idxs.push(glyph_idx),
+                    _ => rows.push((glyph.y, vec![glyph_idx])),
+                }
+            }
+            // A leading break means the state rides an empty first
+            // piece (the `\n` glyph carries it in libass).
+            if segment.text.starts_with('\n') {
+                let pid = pieces.len();
+                pieces.push(RunPiece {
+                    seg_idx,
+                    line_y: None,
+                    event_line,
+                    width: 0.0,
+                    trim_front: 0.0,
+                    trim_back: 0.0,
+                    lead: take_lead(),
+                    is_drawing: false,
+                });
+                seg_pieces[seg_idx].push(pid);
+            }
+            let leading = segment.text.chars().take_while(|c| *c == '\n').count();
+            event_line = event_line.saturating_add(leading);
+            for (row_pos, (y, idxs)) in rows.iter().enumerate() {
+                if row_pos > 0 {
+                    event_line = event_line.saturating_add(1);
+                }
+                // Pen width mirrors the render loop's `row_pen`: max
+                // edge over rendered (non-zero-scale) glyphs.
+                let mut pen = 0.0f64;
+                for &glyph_idx in idxs {
+                    let glyph = &item.shaped.glyphs[glyph_idx];
+                    if glyph.scale_x > 0.0 && glyph.scale_y > 0.0 {
+                        let edge = glyph.x + glyph.advance;
+                        if edge.is_finite() && edge > pen {
+                            pen = edge;
+                        }
+                    }
+                }
+                // Visible span trims ASCII spaces (libass
+                // `IS_WHITESPACE`: space and newline only).
+                let mut front = pen;
+                let mut back = 0.0f64;
+                let mut first_visible: Option<f64> = None;
+                let mut last_visible_end = 0.0f64;
+                for &glyph_idx in idxs {
+                    let glyph = &item.shaped.glyphs[glyph_idx];
+                    if glyph.ch != ' ' {
+                        if first_visible.is_none() {
+                            first_visible = Some(glyph.x);
+                        }
+                        let end = glyph.x + glyph.advance;
+                        if end.is_finite() {
+                            last_visible_end = last_visible_end.max(end);
+                        }
+                    }
+                }
+                if let Some(start) = first_visible {
+                    if start.is_finite() {
+                        front = start.max(0.0).min(pen);
+                    }
+                    back = (pen - last_visible_end).max(0.0);
+                }
+                let pid = pieces.len();
+                pieces.push(RunPiece {
+                    seg_idx,
+                    line_y: Some(*y),
+                    event_line,
+                    width: clean_width(pen),
+                    trim_front: clean_width(front),
+                    trim_back: clean_width(back),
+                    lead: take_lead(),
+                    is_drawing: false,
+                });
+                seg_pieces[seg_idx].push(pid);
+            }
+        }
+        if segment.text.ends_with('\n') {
+            event_line = event_line.saturating_add(1);
+        }
+        // Emitted: any state not taken by a first piece is dropped
+        // (a segment always takes it on its first piece, so this only
+        // clears when a segment somehow produced no pieces).
+        pending = KaraokeLead::default();
+    }
+
+    // ---- Pass 2: group pieces into runs (libass run breaks). ----
+    let mut run_of_piece: Vec<Option<usize>> = vec![None; pieces.len()];
+    let mut run_pieces: Vec<Vec<usize>> = Vec::new();
+    let mut last_kind: Option<KaraokeKind> = None;
+    for (pid, piece) in pieces.iter().enumerate() {
+        let breaks = if pid == 0 {
+            true
+        } else {
+            let prev = &pieces[pid - 1];
+            piece.lead.dur_ms > 0
+                || (piece.lead.kind.is_some() && piece.lead.kind != last_kind)
+                || piece.is_drawing
+                || prev.is_drawing
+                || piece.event_line != prev.event_line
+                || !items[piece.seg_idx]
+                    .resolved
+                    .same_karaoke_run(&items[prev.seg_idx].resolved)
+        };
+        if piece.lead.kind.is_some() {
+            last_kind = piece.lead.kind;
+        }
+        if breaks || run_pieces.is_empty() {
+            run_pieces.push(Vec::new());
+        }
+        let run_idx = run_pieces.len() - 1;
+        run_pieces[run_idx].push(pid);
+        run_of_piece[pid] = Some(run_idx);
+    }
+
+    // ---- Pass 3: timing per run (`ass_process_karaoke_effects`). ----
+    let mut runs: Vec<KaraokeRun> = Vec::new();
+    let mut run_id_of_group: Vec<Option<usize>> = vec![None; run_pieces.len()];
+    let mut clock = 0u64;
+    let mut skip_accum = 0u64;
+    let mut effect: Option<KaraokeKind> = None;
+    let mut has_reset = false;
+    for (group_idx, group) in run_pieces.iter().enumerate() {
+        let start_lead = pieces[group[0]].lead;
+        if start_lead.kind.is_some() {
+            effect = start_lead.kind;
+        }
+        // Fold non-start pieces' state (persists even through runs
+        // without karaoke, exactly like upstream's skip_timing).
+        let mut fold_piece = |lead: KaraokeLead| {
+            if lead.reset {
+                has_reset = true;
+                skip_accum = 0;
+            }
+            skip_accum = skip_accum.saturating_add(lead.skip_ms);
+        };
+        if effect.is_none() {
+            for &pid in &group[1..] {
+                fold_piece(pieces[pid].lead);
+            }
+            continue;
+        }
+        if start_lead.reset {
+            clock = 0;
+        }
+        let tm_start = clock.saturating_add(start_lead.skip_ms);
+        let tm_end = tm_start.saturating_add(start_lead.dur_ms);
+        for &pid in &group[1..] {
+            fold_piece(pieces[pid].lead);
+        }
+        clock = (if has_reset { 0 } else { tm_end }).saturating_add(skip_accum);
+        has_reset = false;
+        skip_accum = 0;
+
+        let kind = effect.unwrap_or(KaraokeKind::Hard);
+        let end_eff = if kind == KaraokeKind::Sweep {
+            tm_end
+        } else {
+            tm_start
+        };
+        let span: f64 = group.iter().map(|&pid| pieces[pid].width).sum::<f64>() + 0.0;
+        let front = pieces[group[0]].trim_front;
+        let back = pieces[group[group.len() - 1]].trim_back;
+        let span = clean_width(span - front - back);
+        let angle = items[pieces[group[0]].seg_idx].resolved.angle;
+        // Euclidean modulo: equivalent rotations (e.g. -170 and 190)
+        // flip identically.
+        let frz = angle.rem_euclid(360.0);
+        let flip = frz > 90.0 && frz < 270.0;
+
+        // Last member glyph (for sweep-buffer flushing): scan member
+        // pieces in reverse for the last text piece with glyphs.
+        let mut last_glyph = None;
+        for &pid in group.iter().rev() {
+            let piece = &pieces[pid];
+            if let Some(y) = piece.line_y {
+                if let Some(item) = items.get(piece.seg_idx) {
+                    if let Some((glyph_idx, _)) = item
+                        .shaped
+                        .glyphs
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, glyph)| glyph.y == y)
+                    {
+                        last_glyph = Some((piece.seg_idx, glyph_idx));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // First member glyph (for shear resets): scan member
+        // pieces forward for the first text piece with glyphs.
+        let mut first_glyph = None;
+        for &pid in group.iter() {
+            let piece = &pieces[pid];
+            if let Some(y) = piece.line_y {
+                if let Some(item) = items.get(piece.seg_idx) {
+                    if let Some((glyph_idx, _)) = item
+                        .shaped
+                        .glyphs
+                        .iter()
+                        .enumerate()
+                        .find(|(_, glyph)| glyph.y == y)
+                    {
+                        first_glyph = Some((piece.seg_idx, glyph_idx));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let run_id = runs.len();
+        run_id_of_group[group_idx] = Some(run_id);
+        runs.push(KaraokeRun {
+            kind,
+            start_ms: tm_start,
+            end_ms: end_eff,
+            span,
+            flip,
+            sweep: kind == KaraokeKind::Sweep && tm_end > tm_start,
+            last_glyph,
+            first_glyph,
+        });
+    }
+
+    // ---- Pass 4: glyph/drawing assignment. ----
+    let mut glyph_run: Vec<Vec<Option<usize>>> = segments
+        .iter()
+        .enumerate()
+        .map(|(seg_idx, _)| {
+            items
+                .get(seg_idx)
+                .map(|item| vec![None; item.shaped.glyphs.len()])
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut drawing_run: Vec<Option<usize>> = vec![None; segments.len()];
+    for (pid, piece) in pieces.iter().enumerate() {
+        let Some(group_idx) = run_of_piece[pid] else {
+            continue;
+        };
+        let run_id = run_id_of_group[group_idx];
+        if piece.is_drawing {
+            drawing_run[piece.seg_idx] = run_id;
+        } else if let Some(y) = piece.line_y {
+            if let Some(item) = items.get(piece.seg_idx) {
+                for (glyph_idx, glyph) in item.shaped.glyphs.iter().enumerate() {
+                    if glyph.y == y {
+                        glyph_run[piece.seg_idx][glyph_idx] = run_id;
+                    }
+                }
+            }
+        }
+    }
+
+    (runs, glyph_run, drawing_run)
 }
 
 /// Measured vector drawing for one segment, in video pixels.
@@ -753,6 +1530,205 @@ fn event_line_widths(segments: &[TextSegment], items: &[LayoutItem]) -> Vec<f64>
         }
         if segment.text.ends_with('\n') {
             lines.push(0.0);
+        }
+    }
+    lines
+}
+
+/// One event line's box geometry for `BorderStyle=3`: width plus the
+/// top offset (relative to the block top) and height.
+#[derive(Debug, Clone, Copy)]
+struct EventLineBox {
+    width: f64,
+    y: f64,
+    height: f64,
+    /// True once a content row (text or drawing) joins the line.
+    /// Interior empty lines still draw (they tile the column); a
+    /// trailing empty last line is skipped (extent-based, VSFilter
+    /// draws no box past the final ink).
+    has_content: bool,
+}
+
+/// Per-line box geometry, mirroring the render loop's line model (same
+/// breaks and shaper rows as [`event_line_widths`]) so each box frames
+/// the ink it belongs to:
+///
+/// * Content rows join the current line (widths add, height takes the
+///   max) or open a new one at mid-segment row changes, at their exact
+///   shaper y (render truth, gaps included).
+/// * Leading breaks append lines (the first fills the pristine initial
+///   line); their provisional tops backfill from the segment's first
+///   content row so breaks tile exactly.
+/// * Interior row gaps synthesize empty lines; a trailing break appends
+///   one empty line tiling the previous bottom (libass draws boxes for
+///   empty lines too, including trailing ones).
+/// * Drawings join at the segment base (the render loop draws them
+///   there even when their text holds breaks); their row height for
+///   empty-line tiling is the segment's shaped line height.
+///
+/// Widths match [`event_line_widths`] line for line except for
+/// synthesized gap rows (zero width); tops tile without gaps because
+/// every render-loop y advance is covered by line heights.
+fn event_line_boxes(segments: &[TextSegment], items: &[LayoutItem]) -> Vec<EventLineBox> {
+    /// Cap on synthesized gap rows per gap: row gaps are bounded by
+    /// the segment's break count in practice; this only bounds float
+    /// garbage from reaching the box loop.
+    const MAX_GAP_ROWS: i64 = 1_000_000;
+    let mut lines = vec![EventLineBox {
+        width: 0.0,
+        y: 0.0,
+        height: 0.0,
+        has_content: false,
+    }];
+    // Pen y of the current segment base (mirrors the render loop's
+    // `line_y_offset`).
+    let mut rel_y = 0.0f64;
+    let clean = |v: f64| {
+        if v.is_finite() {
+            v.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    for (segment, item) in segments.iter().zip(items.iter()) {
+        if item.skipped {
+            continue;
+        }
+        let seg_base = rel_y;
+        let lh = clean(item.shaped.line_height);
+        // Leading breaks: the first fills the pristine initial line,
+        // the rest append (matching `event_line_widths` counts).
+        let leading = segment.text.chars().take_while(|c| *c == '\n').count();
+        // Appended leading lines start here (the filled initial line,
+        // when pristine, is slot 0 and never backfilled).
+        let lead_start = lines.len();
+        if leading > 0 {
+            let pristine = lines.len() == 1 && lines[0].width == 0.0 && lines[0].height == 0.0;
+            if pristine {
+                lines[0].height = lh;
+            }
+            for k in 0..leading {
+                // Provisional tops tile forward; content backfills.
+                let slot = if pristine { k + 1 } else { k };
+                lines.push(EventLineBox {
+                    width: 0.0,
+                    y: seg_base + slot as f64 * lh,
+                    height: lh,
+                    has_content: false,
+                });
+            }
+        }
+        // Content rows `(y, width, height, is_gap)`: drawings are
+        // atomic (single row at the segment base); text rows group
+        // exactly like `event_line_widths`.
+        let mut rows: Vec<(f64, f64, f64, bool)> = Vec::new();
+        if let Some(drawing) = &item.drawing {
+            rows.push((0.0, clean(drawing.width), clean(drawing.height), false));
+        } else {
+            let mut row_y: Option<f64> = None;
+            let mut row_w = 0.0f64;
+            let mut prev_y: Option<f64> = None;
+            let flush_row = |rows: &mut Vec<(f64, f64, f64, bool)>,
+                             prev_y: &mut Option<f64>,
+                             y: f64,
+                             w: f64| {
+                // Synthesize empty slots for skipped row indices.
+                if lh > 0.0 {
+                    if let Some(py) = *prev_y {
+                        let diff = y - py;
+                        if diff.is_finite() && diff > 0.0 {
+                            let ratio = diff / lh;
+                            if ratio.is_finite() {
+                                let missing = (ratio.round() as i64).clamp(0, MAX_GAP_ROWS) - 1;
+                                for m in 1..=missing {
+                                    rows.push((py + m as f64 * lh, 0.0, lh, true));
+                                }
+                            }
+                        }
+                    }
+                }
+                rows.push((y, w, lh, false));
+                *prev_y = Some(y);
+            };
+            for glyph in &item.shaped.glyphs {
+                if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
+                    continue;
+                }
+                match row_y {
+                    Some(y) if y == glyph.y => {}
+                    _ => {
+                        if let Some(y) = row_y {
+                            flush_row(&mut rows, &mut prev_y, y, row_w);
+                        }
+                        row_y = Some(glyph.y);
+                        row_w = 0.0;
+                    }
+                }
+                let edge = glyph.x + glyph.advance;
+                if edge.is_finite() && edge > row_w {
+                    row_w = edge;
+                }
+            }
+            if let Some(y) = row_y {
+                flush_row(&mut rows, &mut prev_y, y, row_w);
+            }
+        }
+        // First content row joins the current line (overwriting its y
+        // with render truth) and backfills leading empties; later rows
+        // open new lines.
+        let mut first_row = true;
+        for (row_y, row_w, row_h, is_gap) in rows {
+            let exact_y = seg_base + row_y;
+            if first_row {
+                first_row = false;
+                // Backfill leading slots from the content row so breaks
+                // tile exactly (the last appended line takes content).
+                if leading > 0 && lh > 0.0 {
+                    for k in 0..leading.saturating_sub(1) {
+                        if let Some(slot) = lines.get_mut(lead_start + k) {
+                            slot.y = exact_y - (leading - 1 - k) as f64 * lh;
+                            slot.height = lh;
+                        }
+                    }
+                }
+                if let Some(last) = lines.last_mut() {
+                    last.y = exact_y;
+                    last.height = last.height.max(row_h);
+                    last.width += row_w;
+                    if !is_gap {
+                        last.has_content = true;
+                    }
+                }
+            } else {
+                lines.push(EventLineBox {
+                    width: row_w,
+                    y: exact_y,
+                    height: row_h,
+                    // Gap-synthesis rows carry no ink but tile the
+                    // column; only real content rows mark the line.
+                    has_content: !is_gap,
+                });
+            }
+        }
+        if segment.text.ends_with('\n') {
+            // Advance past the whole segment (mirrors the render loop),
+            // then open one empty line tiling the previous bottom.
+            let adv = if let Some(drawing) = &item.drawing {
+                clean(drawing.height)
+            } else {
+                clean(item.shaped.height)
+            };
+            rel_y += adv;
+            let (y, h) = match lines.last() {
+                Some(last) => (last.y + last.height, lh),
+                None => (rel_y, lh),
+            };
+            lines.push(EventLineBox {
+                width: 0.0,
+                y,
+                height: h,
+                has_content: false,
+            });
         }
     }
     lines
@@ -1967,74 +2943,119 @@ impl Compositor {
             (ax, ay)
         };
 
-        // Border style 3 is an opaque box behind the event text:
-        // the text block grown by the effective outline on every side.
+        // Border style 3 is an opaque box behind EACH event line
+        // (libass/VSFilter draw per-line boxes, not one block box):
+        // every line grown by the effective outline on every side.
         // Margins position the text; they are not box padding. The
         // fill is the OUTLINE color (VSFilter copies colors[2] into
         // the box polygon; libass fills the outline bitmap): BackColour
-        // only affects the shadow.
+        // only affects the shadow. Boxes stay axis-aligned under
+        // rotation (references do not rotate them; text may spill).
         if resolved.border_style == 3 {
             let box_color = resolved.outline_color.to_ass_components();
             let clamp_i32 = |v: f64| {
                 finite_to_i32(v.clamp(f64::from(i32::MIN), f64::from(i32::MAX))).unwrap_or(0)
             };
+            let clamp_dim = |v: f64| clamp_i32(v.ceil().clamp(0.0, 65_536.0));
             let (box_rx, box_ry) = if resolved.scaled_border_and_shadow {
                 (scale_x, scale_y)
             } else {
                 (1.0, 1.0)
             };
-            effects::apply_opaque_box(
-                buffer,
-                clamp_i32(base_x),
-                clamp_i32(base_y - layout.baseline),
-                clamp_i32(layout.width.ceil().clamp(0.0, 65_536.0)),
-                clamp_i32(layout.height.ceil().clamp(0.0, 65_536.0)),
-                clamp_i32(
-                    (resolved.outline_x * box_rx * resolved.scale_x / 100.0)
-                        .round()
-                        .clamp(0.0, 65_536.0),
-                ),
-                clamp_i32(
-                    (resolved.outline_y * box_ry * resolved.scale_y / 100.0)
-                        .round()
-                        .clamp(0.0, 65_536.0),
-                ),
-                [
-                    box_color[0],
-                    box_color[1],
-                    box_color[2],
-                    (f64::from(255 - box_color[3]) * alpha_mult).clamp(0.0, 255.0) as u8,
-                ],
+            let pad_x = clamp_i32(
+                (resolved.outline_x * box_rx * resolved.scale_x / 100.0)
+                    .round()
+                    .clamp(0.0, 65_536.0),
             );
+            let pad_y = clamp_i32(
+                (resolved.outline_y * box_ry * resolved.scale_y / 100.0)
+                    .round()
+                    .clamp(0.0, 65_536.0),
+            );
+            let fill = [
+                box_color[0],
+                box_color[1],
+                box_color[2],
+                (f64::from(255 - box_color[3]) * alpha_mult).clamp(0.0, 255.0) as u8,
+            ];
+            // Box shadow (references shadow the padded box): same
+            // offset/color model as glyph shadows, drawn first so all
+            // boxes paint over all shadows.
+            let shadow_c = resolved.shadow_color.to_ass_components();
+            let shadow_fill = [
+                shadow_c[0],
+                shadow_c[1],
+                shadow_c[2],
+                (f64::from(255 - shadow_c[3]) * alpha_mult).clamp(0.0, 255.0) as u8,
+            ];
+            let shadow_ox = clamp_i32(
+                (resolved.shadow_x * box_rx * resolved.scale_x / 100.0)
+                    .round()
+                    .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
+            );
+            let shadow_oy = clamp_i32(
+                (resolved.shadow_y * box_ry * resolved.scale_y / 100.0)
+                    .round()
+                    .clamp(f64::from(i32::MIN), f64::from(i32::MAX)),
+            );
+            let shadow_active = shadow_ox != 0 || shadow_oy != 0;
+            let line_boxes = event_line_boxes(&segments, &layout.items);
+            // A trailing empty last line draws nothing (extent-based).
+            let drawable = line_boxes
+                .iter()
+                .enumerate()
+                .filter(|(i, line)| line.has_content || *i + 1 < line_boxes.len());
+            let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
+            for (_, line) in drawable {
+                let inset = line_align_inset(line.width, layout.width, resolved.alignment);
+                let rect = (
+                    clamp_i32(base_x + inset),
+                    clamp_i32(base_y - layout.baseline + line.y),
+                    clamp_dim(line.width),
+                    clamp_dim(line.height),
+                );
+                rects.push(rect);
+            }
+            if shadow_active {
+                for (x, y, w, h) in &rects {
+                    effects::apply_opaque_box(
+                        buffer,
+                        x.saturating_add(shadow_ox),
+                        y.saturating_add(shadow_oy),
+                        *w,
+                        *h,
+                        pad_x,
+                        pad_y,
+                        shadow_fill,
+                    );
+                }
+            }
+            for (x, y, w, h) in &rects {
+                effects::apply_opaque_box(buffer, *x, *y, *w, *h, pad_x, pad_y, fill);
+            }
         }
 
-        // Karaoke syllable timeline (empty when the event has no karaoke tags).
-        // Widths come from the layout pass, so inline style changes and
+        // Karaoke runs (empty when the event has no karaoke tags).
+        // Spans come from the layout pass, so inline style changes and
         // drawings measure exactly what rendering consumes.
-        let seg_widths: Vec<f64> = layout
-            .items
-            .iter()
-            .map(|item| {
-                if item.skipped {
-                    0.0
-                } else if let Some(drawing) = &item.drawing {
-                    drawing.width
-                } else {
-                    item.shaped.width
-                }
-            })
-            .collect();
-        let (karaoke_syllables, seg_syllable) = build_karaoke_timeline(&segments, &seg_widths);
-        let mut syllable_consumed: Vec<f64> = vec![0.0; karaoke_syllables.len()];
+        let (karaoke_runs, glyph_run, drawing_run) = build_karaoke_runs(&segments, &layout.items);
         let elapsed_ms = time_ms.saturating_sub(start_ms);
+        // Sweep buffer for the in-window sweep run (see `SweepState`).
+        let mut sweep = SweepState::new();
 
         // Per-segment rendering
         let mut x_offset = 0.0_f64;
         let mut line_y_offset = 0.0_f64;
         // Cumulative `\fay` baseline shear (libass
-        // `apply_baseline_shear`): reset per line, accumulated across
-        // segments on the same line like libass whole-text-layout mode.
+        // `apply_baseline_shear`, default non-whole-text-layout mode):
+        // reset at every line break AND every style-run start
+        // (style-key change, drawing boundary, or karaoke-run start),
+        // accumulated across same-run segments otherwise.
         let mut fay_line_shear = 0.0_f64;
+        // Last segment that fed the shear accumulator (style-run
+        // tracking for the reset above; skipped segments never update
+        // it, matching libass where empty spans emit no glyphs).
+        let mut prev_shear_seg: Option<usize> = None;
         // True line widths for per-line alignment, plus the current
         // line index (advanced on breaks and mid-segment row changes
         // exactly as `event_line_widths` counts them).
@@ -2055,56 +3076,22 @@ impl Compositor {
             }
             let seg_first_line = cur_line;
 
-            // Style/shape come from the layout pass; karaoke recolors here.
-            let mut segment_resolved = item.resolved.clone();
-
-            // Apply karaoke highlighting for this segment's syllable.
-            // sweep_boundary holds the sweep edge in segment-local x
-            // coordinates when the syllable uses \K / \kf.
-            let mut sweep_boundary: Option<f64> = None;
-            if let Some(syl_idx) = seg_syllable[seg_idx] {
-                let syl = &karaoke_syllables[syl_idx];
-                let started = elapsed_ms >= syl.start_ms;
-                let finished = elapsed_ms >= syl.start_ms.saturating_add(syl.dur_ms);
-                match syl.kind {
-                    KaraokeKind::Hard => {
-                        if !karaoke_is_primary(syl, elapsed_ms) {
-                            segment_resolved.color = segment_resolved.secondary_color;
-                        }
-                    }
-                    KaraokeKind::Outline => {
-                        // \ko behaves like \k for fill (secondary before
-                        // start, primary from start) plus the outline rule:
-                        // outline suppressed before start, visible from start.
-                        if karaoke_outline_suppressed(elapsed_ms, syl.start_ms) {
-                            segment_resolved.color = segment_resolved.secondary_color;
-                            segment_resolved.outline_color.alpha = 255;
-                        }
-                    }
-                    KaraokeKind::Sweep => {
-                        let frac = if !started {
-                            0.0
-                        } else if syl.dur_ms == 0 || finished {
-                            1.0
-                        } else {
-                            (elapsed_ms - syl.start_ms) as f64 / syl.dur_ms as f64
-                        };
-                        sweep_boundary = Some(frac * syl.width - syllable_consumed[syl_idx]);
-                    }
-                }
-            }
+            // Style/shape come from the layout pass; karaoke recolors
+            // per glyph/run below (runs can change mid-segment at line
+            // breaks, so there is no per-segment sweep state).
+            let segment_resolved = item.resolved.clone();
 
             // Drawing segments render vector paths at the pen position.
             if let Some(drawing) = &item.drawing {
+                // Drawings break karaoke runs; a pending sweep (only
+                // possible under builder/render skew) flushes first.
+                sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
+                // Every drawing starts a libass style run: the shear
+                // accumulator restarts here (and restarts again at the
+                // next text segment via the drawing-boundary check).
+                fay_line_shear = 0.0;
+                prev_shear_seg = Some(seg_idx);
                 let unit = drawing_unit_scale(scale_x, scale_y, drawing.mode);
-                // Sweep uses a midpoint approximation for drawings (no
-                // per-pixel split inside vector paths).
-                if let Some(edge) = sweep_boundary {
-                    if edge.is_finite() && drawing.width / 2.0 > edge {
-                        segment_resolved.color = segment_resolved.secondary_color;
-                    }
-                }
-                let color = segment_resolved.color.to_ass_components();
                 // The pen sits on the text baseline; a drawing's box
                 // hangs above it (bottom on the baseline), matching
                 // libass/VSFilter placement for drawing lines.
@@ -2113,25 +3100,92 @@ impl Compositor {
                     layout.width,
                     resolved.alignment,
                 );
-                super::drawing::DrawingParser::render_drawing(
-                    buffer,
-                    &segment.text,
-                    base_x + x_offset + draw_inset - drawing.min_x,
-                    base_y + line_y_offset
-                        - drawing.height
-                        - drawing.min_y
-                        - segment_resolved.drawing_baseline_offset * unit
-                        + fay_line_shear,
-                    unit,
-                    [
-                        color[0],
-                        color[1],
-                        color[2],
-                        (segment_resolved.color.opacity() as f64 * alpha_mult) as u8,
-                    ],
-                );
-                if let Some(syl_idx) = seg_syllable[seg_idx] {
-                    syllable_consumed[syl_idx] += drawing.width;
+                let draw_x = base_x + x_offset + draw_inset - drawing.min_x;
+                let draw_y = base_y + line_y_offset
+                    - drawing.height
+                    - drawing.min_y
+                    - segment_resolved.drawing_baseline_offset * unit
+                    + fay_line_shear;
+                // Karaoke for drawings (libass splits drawing runs
+                // exactly like text runs: verified by probe).
+                let run = drawing_run[seg_idx].and_then(|id| karaoke_runs.get(id));
+                let sweep_split = run.and_then(|run| {
+                    if run.kind == KaraokeKind::Sweep
+                        && run.sweep
+                        && elapsed_ms >= run.start_ms
+                        && elapsed_ms < run.end_ms
+                        && run.span > 0.0
+                    {
+                        // Device path-left + scaled layout span (probe:
+                        // libass splits path width, not ink). Drawings
+                        // render unrotated here, so `flip` (a rotation
+                        // effect) never applies: mirroring the sweep of
+                        // an unrotated drawing would be wrong.
+                        let offset = run.sweep_frac(elapsed_ms) * run.span * unit;
+                        let left = draw_x + drawing.min_x * unit;
+                        if left.is_finite() && offset.is_finite() && unit.is_finite() {
+                            return Some((left + offset).round() as i64);
+                        }
+                    }
+                    None
+                });
+                match (run, sweep_split) {
+                    (Some(_), Some(brk)) => {
+                        // Two non-overlapping clipped passes with a hard
+                        // edge (probe: adjacent primary/secondary
+                        // columns, no blended column).
+                        let (primary, secondary) =
+                            (segment_resolved.color, segment_resolved.secondary_color);
+                        let pa = (primary.opacity() as f64 * alpha_mult) as u8;
+                        let sa = (secondary.opacity() as f64 * alpha_mult) as u8;
+                        let pc = primary.to_ass_components();
+                        let sc = secondary.to_ass_components();
+                        let (left_c, left_a, right_c, right_a) = (pc, pa, sc, sa);
+                        super::drawing::DrawingParser::render_drawing_clipped(
+                            buffer,
+                            &segment.text,
+                            draw_x,
+                            draw_y,
+                            unit,
+                            [left_c[0], left_c[1], left_c[2], left_a],
+                            (None, Some(brk)),
+                        );
+                        super::drawing::DrawingParser::render_drawing_clipped(
+                            buffer,
+                            &segment.text,
+                            draw_x,
+                            draw_y,
+                            unit,
+                            [right_c[0], right_c[1], right_c[2], right_a],
+                            (Some(brk), None),
+                        );
+                    }
+                    _ => {
+                        let mut color = segment_resolved.color;
+                        // Pop runs (and out-of-window sweeps) light at
+                        // the window end; for `\k`/`\ko` that is the
+                        // run start. Drawings have no outline pass, so
+                        // `\ko` needs no separate suppression here.
+                        if let Some(run) = run {
+                            if elapsed_ms < run.end_ms {
+                                color = segment_resolved.secondary_color;
+                            }
+                        }
+                        let components = color.to_ass_components();
+                        super::drawing::DrawingParser::render_drawing(
+                            buffer,
+                            &segment.text,
+                            draw_x,
+                            draw_y,
+                            unit,
+                            [
+                                components[0],
+                                components[1],
+                                components[2],
+                                (color.opacity() as f64 * alpha_mult) as u8,
+                            ],
+                        );
+                    }
                 }
                 // Drawings advance the baseline shear like libass glyphs.
                 accumulate_fay_shear(
@@ -2191,7 +3245,37 @@ impl Compositor {
             // Pen within the current row (its furthest advance edge);
             // the segment leaves the pen at its last row's end.
             let mut row_pen = 0.0_f64;
-            for glyph in &shaped.glyphs {
+            // The shaper emits exactly one glyph per non-break
+            // character in order, so `glyph_idx` is the run-lookup key.
+            for (glyph_idx, glyph) in shaped.glyphs.iter().enumerate() {
+                // Style-run shear reset (libass `apply_baseline_shear`
+                // restarts at every run start, even for skipped glyphs):
+                // a new segment whose style key or drawing status differs
+                // from the previous emitting segment, or a glyph that
+                // opens its karaoke run.
+                if prev_shear_seg != Some(seg_idx) {
+                    let new_run = match prev_shear_seg.and_then(|p| layout.items.get(p)) {
+                        None => false,
+                        Some(prev) => {
+                            prev.drawing.is_some()
+                                || !prev.resolved.same_karaoke_run(&item.resolved)
+                        }
+                    };
+                    if new_run {
+                        fay_line_shear = 0.0;
+                    }
+                    prev_shear_seg = Some(seg_idx);
+                }
+                let run_start = glyph_run
+                    .get(seg_idx)
+                    .and_then(|v| v.get(glyph_idx))
+                    .copied()
+                    .flatten()
+                    .and_then(|id| karaoke_runs.get(id))
+                    .is_some_and(|run| run.first_glyph == Some((seg_idx, glyph_idx)));
+                if run_start {
+                    fay_line_shear = 0.0;
+                }
                 if glyph.scale_x <= 0.0 || glyph.scale_y <= 0.0 {
                     continue;
                 }
@@ -2340,8 +3424,10 @@ impl Compositor {
 
                 let matrix = mat_y.multiply(&mat_x).multiply(&mat_z);
 
-                // Perspective distance (standard ASS is ~312.5-500 depending on resolution)
-                let perspective = 500.0 * (video_height as f64 / play_res_y as f64);
+                // Perspective distance (libass `calc_transform_matrix`:
+                // `dist = 20000 * blur_scale_y` in 1/64px units, i.e.
+                // 312.5px times the vertical frame-to-layout scale).
+                let perspective = 312.5 * (video_height as f64 / play_res_y as f64);
 
                 // Effective pre-rotation shear. References shear the
                 // unscaled glyph, so non-uniform scale adjusts the
@@ -2418,8 +3504,153 @@ impl Compositor {
                 let current_shadow_x = shadow_offset_x * scale_factor;
                 let current_shadow_y = shadow_offset_y * scale_factor;
 
-                // Render outline (independent X/Y radii)
-                if outline_active {
+                // Karaoke classification. In-window sweep members
+                // buffer for the run's device-space split; everything
+                // else paints immediately (pop rule below).
+                let glyph_run_id: Option<usize> = glyph_run
+                    .get(seg_idx)
+                    .and_then(|v| v.get(glyph_idx))
+                    .copied()
+                    .flatten();
+                let run = glyph_run_id.and_then(|id| karaoke_runs.get(id));
+                // A new run (or gap) flushes a pending sweep: runs are
+                // contiguous, so this fires exactly at run boundaries
+                // (plus defensively under builder/render skew).
+                if sweep.run != glyph_run_id {
+                    sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
+                }
+                sweep.note_run(glyph_run_id);
+
+                let primary_c = segment_resolved.color.to_ass_components();
+                let secondary_c = segment_resolved.secondary_color.to_ass_components();
+                let primary_a = segment_resolved.color.opacity();
+                let secondary_a = segment_resolved.secondary_color.opacity();
+                let outline_rgba = [
+                    outline_color_rgba[0],
+                    outline_color_rgba[1],
+                    outline_color_rgba[2],
+                    (outline_alpha as f64 * alpha_mult) as u8,
+                ];
+                let shadow_rgba = [
+                    shadow_color_rgba[0],
+                    shadow_color_rgba[1],
+                    shadow_color_rgba[2],
+                    (shadow_alpha as f64 * alpha_mult) as u8,
+                ];
+
+                let sweeping = run.is_some_and(|run| {
+                    run.kind == KaraokeKind::Sweep
+                        && run.sweep
+                        && elapsed_ms >= run.start_ms
+                        && elapsed_ms < run.end_ms
+                });
+                if let (true, Some(id), Some(run)) = (sweeping, glyph_run_id, run) {
+                    // Degraded members (past the buffer cap) paint
+                    // whole-glyph against the flushed edge.
+                    let mut degraded_edge = sweep.degraded.map(|(_, e, f)| (e, f));
+                    if degraded_edge.is_none()
+                        && sweep.bytes.saturating_add(rot_bitmap.len()) > MAX_SWEEP_BUFFER_BYTES
+                        && !sweep.buf.is_empty()
+                    {
+                        // Marked before flushing so the flush records
+                        // the edge for the rest of the run.
+                        sweep.degraded = Some((id, 0, run.flip));
+                        sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
+                        degraded_edge = sweep.degraded.map(|(_, e, f)| (e, f));
+                    }
+                    if let Some((edge, flip)) = degraded_edge {
+                        let center = i64::from(final_gx) + i64::from(rot_w) / 2;
+                        let (fill_c, fill_a) = if (center < edge) != flip {
+                            (primary_c, primary_a)
+                        } else {
+                            (secondary_c, secondary_a)
+                        };
+                        if outline_active {
+                            effects::apply_outline_xy(
+                                buffer,
+                                &rot_bitmap,
+                                rot_w,
+                                rot_h,
+                                final_gx,
+                                final_gy,
+                                current_outline_x,
+                                current_outline_y,
+                                outline_rgba,
+                            );
+                        }
+                        if shadow_active {
+                            effects::apply_shadow(
+                                buffer,
+                                &rot_bitmap,
+                                rot_w,
+                                rot_h,
+                                final_gx,
+                                final_gy,
+                                current_shadow_x,
+                                current_shadow_y,
+                                shadow_rgba,
+                            );
+                        }
+                        paint_glyph_fill(
+                            buffer,
+                            &rot_bitmap,
+                            GlyphGeom {
+                                w: rot_w,
+                                h: rot_h,
+                                gx: final_gx,
+                                gy: final_gy,
+                            },
+                            alpha,
+                            |_| (fill_c, fill_a),
+                        );
+                        continue;
+                    }
+                    sweep.bytes = sweep.bytes.saturating_add(rot_bitmap.len());
+                    sweep.buf.push(BufferedSweepGlyph {
+                        bitmap: rot_bitmap,
+                        w: rot_w,
+                        h: rot_h,
+                        gx: final_gx,
+                        gy: final_gy,
+                        primary: primary_c,
+                        primary_alpha: primary_a,
+                        secondary: secondary_c,
+                        secondary_alpha: secondary_a,
+                        outline: outline_active.then_some((
+                            outline_rgba,
+                            current_outline_x,
+                            current_outline_y,
+                        )),
+                        shadow: shadow_active.then_some((
+                            shadow_rgba,
+                            current_shadow_x,
+                            current_shadow_y,
+                        )),
+                    });
+                    sweep.run = Some(id);
+                    if run.last_glyph == Some((seg_idx, glyph_idx)) {
+                        sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
+                    }
+                    continue;
+                }
+
+                // Immediate paint. Pop rule (probe-verified): primary
+                // from the window end, secondary before it. For
+                // `\k`/`\ko` the window end is the run start; finished
+                // sweeps are primary, unstarted ones secondary.
+                let mut fill = (primary_c, primary_a);
+                let mut outline_on = outline_active;
+                if let Some(run) = run {
+                    if elapsed_ms < run.end_ms {
+                        fill = (secondary_c, secondary_a);
+                    }
+                    if run.kind == KaraokeKind::Outline
+                        && karaoke_outline_suppressed(elapsed_ms, run.start_ms)
+                    {
+                        outline_on = false;
+                    }
+                }
+                if outline_on {
                     effects::apply_outline_xy(
                         buffer,
                         &rot_bitmap,
@@ -2429,16 +3660,9 @@ impl Compositor {
                         final_gy,
                         current_outline_x,
                         current_outline_y,
-                        [
-                            outline_color_rgba[0],
-                            outline_color_rgba[1],
-                            outline_color_rgba[2],
-                            (outline_alpha as f64 * alpha_mult) as u8,
-                        ],
+                        outline_rgba,
                     );
                 }
-
-                // Render shadow
                 if shadow_active {
                     effects::apply_shadow(
                         buffer,
@@ -2449,69 +3673,21 @@ impl Compositor {
                         final_gy,
                         current_shadow_x,
                         current_shadow_y,
-                        [
-                            shadow_color_rgba[0],
-                            shadow_color_rgba[1],
-                            shadow_color_rgba[2],
-                            (shadow_alpha as f64 * alpha_mult) as u8,
-                        ],
+                        shadow_rgba,
                     );
                 }
-
-                // Render main text. Karaoke \K/\kf sweeps *within* the
-                // glyph: pixels left of the sweep edge use the primary
-                // color, pixels right of it the secondary color. The edge
-                // is mapped to a bitmap-column fraction of the glyph
-                // advance (exact when unrotated; proportional under
-                // rotation/perspective). Coverage applies normally.
-                let primary_c = segment_resolved.color.to_ass_components();
-                let secondary_c = segment_resolved.secondary_color.to_ass_components();
-                let primary_a = segment_resolved.color.opacity();
-                let secondary_a = segment_resolved.secondary_color.opacity();
-                let split_px = sweep_boundary.and_then(|edge| {
-                    if !edge.is_finite() || glyph.advance <= 0.0 || rot_w == 0 {
-                        return None;
-                    }
-                    let frac = ((edge - glyph.x) / glyph.advance).clamp(0.0, 1.0);
-                    if !frac.is_finite() {
-                        return None;
-                    }
-                    Some(frac * f64::from(rot_w))
-                });
-
-                for py in 0..rot_h {
-                    for px in 0..rot_w {
-                        let idx = (u64::from(py) * u64::from(rot_w) + u64::from(px)) as usize;
-                        let coverage = rot_bitmap.get(idx).copied().unwrap_or(0);
-                        if coverage > 0 {
-                            let (color, color_alpha) = match split_px {
-                                Some(edge) if f64::from(px) + 0.5 >= edge => {
-                                    (secondary_c, secondary_a)
-                                }
-                                Some(_) => (primary_c, primary_a),
-                                None => match sweep_boundary {
-                                    // Degenerate glyph (no advance): whole-glyph fallback.
-                                    Some(edge) if glyph.x + glyph.advance / 2.0 > edge => {
-                                        (secondary_c, secondary_a)
-                                    }
-                                    _ => (primary_c, primary_a),
-                                },
-                            };
-                            let a = ((u32::from(coverage) * u32::from(color_alpha) / 255)
-                                * u32::from(alpha)
-                                / 255) as u8;
-                            // Widen through i64 and bounds-check before u32
-                            // conversion: never wrap i32 or rely on casts.
-                            let (Some(sx), Some(sy)) = (
-                                add_coord(final_gx, px, buffer.width),
-                                add_coord(final_gy, py, buffer.height),
-                            ) else {
-                                continue;
-                            };
-                            buffer.blend_pixel(sx, sy, color[0], color[1], color[2], a);
-                        }
-                    }
-                }
+                paint_glyph_fill(
+                    buffer,
+                    &rot_bitmap,
+                    GlyphGeom {
+                        w: rot_w,
+                        h: rot_h,
+                        gx: final_gx,
+                        gy: final_gy,
+                    },
+                    alpha,
+                    |_| fill,
+                );
             }
 
             // Decorations belong to the whole text segment, not individual
@@ -2587,11 +3763,6 @@ impl Compositor {
                 }
             }
 
-            // Track swept width within the syllable
-            if let Some(syl_idx) = seg_syllable[seg_idx] {
-                syllable_consumed[syl_idx] += shaped.width;
-            }
-
             // Update offsets for next segment
             // Check if segment ends with line break
             if segment.text.ends_with('\n') {
@@ -2605,6 +3776,17 @@ impl Compositor {
                 x_offset += row_pen;
             }
         }
+        // Event end flushes any pending sweep (normally already
+        // flushed at its last glyph; this covers skew cases). Segment
+        // decorations do NOT flush: runs routinely span segments
+        // (`{\k}a{\pos}b`), and splitting the sweep per segment would
+        // break the run span. Consequence: for a sweep run spanning
+        // segments, an earlier segment's underline/strike bar paints
+        // under the flushed fill (single-segment runs and all pop
+        // runs keep the usual bar-over-fill order). Whether libass
+        // also sweeps the bar color itself is unverified (no ffmpeg
+        // in this environment to probe); bars stay primary.
+        sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
 
         // Blur before clipping: blurring after a clip would bleed
         // pixels outside the clip region.
@@ -2967,6 +4149,43 @@ mod tests {
         .unwrap();
         let resolved2 = Compositor::resolve_style(&style, &event2);
         assert_eq!(resolved2.position, Some((100.0, 100.0)));
+    }
+
+    #[test]
+    fn test_shared_slots_last_tag_wins() {
+        // \pos/\move share EF_MOVE, \fad/\fade share EF_FADE, the
+        // \clip family shares one rect/vector slot, and \an/\a share
+        // alignment: in every pair the LAST tag wins (VSFilter).
+        let style = Style::new("Default");
+        let resolve = |text: &str| {
+            let line = format!("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}");
+            let event = Event::parse_from_line(&line).unwrap();
+            Compositor::resolve_style(&style, &event)
+        };
+        // \move-after-\pos keeps both at resolve; the render path
+        // lets move override position (effective last-wins).
+        let r = resolve(r"{\pos(1,2)\move(3,4,5,6)}Hi");
+        assert_eq!(r.position, Some((1.0, 2.0)));
+        assert!(r.move_data.is_some());
+        let r = resolve(r"{\move(3,4,5,6)\pos(1,2)}Hi");
+        assert_eq!(r.position, Some((1.0, 2.0)));
+        assert!(r.move_data.is_none());
+        let r = resolve(r"{\fad(1,2)\fade(1,2,3,4,5,6,7)}Hi");
+        assert!(r.complex_fade.is_some());
+        assert_eq!((r.fade_in, r.fade_out), (0, 0));
+        let r = resolve(r"{\fade(1,2,3,4,5,6,7)\fad(1,2)}Hi");
+        assert!(r.complex_fade.is_none());
+        assert_eq!((r.fade_in, r.fade_out), (1, 2));
+        let r = resolve(r"{\clip(1,2,3,4)\iclip(5,6,7,8)}Hi");
+        assert!(r.clip.is_none());
+        assert_eq!(r.inverse_clip, Some((5, 6, 7, 8)));
+        let r = resolve(r"{\iclip(5,6,7,8)\clip(1,2,3,4)}Hi");
+        assert_eq!(r.clip, Some((1, 2, 3, 4)));
+        assert!(r.inverse_clip.is_none());
+        let r = resolve(r"{\a1\an7}Hi");
+        assert_eq!(r.alignment, 7);
+        let r = resolve(r"{\an7\a1}Hi");
+        assert_eq!(r.alignment, 1);
     }
 
     #[test]
@@ -4072,6 +5291,38 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_cjk_breaks_without_spaces() {
+        let font = fallback_font();
+        // Six hiragana, room for ~two per line: must wrap with no
+        // spaces inserted and no characters lost.
+        let text = "あいうえおか";
+        let two = TextShaper::measure_text("あい", &font, 48.0, 0.0);
+        let out = wrap_event_text(text, 1, two + 0.5, &[&font], 48.0, 0.0);
+        assert!(out.contains('\n'), "CJK run must wrap: {out:?}");
+        assert!(!out.contains(' '), "no phantom spaces: {out:?}");
+        assert_eq!(out.replace('\n', ""), text);
+    }
+
+    #[test]
+    fn test_wrap_cjk_open_bracket_sticks() {
+        let font = fallback_font();
+        // No break after an opening bracket: "あ「あ" splits before
+        // the bracket pair, never orphaning "「" at a line end.
+        let pair = TextShaper::measure_text("「あ", &font, 48.0, 0.0);
+        let out = wrap_event_text("あ「あ", 1, pair - 0.5, &[&font], 48.0, 0.0);
+        assert_eq!(out, "あ\n「あ");
+    }
+
+    #[test]
+    fn test_wrap_cjk_nbsp_glues() {
+        let font = fallback_font();
+        // U+00A0 (from \h) never breaks from its neighbors: the run
+        // stays whole even when overlong.
+        let out = wrap_event_text("あ\u{00A0}あ", 1, 5.0, &[&font], 48.0, 0.0);
+        assert_eq!(out, "あ\u{00A0}あ");
+    }
+
+    #[test]
     fn test_wrap_karaoke_no_phantom_spaces() {
         let font = fallback_font();
         // Karaoke text split by tag groups: {\k80}Hel{\k60}lo {\k100}world!
@@ -4101,11 +5352,57 @@ mod tests {
         assert_eq!(out, "{\\b1}Bold{\\b0} {\\i1}Italic{\\i0} {\\u1}Under{\\u0}");
     }
 
-    fn karaoke_test_widths(segments: &[TextSegment]) -> Vec<f64> {
+    #[test]
+    fn test_wrap_measures_drawings_geometrically() {
         let font = fallback_font();
-        segments
-            .iter()
-            .map(|s| TextShaper::measure_text(&s.text, &font, 48.0, 0.0))
+        // A drawing following a tag group must not be forced onto its
+        // own line: command letters ("m 0 0 l 100 ...") are not text,
+        // so their advances must not size the word. The 100-unit rect
+        // fits beside the prefix; no break may be inserted (a stray
+        // break would also strand karaoke timing on the break piece).
+        let text = "{\\kf100}{\\p1}m 0 0 l 100 0 l 100 40 l 0 40{\\p0}";
+        let out = wrap_event_text(text, 0, 640.0, &[&font], 48.0, 0.0);
+        assert_eq!(out, text);
+        // A genuinely over-wide drawing still gets its own line.
+        let wide = "{\\p1}m 0 0 l 2000 0 l 2000 40 l 0 40{\\p0}";
+        let text = format!("Hi {wide}");
+        let out = wrap_event_text(&text, 0, 640.0, &[&font], 48.0, 0.0);
+        assert_eq!(out, format!("Hi\n{wide}"));
+    }
+
+    /// Build karaoke runs for `text` through the real layout pass
+    /// (DejaVu at style size, PlayRes == video so layout units are
+    /// device pixels). Returns runs, per-segment per-glyph assignment,
+    /// and per-segment drawing assignment.
+    fn karaoke_test_runs(text: &str) -> KaraokeBuild {
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let line = format!("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{text}");
+        let event = Event::parse_from_line(&line).unwrap();
+        let resolved = Compositor::resolve_style(&Style::new("Default"), &event);
+        let segments = parse_text_segments(&event.text);
+        let layout = Compositor::layout_segments(
+            &segments,
+            &event,
+            &resolved,
+            &fm,
+            1000,
+            0,
+            5000,
+            640,
+            480,
+            640,
+            480,
+            &[],
+        );
+        build_karaoke_runs(&segments, &layout.items)
+    }
+
+    /// `(start_ms, end_ms, kind, sweep)` per run, for compact assertions.
+    fn run_windows(runs: &[KaraokeRun]) -> Vec<(u64, u64, KaraokeKind, bool)> {
+        runs.iter()
+            .map(|r| (r.start_ms, r.end_ms, r.kind, r.sweep))
             .collect()
     }
 
@@ -4277,6 +5574,37 @@ mod tests {
     }
 
     #[test]
+    fn test_fay_baseline_shear_resets_at_karaoke_runs() {
+        // libass `apply_baseline_shear` (default mode) restarts the
+        // accumulator at every style run, including karaoke runs: with
+        // two 2-glyph runs the line rises half as far as one 4-glyph
+        // run. Top-anchored so tops align and bottoms differ.
+        let continuous = render_text(r"{\an7\fay0.5}MMMM", 1000);
+        let split = render_text(r"{\an7\fay0.5\k50}MM{\k50}MM", 1000);
+        let (_, ch) = ink_bbox(&continuous).expect("renders");
+        let (_, sh) = ink_bbox(&split).expect("renders");
+        assert!(
+            ch > sh + 10,
+            "karaoke runs must restart baseline shear ({sh} vs {ch})"
+        );
+    }
+
+    #[test]
+    fn test_fay_baseline_shear_resets_at_style_change() {
+        // Same rule for style-key changes: a mid-line color change
+        // restarts the accumulator, while a same-value tag does not
+        // (libass compares values, not tag presence).
+        let same = render_text(r"{\an7\fay0.5}MM{\c&HFFFFFF&}MM", 1000);
+        let changed = render_text(r"{\an7\fay0.5}MM{\c&H0000FF&}MM", 1000);
+        let (_, sh) = ink_bbox(&same).expect("renders");
+        let (_, ch) = ink_bbox(&changed).expect("renders");
+        assert!(
+            sh > ch + 10,
+            "style change must restart baseline shear ({ch} vs {sh})"
+        );
+    }
+
+    #[test]
     fn test_accumulate_fay_shear_guards() {
         // Pure helper: scaled advance accumulates; degenerate input is
         // ignored rather than poisoning the line.
@@ -4355,21 +5683,30 @@ mod tests {
 
     #[test]
     fn test_kt_explicit_timing() {
-        // Explicit absolute starts with a gap between syllables.
-        let segments = parse_text_segments("{\\kt0\\k50}a{\\kt200\\k50}b");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
-        assert_eq!(syllables.len(), 2);
-        assert_eq!((syllables[0].start_ms, syllables[0].dur_ms), (0, 500));
-        assert_eq!((syllables[1].start_ms, syllables[1].dur_ms), (2000, 500));
-        assert_eq!(map, vec![Some(0), Some(1)]);
-        // Order within a group: {\k50\kt200} starts at the old clock and
-        // leaves 2000 for the next syllable.
-        let segments = parse_text_segments("{\\k50\\kt200}A{\\k50}B");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, _) = build_karaoke_timeline(&segments, &widths);
-        assert_eq!(syllables[0].start_ms, 0);
-        assert_eq!(syllables[1].start_ms, 2000);
+        // Explicit absolute starts with a gap between syllables. Hard
+        // runs pop at the run start (`end == start`).
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\kt0\\k50}a{\\kt200\\k50}b");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (2000, 2000, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        // Order within a group follows the verified stacking rule
+        // (c3 probe: earlier durations bank as skip before the current
+        // window): {\k50\kt200} banks 500, then \kt assigns skip 2000
+        // (wiping the banked duration) and resets, so A pops at 2000
+        // and B (dur 500, no skip of its own) at 2000.
+        let (runs, _, _) = karaoke_test_runs("{\\k50\\kt200}A{\\k50}B");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (2000, 2000, KaraokeKind::Hard, false),
+                (2000, 2000, KaraokeKind::Hard, false),
+            ]
+        );
         // Render in the gap: first syllable sung, second pending.
         let buf = render_text("{\\kt0\\k50}a{\\kt200\\k50}b", 1000);
         let bytes = buf.as_bytes();
@@ -4529,6 +5866,145 @@ mod tests {
         let (_, _, _, h1) = color_bbox(&one, red).expect("single-line box");
         let (_, _, _, h2) = color_bbox(&two, red).expect("multiline box");
         assert!(h2 > h1 * 3 / 2, "box must cover both lines: {h1} vs {h2}");
+    }
+
+    /// Horizontal red span `(x0, x1)` on one buffer row, if any.
+    fn red_span(buf: &RenderBuffer, y: u32) -> Option<(u32, u32)> {
+        let (mut x0, mut x1) = (u32::MAX, 0u32);
+        for x in 0..buf.width {
+            let p = buf.get_pixel(x, y);
+            if p[3] > 0 && p[0] == 255 && p[1] == 0 && p[2] == 0 {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+            }
+        }
+        if x0 > x1 {
+            None
+        } else {
+            Some((x0, x1))
+        }
+    }
+
+    #[test]
+    fn test_opaque_box_per_line_widths_left_aligned() {
+        // libass draws one box per line: with \an7 a short first line
+        // gets a narrow box (step silhouette), not the block width.
+        let buf = render_text_with_style(
+            r"{\an7\pos(20,20)}A\NLonger second line",
+            &opaque_box_style(),
+            1000,
+        );
+        let (_, by, _, bh) = color_bbox(&buf, [255, 0, 0]).expect("boxes");
+        // Sample safely inside each line's band (away from shared pads).
+        let top = red_span(&buf, by + 4).expect("top line box");
+        let bottom = red_span(&buf, by + bh - 5).expect("bottom line box");
+        assert_eq!(top.0, bottom.0, "left-aligned boxes share the left edge");
+        assert!(
+            top.1 + 20 < bottom.1,
+            "short line box must be narrower: {top:?} vs {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn test_opaque_box_per_line_boxes_center() {
+        // Centered lines center their own boxes (libass aligns each
+        // line independently inside the block).
+        let buf = render_text_with_style(
+            r"{\an5\pos(320,240)}A\NLonger second line",
+            &opaque_box_style(),
+            1000,
+        );
+        let (_, by, _, bh) = color_bbox(&buf, [255, 0, 0]).expect("boxes");
+        let top = red_span(&buf, by + 4).expect("top line box");
+        let bottom = red_span(&buf, by + bh - 5).expect("bottom line box");
+        let (top_c, bottom_c) = (
+            (top.0 + top.1) as f64 / 2.0,
+            (bottom.0 + bottom.1) as f64 / 2.0,
+        );
+        assert!(
+            (top_c - bottom_c).abs() <= 2.0,
+            "boxes share the center: {top:?} vs {bottom:?}"
+        );
+        assert!(
+            top.1 - top.0 + 20 < bottom.1 - bottom.0,
+            "short line box must be narrower: {top:?} vs {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn test_opaque_box_interior_empty_line_has_box() {
+        // "A\N\NB": the empty middle line still gets a box (no gap in
+        // the column); without it the lines' pads would leave a hole.
+        let buf = render_text_with_style(r"{\an7\pos(20,20)}A\N\NB", &opaque_box_style(), 1000);
+        let (_, by, _, bh) = color_bbox(&buf, [255, 0, 0]).expect("boxes");
+        // Every row between the outer edges must carry red (adjacent
+        // boxes overlap in their pads; a missing middle box leaves a
+        // hole of line-height minus two pads).
+        for y in by..by + bh {
+            assert!(
+                red_span(&buf, y).is_some(),
+                "box column must have no gap at row {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_opaque_box_trailing_break_draws_nothing_extra() {
+        // Extent-based like VSFilter: a trailing break adds no box. (The
+        // whole block legitimately shifts: bottom alignment anchors the
+        // taller block's bottom, as in libass. Compare geometry relative
+        // to the glyph ink instead of bytes.)
+        let style = opaque_box_style();
+        let plain = render_text_with_style(r"{\pos(320,400)}Hi", &style, 1000);
+        let trailing = render_text_with_style(r"{\pos(320,400)}Hi\N", &style, 1000);
+        let white = [255, 255, 255];
+        let (pr, tr) = (
+            color_bbox(&plain, [255, 0, 0]).expect("plain box"),
+            color_bbox(&trailing, [255, 0, 0]).expect("trailing box"),
+        );
+        let (pi, ti) = (
+            color_bbox(&plain, white).expect("plain ink"),
+            color_bbox(&trailing, white).expect("trailing ink"),
+        );
+        assert_eq!((pr.2, pr.3), (tr.2, tr.3), "same box size");
+        assert_eq!((pi.2, pi.3), (ti.2, ti.3), "same ink size");
+        assert_eq!(
+            (pr.0 as i32 - pi.0 as i32, pr.1 as i32 - pi.1 as i32),
+            (tr.0 as i32 - ti.0 as i32, tr.1 as i32 - ti.1 as i32),
+            "same box position relative to ink"
+        );
+    }
+
+    #[test]
+    fn test_opaque_box_shadow() {
+        // References shadow the padded box: shadow color appears offset
+        // down-right of the box, and the box still paints over it.
+        let mut style = opaque_box_style();
+        style.shadow = 8.0;
+        style.back_color = Color::new(0, 0, 255, 0); // opaque green shadow
+        let buf = render_text_with_style(r"{\pos(320,400)}Hi", &style, 1000);
+        let red = color_bbox(&buf, [255, 0, 0]).expect("box");
+        let green = color_bbox(&buf, [0, 255, 0]).expect("box shadow");
+        // Shadow extends past the box on the offset sides only.
+        assert!(green.0 >= red.0 && green.1 >= red.1);
+        assert!(green.0 + green.2 > red.0 + red.2);
+        assert!(green.1 + green.3 > red.1 + red.3);
+        // Zero shadow draws no shadow pixels.
+        let plain = render_text_with_style(r"{\pos(320,400)}Hi", &opaque_box_style(), 1000);
+        assert!(color_bbox(&plain, [0, 255, 0]).is_none());
+    }
+
+    #[test]
+    fn test_opaque_box_drawing_line() {
+        // A drawing line boxes its geometry (exercises the drawing row
+        // path in the box layout).
+        let buf = render_text_with_style(
+            r"{\pos(320,400)}{\p1}m 0 0 l 60 0 l 60 30 l 0 30{\p0}",
+            &opaque_box_style(),
+            1000,
+        );
+        let (_, _, w, h) = color_bbox(&buf, [255, 0, 0]).expect("drawing box");
+        assert!(w >= 60 && h >= 30, "box must cover the 60x30 rect");
     }
 
     #[test]
@@ -4727,56 +6203,154 @@ mod tests {
     }
 
     #[test]
-    fn test_karaoke_timeline_hard_tags() {
-        let segments = parse_text_segments("{\\k50}A{\\k30}B");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
-
-        assert_eq!(syllables.len(), 2);
-        assert_eq!(syllables[0].start_ms, 0);
-        assert_eq!(syllables[0].dur_ms, 500);
-        assert_eq!(syllables[0].kind, KaraokeKind::Hard);
-        assert_eq!(syllables[1].start_ms, 500);
-        assert_eq!(syllables[1].dur_ms, 300);
-        assert_eq!(map, vec![Some(0), Some(1)]);
-        assert!(syllables[0].width > 0.0);
-        assert!(syllables[1].width > 0.0);
+    fn test_karaoke_runs_hard_tags() {
+        // Each nonzero \k starts a run; hard runs pop at their start.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k50}A{\\k30}B");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (500, 500, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        assert!(runs[0].span > 0.0);
+        assert!(runs[1].span > 0.0);
     }
 
     #[test]
-    fn test_karaoke_timeline_leading_text_ignored() {
-        let segments = parse_text_segments("pre{\\kf40}X");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
-
-        assert_eq!(syllables.len(), 1);
-        assert_eq!(syllables[0].kind, KaraokeKind::Sweep);
-        assert_eq!(syllables[0].dur_ms, 400);
-        assert_eq!(map, vec![None, Some(0)]);
+    fn test_karaoke_runs_leading_text_has_no_run() {
+        // Text before any karaoke tag renders normally (no run).
+        let (runs, glyph_run, _) = karaoke_test_runs("pre{\\kf40}X");
+        assert_eq!(run_windows(&runs), vec![(0, 400, KaraokeKind::Sweep, true)]);
+        assert_eq!(glyph_run[0], vec![None, None, None]);
+        assert_eq!(glyph_run[1], vec![Some(0)]);
     }
 
     #[test]
-    fn test_karaoke_timeline_continuation_segments() {
-        // A non-karaoke tag mid-syllable must not start a new syllable
-        let segments = parse_text_segments("{\\k50}A{\\c&H00FF00&}B");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
+    fn test_karaoke_runs_break_at_style_change() {
+        // Mid-syllable style change splits the run (midstyle probe:
+        // `{\kf100}a{\b1}b` sweeps "a" while "b" pops at the window
+        // end). Same for \k: "B" pops when A's window ends.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k50}A{\\c&H00FF00&}B");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (500, 500, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\kf100}a{\\b1}b");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 1000, KaraokeKind::Sweep, true),
+                (1000, 1000, KaraokeKind::Sweep, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        // Render check mirroring the probe: at 500ms "a" is split and
+        // "b" is all secondary; at 1500ms both are primary.
+        let mid = render_text("{\\kf100}a{\\b1}b", 500);
+        let is_primary = |p: &[u8]| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0;
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        assert!(mid.as_bytes().chunks_exact(4).any(is_primary));
+        assert!(mid.as_bytes().chunks_exact(4).any(is_secondary));
+        let done = render_text("{\\kf100}a{\\b1}b", 1500);
+        assert!(done.as_bytes().chunks_exact(4).any(is_primary));
+        assert!(!done.as_bytes().chunks_exact(4).any(is_secondary));
+    }
 
-        assert_eq!(syllables.len(), 1);
-        assert_eq!(map, vec![Some(0), Some(0)]);
-        let combined: f64 = widths.iter().sum();
-        assert!((syllables[0].width - combined).abs() < 1e-6);
+    #[test]
+    fn test_karaoke_runs_k0_joins_run() {
+        // \k0 adds no duration and breaks nothing: "b" joins A's run
+        // (corners probe: `{\k100}a{\k0}b{\k100}c` shows a,b primary
+        // and c secondary at 500ms).
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k100}a{\\k0}b{\\k100}c");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (1000, 1000, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(0)], vec![Some(1)]]);
+    }
+
+    #[test]
+    fn test_karaoke_runs_stacked_tags_accumulate_skip() {
+        // Stacked tags bank dead time before the window (c3 probe:
+        // `{\k100\k0}a` is still secondary at 500ms).
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k100\\k0}a");
+        assert_eq!(
+            run_windows(&runs),
+            vec![(1000, 1000, KaraokeKind::Hard, false)]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)]]);
+        // \kt resets the clock and skips: `{\k100}a{\kt50}b{\k100}c`
+        // puts c at 500 (c3 probe: all primary at 500ms).
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k100}a{\\kt50}b{\\k100}c");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (500, 500, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(0)], vec![Some(1)]]);
+    }
+
+    #[test]
+    fn test_karaoke_runs_newline_splits_and_pops() {
+        // \N splits the sweep run; the second line consumes timing
+        // invisibly, then pops at the window end (corners probe: "bb"
+        // all secondary at 500ms, all primary at 1500ms).
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\kf100}aa\\Nbb");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 1000, KaraokeKind::Sweep, true),
+                (1000, 1000, KaraokeKind::Sweep, false),
+            ]
+        );
+        assert_eq!(glyph_run.len(), 1);
+        assert_eq!(glyph_run[0], vec![Some(0), Some(0), Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn test_karaoke_runs_sweep_span_trims_spaces() {
+        // Sweep spans exclude leading/trailing ASCII spaces (libass
+        // visible-span rule), so the edge never starts/ends in a gap.
+        let (runs, _, _) = karaoke_test_runs("{\\kf100}a");
+        let bare = runs[0].span;
+        assert!(bare > 0.0);
+        let (runs, _, _) = karaoke_test_runs("{\\kf100} a ");
+        assert!((runs[0].span - bare).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_karaoke_runs_frz_flip() {
+        // \frz in (90, 270) mirrors the sweep (frzflip probe); the
+        // bounds themselves do not flip.
+        let (runs, _, _) = karaoke_test_runs("{\\frz200\\kf100}ab");
+        assert!(runs[0].flip);
+        let (runs, _, _) = karaoke_test_runs("{\\frz10\\kf100}ab");
+        assert!(!runs[0].flip);
+        let (runs, _, _) = karaoke_test_runs("{\\frz90\\kf100}ab");
+        assert!(!runs[0].flip);
+        let (runs, _, _) = karaoke_test_runs("{\\frz270\\kf100}ab");
+        assert!(!runs[0].flip);
     }
 
     #[test]
     fn test_karaoke_outline_kind() {
-        let segments = parse_text_segments("{\\ko20}A");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, _) = build_karaoke_timeline(&segments, &widths);
-
-        assert_eq!(syllables.len(), 1);
-        assert_eq!(syllables[0].kind, KaraokeKind::Outline);
-        assert_eq!(syllables[0].dur_ms, 200);
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\ko20}A");
+        assert_eq!(
+            run_windows(&runs),
+            vec![(0, 0, KaraokeKind::Outline, false)]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)]]);
     }
 
     #[test]
@@ -4830,26 +6404,27 @@ mod tests {
 
     #[test]
     fn test_karaoke_hard_switches_at_syllable_start() {
-        // \k: secondary before the syllable starts, primary from the exact
-        // start instant (not at the end). Second syllable starts at 1000ms.
-        let event = Event::parse_from_line(
-            "Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,{\\k100}A{\\k100}B",
-        )
-        .unwrap();
-        let style = Style::new("Default");
-        let resolved = Compositor::resolve_style(&style, &event);
-        let segments = parse_text_segments("{\\k100}A{\\k100}B");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
-
-        // First syllable at elapsed 0: started -> primary
-        assert!(karaoke_is_primary(&syllables[0], 0));
-        // Second syllable before/at boundaries
-        assert!(!karaoke_is_primary(&syllables[1], 999));
-        assert!(karaoke_is_primary(&syllables[1], 1000));
-        assert!(karaoke_is_primary(&syllables[1], 1500));
-        assert_eq!(map, vec![Some(0), Some(1)]);
-        let _ = resolved;
+        // \k: secondary before the run pops, primary from the exact pop
+        // instant (the run start for hard runs). Second run pops at
+        // 1000ms: render checks both sides of the boundary.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\k100}A{\\k100}B");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Hard, false),
+                (1000, 1000, KaraokeKind::Hard, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        // Just before the pop: B is still secondary.
+        let before = render_text("{\\k100}A{\\k100}B", 999);
+        assert!(before.as_bytes().chunks_exact(4).any(is_secondary));
+        // From the pop instant: no secondary remains.
+        for t in [1000, 1500] {
+            let after = render_text("{\\k100}A{\\k100}B", t);
+            assert!(!after.as_bytes().chunks_exact(4).any(is_secondary));
+        }
     }
 
     #[test]
@@ -4864,36 +6439,34 @@ mod tests {
 
     #[test]
     fn test_ko_multi_syllable_timing() {
-        // Two \ko syllables: starts at 0 and 500ms. Each syllable is
-        // independent: suppressed before its own start, visible from it.
-        let segments = parse_text_segments("{\\ko50}A{\\ko50}B");
-        let widths = karaoke_test_widths(&segments);
-        let (syllables, map) = build_karaoke_timeline(&segments, &widths);
-        assert_eq!(syllables.len(), 2);
-        assert_eq!(map, vec![Some(0), Some(1)]);
-        let (s0, s1) = (&syllables[0], &syllables[1]);
-        assert_eq!((s0.start_ms, s0.dur_ms), (0, 500));
-        assert_eq!((s1.start_ms, s1.dur_ms), (500, 500));
+        // Two \ko runs pop at 0 and 500ms. Each run is independent:
+        // outline suppressed before its own start, visible from it.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\ko50}A{\\ko50}B");
+        assert_eq!(
+            run_windows(&runs),
+            vec![
+                (0, 0, KaraokeKind::Outline, false),
+                (500, 500, KaraokeKind::Outline, false),
+            ]
+        );
+        assert_eq!(glyph_run, vec![vec![Some(0)], vec![Some(1)]]);
+        let (s0, s1) = (&runs[0], &runs[1]);
 
-        // Syllable 0 (start 0): visible at/after 0.
+        // Run 0 (start 0): visible at/after 0.
         assert!(!karaoke_outline_suppressed(0, s0.start_ms));
-        // Syllable 1 across its boundaries: start-1, start, middle,
+        // Run 1 across its boundaries: start-1, start, middle,
         // exact end, after end.
         assert!(karaoke_outline_suppressed(499, s1.start_ms));
         assert!(!karaoke_outline_suppressed(500, s1.start_ms));
         assert!(!karaoke_outline_suppressed(750, s1.start_ms));
         assert!(!karaoke_outline_suppressed(1000, s1.start_ms));
         assert!(!karaoke_outline_suppressed(1500, s1.start_ms));
-        // Fill follows \k: secondary before start, primary from start.
-        assert!(karaoke_is_primary(
-            &KaraokeSyllable {
-                start_ms: s1.start_ms,
-                dur_ms: s1.dur_ms,
-                kind: KaraokeKind::Hard,
-                width: s1.width,
-            },
-            500
-        ));
+        // Fill pops with the run: secondary before, primary from it.
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        let before = render_text("{\\ko50}A{\\ko50}B", 499);
+        assert!(before.as_bytes().chunks_exact(4).any(is_secondary));
+        let after = render_text("{\\ko50}A{\\ko50}B", 500);
+        assert!(!after.as_bytes().chunks_exact(4).any(is_secondary));
     }
 
     #[test]
@@ -4964,17 +6537,51 @@ mod tests {
     }
 
     #[test]
-    fn test_karaoke_timeline_uses_layout_widths() {
-        // The timeline must use caller-provided (layout) widths verbatim,
-        // so inline \fs/\fn/\fscx/\fsp changes measure correctly.
-        let segments = parse_text_segments("{\\k50}small{\\k50}BIG");
-        let (syllables, map) = build_karaoke_timeline(&segments, &[10.0, 90.0]);
-        assert_eq!(map, vec![Some(0), Some(1)]);
-        assert!((syllables[0].width - 10.0).abs() < 1e-9);
-        assert!((syllables[1].width - 90.0).abs() < 1e-9);
-        // Missing widths default to 0 rather than panicking.
-        let (syllables, _) = build_karaoke_timeline(&segments, &[]);
-        assert_eq!(syllables[0].width, 0.0);
+    fn test_karaoke_runs_use_layout_spans() {
+        // Run spans come from the layout pass (shaped advances), so
+        // inline \fs/\fn/\fscx/\fsp changes measure exactly what
+        // rendering consumes: a doubled size doubles the span.
+        let (runs, _, _) = karaoke_test_runs("{\\kf100}MM");
+        let base = runs[0].span;
+        assert!(base > 0.0);
+        let (runs, _, _) = karaoke_test_runs("{\\kf100\\fscx200}MM");
+        assert!((runs[0].span - 2.0 * base).abs() < 1e-6);
+        // Tag-only text builds no runs (nothing to time). Event
+        // text is trimmed, so a lone trailing space never reaches the
+        // builder either.
+        let (runs, glyph_run, _) = karaoke_test_runs("{\\kf100}");
+        assert!(runs.is_empty());
+        assert!(glyph_run.iter().all(|v| v.iter().all(|g| g.is_none())));
+        let (runs, _, _) = karaoke_test_runs("{\\kf100} ");
+        assert!(runs.is_empty());
+        // Interior trailing space trims from the span (the space
+        // before {\b1} survives event trimming).
+        let (runs, _, _) = karaoke_test_runs("{\\kf100}MM {\\b1}b");
+        assert!((runs[0].span - base).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_kf_drawing_splits_at_midpoint() {
+        // Drawings sweep exactly like text (c2 probe): at the window
+        // midpoint the rect's left half is primary, right secondary,
+        // with a hard edge between adjacent columns.
+        let text = "{\\kf100}{\\p1}m 0 0 l 100 0 l 100 40 l 0 40{\\p0}";
+        let (runs, _, drawing_run) = karaoke_test_runs(text);
+        assert_eq!(
+            run_windows(&runs),
+            vec![(0, 1000, KaraokeKind::Sweep, true)]
+        );
+        assert!(drawing_run.contains(&Some(0)));
+        let is_primary = |p: &[u8]| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 0;
+        let is_secondary = |p: &[u8]| p[1] > 200 && p[0] < 50 && p[2] < 50 && p[3] > 0;
+        let mid = render_text(text, 500);
+        let bytes = mid.as_bytes();
+        assert!(bytes.chunks_exact(4).any(is_primary));
+        assert!(bytes.chunks_exact(4).any(is_secondary));
+        // Finished sweep: primary only.
+        let done = render_text(text, 1500);
+        assert!(done.as_bytes().chunks_exact(4).any(is_primary));
+        assert!(!done.as_bytes().chunks_exact(4).any(is_secondary));
     }
 
     #[test]

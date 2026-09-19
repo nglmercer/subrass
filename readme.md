@@ -72,7 +72,7 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 | Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
 | Fade | `\fad`, `\fade` | `\fade` with degenerate timing saturates instead of dividing by zero | |
 | Karaoke | `\k`, `\kt` (explicit syllable starts), `\K`/`\kf` (continuous sweep, split within glyph bitmaps), `\ko` (secondary fill + outline suppressed before start; primary + outline from start) | | |
-| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; mode 0 smart wrap (greedy fill + pairwise rebalance, libass algorithm); each line aligns independently | CJK/Unicode break opportunities are not used (spaces only) | |
+| Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; mode 0 smart wrap (greedy fill + pairwise rebalance, libass algorithm); each line aligns independently; conservative CJK break opportunities | | |
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
 | Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear, clip, position | Unsupported inner tags are ignored | |
 | Alignment | `\an`, legacy `\a` (SSA numbering converted) | | |
@@ -87,7 +87,7 @@ Position tags use the event's alignment as their anchor: for example, `\an5\pos(
 - No complex text shaping: left-to-right `ab_glyph` shaping only (no HarfBuzz, no RTL, no ligature-aware caret mapping).
 - Per-glyph font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); no system-font lookup.
 - Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
-- Rotation perspective distance is fixed (500 units); extreme angles degrade to empty glyphs rather than over-allocating.
+- Rotation perspective distance follows libass (312.5 × vertical resolution ratio); extreme angles degrade to empty glyphs rather than over-allocating.
 - `\r` preserves only line-global state (position, clip, fades) by design; drawing mode, fonts, colors, rotation, karaoke, and alignment reset.
 - Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz`; short smoke runs are CI-gated, longer sessions run locally.
 

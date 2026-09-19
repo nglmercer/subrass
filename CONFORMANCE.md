@@ -9,7 +9,7 @@ not prose. Regenerate the numbers with `cargo test --test reference -- --nocaptu
 | Item | Value |
 |---|---|
 | Reference renderer | libass via ffmpeg `ass` filter |
-| ffmpeg version | `ffmpeg version 9.0.1-essentials_build-www.gyan.dev` (see `tests/reference/provenance.json` for buildconf hash) |
+| ffmpeg version | `ffmpeg version 9.0.1-full_build-www.gyan.dev` (see `tests/reference/provenance.json` for buildconf hash; byte-identical output to the previous essentials build on all carried frames) |
 | Reference font | `fonts/DejaVuSans.ttf`, sha256 `7da195a7…e9ed848954` (full hash in provenance.json) |
 | Fixture video | 256x144, PlayRes 384x216, single frame per fixture at manifest time |
 | Generator | `tests/reference/gen_references.ps1` (never runs during `cargo test`) |
@@ -34,7 +34,7 @@ Gates: bbox IoU ≥ 0.70, ink-count ratio within [0.5, 2.0], block mean error
 (`tests/golden.rs`, byte-exact self-comparison) provide exact regression
 detection on top.
 
-## Latest reference results (all 20 gated fixtures pass)
+## Latest reference results (all 35 gated fixtures pass, 0 pending)
 
 | Fixture | IoU | Ink ratio | Mean | Hard |
 |---|---|---|---|---|
@@ -44,31 +44,44 @@ detection on top.
 | drawing | 0.828 | 0.83 | 11.94 | 0.0826 |
 | fade | 0.945 | 0.90 | 8.77 | 0.0000 |
 | karaoke | 0.939 | 0.94 | 12.04 | 0.0280 |
+| karaoke-early | 0.939 | 0.94 | 10.90 | 0.0132 |
 | karaoke-kf | 0.918 | 0.93 | 12.25 | 0.0000 |
+| karaoke-kf-combined | 0.933 | 1.03 | 12.99 | 0.0632 |
+| karaoke-kf-early | 0.918 | 0.93 | 12.45 | 0.0000 |
+| karaoke-kf-fax | 0.958 | 0.97 | 10.33 | 0.0000 |
+| karaoke-kf-fay | 0.933 | 1.00 | 7.44 | 0.0000 |
+| karaoke-kf-frx | 0.928 | 0.97 | 8.61 | 0.0000 |
+| karaoke-kf-fry | 1.000 | 1.00 | 11.43 | 0.0109 |
+| karaoke-kf-frz | 0.963 | 1.02 | 8.40 | 0.0100 |
+| karaoke-kf-late | 0.918 | 0.93 | 12.77 | 0.0093 |
 | karaoke-ko | 0.925 | 0.88 | 12.46 | 0.0000 |
+| karaoke-late | 0.939 | 0.94 | 11.59 | 0.0227 |
 | layers | 0.913 | 0.92 | 8.34 | 0.0091 |
 | mixed-sizes | 0.958 | 0.91 | 11.03 | 0.0000 |
 | move | 0.947 | 0.93 | 7.27 | 0.0000 |
 | opaque-box | 0.992 | 0.99 | 8.80 | 0.0000 |
+| opaque-box-multiline | 1.000 | 1.00 | 6.59 | 0.0000 |
 | plain | 0.951 | 0.90 | 10.64 | 0.0000 |
 | position | 0.941 | 0.90 | 9.11 | 0.0000 |
+| relative-fs | 0.978 | 0.87 | 11.61 | 0.0000 |
+| relative-fs-early | 0.972 | 0.87 | 11.06 | 0.0000 |
+| relative-fs-late | 0.972 | 0.91 | 13.86 | 0.0053 |
 | reset | 0.941 | 0.93 | 13.28 | 0.0000 |
-| rotation | 0.955 | 1.22 | 22.12 | 0.1398 |
+| rotation | 0.965 | 1.06 | 10.08 | 0.0000 |
 | shear | 0.972 | 1.01 | 10.85 | 0.0000 |
+| shear-rotation | 0.988 | 1.04 | 13.06 | 0.0412 |
 | transform | 0.879 | 1.34 | 13.61 | 0.0226 |
 | vector-clip | 0.820 | 0.91 | 7.43 | 0.0000 |
 | wrap | 0.985 | 0.92 | 10.67 | 0.0000 |
 
 Known-divergent (measured, not gated): `effect-banner`, `effect-scroll`
 (libass ignores legacy effects and renders static text), `font-fallback`
-(fontconfig fallback is environment-dependent), `opaque-box-multiline`
-(whole-block box here vs per-line boxes in libass; reference pending).
+(fontconfig fallback is environment-dependent).
 
-Pending libass frames (golden-covered; gate once generated with
-`tests/reference/gen_references.ps1`): `relative-fs`, `shear-rotation`,
-`karaoke-kf-frz`, `karaoke-kf-frx`, `karaoke-kf-fax`, `karaoke-kf-fay`,
-`opaque-box-multiline`. The harness reports these as pending, never as
-passes, until their `.rgba` files exist.
+No pending libass frames: every manifest fixture has a generated frame
+(`tests/reference/gen_references.ps1`). If a future fixture lacks one,
+the harness reports it as pending (never as a pass) in normal mode, and
+`SUBRASS_STRICT_REFERENCES=1` (used by CI) fails the gate instead.
 
 ## Feature matrix
 
@@ -83,19 +96,19 @@ passes, until their `.rgba` files exist.
 | `\b` weight selection incl. faux-only-if-needed | ✓ | ✓ | — | Supported |
 | `\fr`, `\frx`, `\fry`, `\frz` (CCW+, libass order/signs) | ✓ | `test_frz_positive_runs_counterclockwise` | rotation/transform G+L | Supported |
 | `\fscx`, `\fscy` | ✓ | ✓ | mixed-sizes/transform G+L | Supported |
-| `\fax`, `\fay` pre-rotation shear + `\fay` baseline slant | ✓ | `test_shear_applies_to_rotated_text_at_render`, `test_fay_baseline_shear_*` | shear G+L (IoU 0.972), shear-rotation G (L pending) | Supported |
+| `\fax`, `\fay` pre-rotation shear + `\fay` baseline slant (per-run reset) | ✓ | `test_shear_applies_to_rotated_text_at_render`, `test_fay_baseline_shear_*` | shear G+L (IoU 0.972), shear-rotation G+L (IoU 0.972) | Supported |
 | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad`, `\be`, `\blur` | ✓ | `test_scaled_*` | border-shadow G+L | Supported |
 | `ScaledBorderAndShadow` yes/no | ✓ | `test_scaled_*` | — | Supported |
 | `\clip`, `\iclip` rect + vector | ✓ | ✓ | clip/vector-clip G+L | Supported |
 | Drawings `\pN`, `\pbo`, `m n l b s p c` | ✓ | ✓ | drawing G+L (IoU 0.828) | Supported (B-splines subdivided) |
 | `\fad`, `\fade` | ✓ | ✓ | fade G+L | Supported |
-| `\k`, `\kt`, `\K`/`\kf` within-glyph sweep, `\ko` | ✓ | `test_kf_sweep_splits_within_glyph`, `test_karaoke_outline_suppressed_before_start` | karaoke* G+L, karaoke-kf-{frz,frx,fax,fay} G (L pending) | Supported (sweep edge is proportional across the transformed bitmap under rotation/perspective; unrotated is exact) |
-| `\N`, `\n`, `\h`, `\q`; wrap styles 0/1/2/3 | ✓ | `test_wrap_style_0_balances_lines`, … | wrap G+L (IoU 0.985) | Supported (spaces-only breaks, no CJK opportunities) |
+| `\k`, `\kt`, `\K`/`\kf` within-glyph sweep, `\ko` | ✓ | `test_kf_sweep_splits_within_glyph`, `test_karaoke_outline_suppressed_before_start` | karaoke* G+L incl. kf-{frx,fry,frz,fax,fay,combined} | Supported (device-space vertical split like libass) |
+| `\N`, `\n`, `\h`, `\q`; wrap styles 0/1/2/3; conservative CJK breaks | ✓ | `test_wrap_style_0_balances_lines`, `test_wrap_cjk_*`, … | wrap G+L (IoU 0.985) | Supported |
 | Per-line alignment (1–9) | — | `test_multiline_centers_each_line`, `*_right_aligns_*`, `*_left_aligns_*` | wrap/alignment G+L | Supported |
 | `\r`, `\rStyleName` (line-global preserve) | ✓ | reset tests | reset G+L | Supported |
 | `\t` animation (colors/alpha/size/scales/spacing/rotation/border/shadow/shear/clip/pos) | ✓ | ✓ | transform G+L | Supported; unsupported inner tags ignored (documented) |
 | `\an`, legacy `\a` | ✓ | ✓ | alignment G+L | Supported |
-| `BorderStyle=3` opaque box (Outline colour, outline padding) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G (L: known-divergent) | Supported single-line; multi-line covers whole block (libass: per-line) |
+| `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
 | `\fe` (parsed/stored/reset, no charset remap) | ✓ | `test_fe_resolve_and_reset` | — | Partial |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
@@ -104,12 +117,12 @@ passes, until their `.rgba` files exist.
 
 ## Known divergences (intentional)
 
-1. Fixed perspective distance (500 × vertical resolution ratio); degenerate
-   projections skip the glyph instead of over-allocating.
+1. Perspective distance follows libass exactly (312.5 × vertical
+   resolution ratio); degenerate projections skip the glyph instead of
+   over-allocating.
 2. Unhinted coverage rasterizer: ~1px placement/AA differences vs hinted
    FreeType (visible in block mean errors 7–22, not gated tightly).
-3. Multi-line opaque box covers the whole block (libass: per-line boxes).
-4. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent); libass applies
+3. Wrap mode 3 keeps bottom-wide greedy fill (ASS-spec intent); libass applies
    the same rebalance as mode 0 (and marks styles 0/3 FIXME).
-5. Blur runs before clipping (no bleed outside clip region).
-6. `\fe` does not remap charsets; underline/strikeout do not slant with `\fay`.
+4. Blur runs before clipping (no bleed outside clip region).
+5. `\fe` does not remap charsets; underline/strikeout do not slant with `\fay`.

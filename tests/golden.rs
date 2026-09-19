@@ -188,6 +188,59 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             1500,
         ),
         (
+            "karaoke-kf-fry".to_string(),
+            one("Default", "{\\an5\\fry30\\kf100}Swe{\\kf100}ep"),
+            1500,
+        ),
+        (
+            "karaoke-kf-combined".to_string(),
+            one(
+                "Default",
+                "{\\an5\\frx20\\fry30\\frz15\\kf100}Swe{\\kf100}ep",
+            ),
+            1500,
+        ),
+        // Same pop-karaoke line as `karaoke`, sampled at more times.
+        (
+            "karaoke-early".to_string(),
+            one("Default", "{\\k50}Ka{\\k50}ra{\\k50}o{\\k50}ke"),
+            250,
+        ),
+        (
+            "karaoke-late".to_string(),
+            one("Default", "{\\k50}Ka{\\k50}ra{\\k50}o{\\k50}ke"),
+            1750,
+        ),
+        // Same sweep line as `karaoke-kf`, sampled at more times.
+        (
+            "karaoke-kf-early".to_string(),
+            one("Default", "{\\kf100}Swe{\\kf100}ep"),
+            500,
+        ),
+        (
+            "karaoke-kf-late".to_string(),
+            one("Default", "{\\kf100}Swe{\\kf100}ep"),
+            1900,
+        ),
+        // Same events as `relative-fs`: the \t(0,2000,\fs+10) sweep
+        // sits at progress 0.25 / 0.75 instead of 0.5.
+        (
+            "relative-fs-early".to_string(),
+            vec![
+                ev(0, "Default", "", "S{\\fs+5}M{\\fs-5}S"),
+                ev(0, "Default", "", "{\\an7\\t(0,2000,\\fs+10)}Grow"),
+            ],
+            500,
+        ),
+        (
+            "relative-fs-late".to_string(),
+            vec![
+                ev(0, "Default", "", "S{\\fs+5}M{\\fs-5}S"),
+                ev(0, "Default", "", "{\\an7\\t(0,2000,\\fs+10)}Grow"),
+            ],
+            1500,
+        ),
+        (
             "opaque-box-multiline".to_string(),
             one("Box", "{\\an5}First line\\NSecond longer line"),
             1000,

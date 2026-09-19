@@ -1,5 +1,8 @@
-use ab_glyph::{Font, FontArc};
+use ab_glyph::{Font, FontArc, FontVec};
 use std::collections::HashMap;
+#[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// A resolved font with a stable identity and faux-style requirements.
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +36,11 @@ struct LoadedFont {
     is_italic: bool,
     /// Underline/strikeout metrics for decorations.
     decorations: DecorationMetrics,
+    /// Original bytes are retained for OpenType shaping.  Keeping the
+    /// collection index alongside them gives every face a stable shaping
+    /// identity without extracting or rewriting sfnt tables.
+    data: Arc<Vec<u8>>,
+    face_index: u32,
 }
 
 /// Underline/strikeout font metrics (libass `ass_get_glyph_outline`
@@ -59,6 +67,51 @@ impl FontManager {
         }
     }
 
+    /// Discover native system fonts when the opt-in `system-fonts` feature
+    /// is enabled. Embedded/manual faces are loaded first and therefore keep
+    /// deterministic precedence; a discovered family is skipped when that
+    /// family is already present. This method is intentionally unavailable
+    /// to WASM builds, whose font set must remain explicit and reproducible.
+    #[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
+    pub fn load_system_fonts(&mut self) -> usize {
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        let mut faces: Vec<_> = database.faces().cloned().collect();
+        faces.sort_by(|a, b| {
+            let family = |face: &fontdb::FaceInfo| {
+                face.families
+                    .first()
+                    .map(|(name, _)| name.to_lowercase())
+                    .unwrap_or_default()
+            };
+            family(a)
+                .cmp(&family(b))
+                .then(a.weight.0.cmp(&b.weight.0))
+                .then(a.index.cmp(&b.index))
+        });
+        let mut loaded_families = HashSet::new();
+        let mut loaded = 0;
+        for face in faces {
+            let Some(family) = face.families.first().map(|(name, _)| name.clone()) else {
+                continue;
+            };
+            let normalized = family.to_lowercase();
+            if loaded_families.contains(&normalized) || self.has_family(&family) {
+                continue;
+            }
+            let Some((data, _face_index)) =
+                database.with_face_data(face.id, |bytes, index| (bytes.to_vec(), index))
+            else {
+                continue;
+            };
+            if self.load_font_auto(&family, &data).is_ok() {
+                loaded_families.insert(normalized);
+                loaded += 1;
+            }
+        }
+        loaded
+    }
+
     /// Load a font from bytes with explicit style flags
     /// (weight 700 for bold, 400 otherwise).
     pub fn load_font(
@@ -73,10 +126,9 @@ impl FontManager {
 
     /// Load a font from bytes with an explicit ASS weight and italic flag.
     ///
-    /// Font collections (`.ttc`/`.otc`, `ttcf` magic) are rejected with
-    /// a clear error: only single-face `.ttf`/`.otf` files are
-    /// supported, and silently loading an arbitrary first face would
-    /// misreport family/weight metadata.
+    /// Load every face in a TrueType/OpenType collection.  A collection is
+    /// never reduced to face 0: each face gets its own metadata, matcher
+    /// identity, fallback slot, and shaping face index.
     pub fn load_font_with_weight(
         &mut self,
         name: &str,
@@ -84,40 +136,21 @@ impl FontManager {
         weight: u16,
         is_italic: bool,
     ) -> Result<usize, String> {
-        if data.len() >= 4 && data[0..4] == *b"ttcf" {
-            return Err(format!(
-                "Font collections (.ttc/.otc) are not supported: '{}'; use a single-face .ttf/.otf",
-                name
-            ));
+        let count = collection_face_count(data)
+            .ok_or_else(|| format!("Invalid font collection header for '{}'", name))?;
+        let mut first = None;
+        for face_index in 0..count {
+            let idx = self.load_one_face(
+                name,
+                data,
+                weight,
+                is_italic,
+                face_index as u32,
+                inspect_font_metadata_at(data, face_index as u32),
+            )?;
+            first.get_or_insert(idx);
         }
-        let font = FontArc::try_from_vec(data.to_vec())
-            .map_err(|e| format!("Failed to parse font '{}': {}", name, e))?;
-
-        // Decoration metrics (single parse at load; missing tables
-        // mean "no bar", like libass).
-        let deco = inspect_font_metadata(data);
-        let decorations = DecorationMetrics {
-            units_per_em: deco.as_ref().and_then(|m| m.units_per_em).unwrap_or(0),
-            underline: deco.as_ref().and_then(|m| m.underline),
-            strikeout: deco.as_ref().and_then(|m| m.strikeout),
-        };
-
-        let weight = weight.clamp(1, 1000);
-        let idx = self.fonts.len();
-        self.fonts.push(LoadedFont {
-            name: name.to_lowercase(),
-            font,
-            weight,
-            is_italic,
-            decorations,
-        });
-
-        // Set as fallback if it's the first font loaded
-        if self.fallback_index.is_none() {
-            self.fallback_index = Some(idx);
-        }
-
-        Ok(idx)
+        first.ok_or_else(|| format!("Font '{}' contains no faces", name))
     }
 
     /// Load a font, detecting family and style from the font's own metadata
@@ -125,41 +158,80 @@ impl FontManager {
     /// every declared family name so ASS `Fontname` values resolve even
     /// when the embedded filename differs from the family name.
     pub fn load_font_auto(&mut self, name: &str, data: &[u8]) -> Result<usize, String> {
-        let meta = inspect_font_metadata(data);
-        let (is_bold, is_italic) = match meta {
-            Some(ref m) => {
-                let filename_style = style_from_filename(name);
-                (
+        let base_name = strip_style_words(name);
+        let count = collection_face_count(data)
+            .ok_or_else(|| format!("Invalid font collection header for '{}'", name))?;
+        let filename_style = style_from_filename(name);
+        let mut first = None;
+        for face_index in 0..count {
+            let meta = inspect_font_metadata_at(data, face_index as u32);
+            let (is_bold, is_italic) = match meta.as_ref() {
+                Some(m) => (
                     m.is_bold.or(filename_style.0),
                     m.is_italic.or(filename_style.1),
-                )
-            }
-            None => {
-                let (b, i) = style_from_filename(name);
-                (b, i)
-            }
-        };
-        let is_bold = is_bold.unwrap_or(false);
-        let is_italic = is_italic.unwrap_or(false);
-        let weight = meta
-            .as_ref()
-            .and_then(|m| m.weight)
-            .filter(|w| (1..=1000).contains(w))
-            .unwrap_or(if is_bold { 700 } else { 400 });
-
-        let base_name = strip_style_words(name);
-        let idx = self.load_font_with_weight(&base_name, data, weight, is_italic)?;
-
-        // Alias every declared family name to this font.
-        if let Some(meta) = meta {
-            for family in meta.families {
-                let family = family.trim().to_lowercase();
-                if family.is_empty() || family == base_name {
-                    continue;
+                ),
+                None => filename_style,
+            };
+            let is_bold = is_bold.unwrap_or(false);
+            let is_italic = is_italic.unwrap_or(false);
+            let weight = meta
+                .as_ref()
+                .and_then(|m| m.weight)
+                .filter(|w| (1..=1000).contains(w))
+                .unwrap_or(if is_bold { 700 } else { 400 });
+            let idx = self.load_one_face(
+                &base_name,
+                data,
+                weight,
+                is_italic,
+                face_index as u32,
+                meta.clone(),
+            )?;
+            first.get_or_insert(idx);
+            if let Some(meta) = meta {
+                for family in meta.families {
+                    let family = family.trim().to_lowercase();
+                    if family.is_empty() || family == base_name {
+                        continue;
+                    }
+                    self.aliases.entry(family).or_insert(idx);
                 }
-                // First registration wins: deterministic, load-order precedence.
-                self.aliases.entry(family).or_insert(idx);
             }
+        }
+        first.ok_or_else(|| format!("Font '{}' contains no faces", name))
+    }
+
+    fn load_one_face(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        weight: u16,
+        is_italic: bool,
+        face_index: u32,
+        meta: Option<FontMetadata>,
+    ) -> Result<usize, String> {
+        let font = FontArc::new(
+            FontVec::try_from_vec_and_index(data.to_vec(), face_index).map_err(|e| {
+                format!("Failed to parse font '{}' face {}: {}", name, face_index, e)
+            })?,
+        );
+        let decorations = DecorationMetrics {
+            units_per_em: meta.as_ref().and_then(|m| m.units_per_em).unwrap_or(0),
+            underline: meta.as_ref().and_then(|m| m.underline),
+            strikeout: meta.as_ref().and_then(|m| m.strikeout),
+        };
+        let idx = self.fonts.len();
+        self.fonts.push(LoadedFont {
+            name: name.to_lowercase(),
+            font,
+            weight: weight.clamp(1, 1000),
+            is_italic,
+            decorations,
+            data: Arc::new(data.to_vec()),
+            face_index,
+        });
+        if self.fallback_index.is_none() {
+            self.fallback_index = Some(idx);
         }
         Ok(idx)
     }
@@ -300,6 +372,13 @@ impl FontManager {
         self.fonts.get(index).map(|f| &f.font)
     }
 
+    /// Raw bytes and the collection face index for OpenType shaping.
+    pub fn shaping_data(&self, index: usize) -> Option<(&[u8], u32)> {
+        self.fonts
+            .get(index)
+            .map(|f| (f.data.as_slice(), f.face_index))
+    }
+
     /// Underline/strikeout metrics for a loaded font id.
     pub fn decoration_metrics(&self, index: usize) -> Option<DecorationMetrics> {
         self.fonts.get(index).map(|f| f.decorations)
@@ -406,8 +485,14 @@ struct FontMetadata {
 ///
 /// Returns `None` when the data is not a parseable sfnt container.
 /// Never panics on malformed input: all reads are bounds-checked.
+#[cfg(test)]
 fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
-    let tables = read_sfnt_table_directory(data)?;
+    inspect_font_metadata_at(data, 0)
+}
+
+/// Inspect one face in a single-font sfnt or a TrueType/OpenType collection.
+fn inspect_font_metadata_at(data: &[u8], face_index: u32) -> Option<FontMetadata> {
+    let tables = read_sfnt_table_directory_at(data, face_index)?;
     let mut meta = FontMetadata::default();
 
     if let Some(name_table) = tables
@@ -505,28 +590,65 @@ fn inspect_font_metadata(data: &[u8]) -> Option<FontMetadata> {
 /// `true`, `typ1`). Font collections (`ttcf`, i.e. .ttc/.otc) are
 /// rejected: their header is not a table directory, and silently
 /// misreading it would yield wrong family/weight metadata.
-fn read_sfnt_table_directory(data: &[u8]) -> Option<Vec<([u8; 4], usize, usize)>> {
-    if data.len() < 12 {
+/// Read the table directory for one sfnt face.  TTC table offsets are
+/// absolute offsets into the collection, while standalone sfnt offsets are
+/// relative to the face's directory, which is also the file start.
+fn read_sfnt_table_directory_at(
+    data: &[u8],
+    face_index: u32,
+) -> Option<Vec<([u8; 4], usize, usize)>> {
+    let face_offset = if data.get(0..4) == Some(b"ttcf") {
+        let count = read_u32(data, 8)?;
+        if face_index >= count || count > 64 {
+            return None;
+        }
+        let offset = 12usize.checked_add(usize::try_from(face_index).ok()?.checked_mul(4)?)?;
+        read_u32(data, offset)? as usize
+    } else if face_index == 0 {
+        0
+    } else {
+        return None;
+    };
+    if data.len() < face_offset.saturating_add(12) {
         return None;
     }
-    let magic = data.get(0..4)?;
+    let magic = data.get(face_offset..face_offset + 4)?;
     if magic != [0x00, 0x01, 0x00, 0x00] && magic != b"OTTO" && magic != b"true" && magic != b"typ1"
     {
         return None;
     }
-    let num_tables = read_u16(data, 4)? as usize;
-    if num_tables > 64 || data.len() < 12 + num_tables * 16 {
+    let num_tables = read_u16(data, face_offset + 4)? as usize;
+    let dir_len = 12usize.checked_add(num_tables.checked_mul(16)?)?;
+    if num_tables > 64 || data.len() < face_offset.saturating_add(dir_len) {
         return None;
     }
     let mut tables = Vec::with_capacity(num_tables);
     for i in 0..num_tables {
-        let base = 12 + i * 16;
+        let base = face_offset + 12 + i * 16;
         let tag: [u8; 4] = data.get(base..base + 4)?.try_into().ok()?;
         let offset = read_u32(data, base + 8)? as usize;
         let len = read_u32(data, base + 12)? as usize;
         tables.push((tag, offset, len));
     }
     Some(tables)
+}
+
+/// Number of faces in a validated collection, or one for a standalone sfnt.
+/// The count is bounded before any per-face parsing/allocation occurs.
+fn collection_face_count(data: &[u8]) -> Option<usize> {
+    if data.get(0..4) == Some(b"ttcf") {
+        let count = read_u32(data, 8)? as usize;
+        if count == 0 || count > 64 {
+            return None;
+        }
+        let offsets_len = count.checked_mul(4)?.checked_add(12)?;
+        if data.len() < offsets_len {
+            return None;
+        }
+        Some(count)
+    } else {
+        Some(1)
+    }
 }
 
 /// Parse name IDs 1 (family), 16 (typographic family), and 4 (full name).
@@ -916,10 +1038,59 @@ mod tests {
         assert!(read_u32(&[0x01, 0x02, 0x03], 0).is_none());
     }
 
-    /// Plan #57: font collections are rejected clearly, never silently
-    /// first-faced; metadata inspection refuses them too.
+    fn make_test_collection(face: &[u8]) -> Vec<u8> {
+        let mut collection = vec![0u8; 20];
+        let mut offsets = Vec::new();
+        for _ in 0..2 {
+            while collection.len() % 4 != 0 {
+                collection.push(0);
+            }
+            let base = collection.len();
+            let mut copy = face.to_vec();
+            let table_count = read_u16(&copy, 4).unwrap_or(0) as usize;
+            for table in 0..table_count {
+                let record = 12 + table * 16;
+                let Some(offset) = read_u32(&copy, record + 8) else {
+                    continue;
+                };
+                let absolute = offset.saturating_add(base as u32).to_be_bytes();
+                if record + 12 <= copy.len() {
+                    copy[record + 8..record + 12].copy_from_slice(&absolute);
+                }
+            }
+            offsets.push(base as u32);
+            collection.extend(copy);
+        }
+        collection[0..4].copy_from_slice(b"ttcf");
+        collection[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        collection[8..12].copy_from_slice(&2u32.to_be_bytes());
+        for (index, offset) in offsets.into_iter().enumerate() {
+            let start = 12 + index * 4;
+            collection[start..start + 4].copy_from_slice(&offset.to_be_bytes());
+        }
+        collection
+    }
+
+    /// Plan #57: valid TTC/OTC collections load every face and retain each
+    /// face's metadata/shaping index; malformed collections still fail safely.
     #[test]
-    fn test_font_collections_rejected() {
+    fn test_font_collections_load_every_face() {
+        let ttc = make_test_collection(get_fallback_font());
+        assert!(inspect_font_metadata_at(&ttc, 0).is_some());
+        assert!(inspect_font_metadata_at(&ttc, 1).is_some());
+        let mut fm = FontManager::new();
+        let first = fm
+            .load_font_with_weight("Collection", &ttc, 400, false)
+            .unwrap();
+        assert_eq!(first, 0);
+        assert!(fm.get_font(0).is_some());
+        assert!(fm.get_font(1).is_some());
+        assert_eq!(fm.shaping_data(0).unwrap().1, 0);
+        assert_eq!(fm.shaping_data(1).unwrap().1, 1);
+    }
+
+    #[test]
+    fn test_invalid_font_collections_rejected() {
         // Synthetic TTC header (magic + version + 1 face offset).
         let mut ttc = vec![0u8; 64];
         ttc[0..4].copy_from_slice(b"ttcf");
@@ -929,7 +1100,10 @@ mod tests {
         let err = fm
             .load_font_with_weight("Fam", &ttc, 400, false)
             .unwrap_err();
-        assert!(err.contains("not supported"), "{err}");
+        assert!(
+            err.contains("Failed to parse") || err.contains("InvalidFont"),
+            "{err}"
+        );
         assert!(inspect_font_metadata(&ttc).is_none());
         // A real font with TTC magic stamped on is also rejected.
         let mut stamped = get_fallback_font().to_vec();

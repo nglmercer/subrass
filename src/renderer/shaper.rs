@@ -1,4 +1,10 @@
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont};
+use encoding_rs::{
+    Encoding, BIG5, EUC_KR, GBK, ISO_8859_2, ISO_8859_7, ISO_8859_8, SHIFT_JIS, WINDOWS_1251,
+    WINDOWS_1252, WINDOWS_1254, WINDOWS_1256, WINDOWS_1257, WINDOWS_1258, WINDOWS_874,
+};
+use rustybuzz::{BufferClusterLevel, Direction, UnicodeBuffer};
+use unicode_bidi::BidiInfo;
 
 use crate::types::Color;
 
@@ -40,6 +46,44 @@ pub struct ShapedLine {
     /// Characters missing from every shaping font (rendered as the
     /// primary face's .notdef). Zero when the chain covers the text.
     pub missing_glyphs: u32,
+}
+
+/// A raster face paired with the original sfnt bytes used by rustybuzz.
+/// `FontArc` remains the rasterizer source of truth; the byte slice and
+/// collection index are only used for OpenType substitutions/positioning.
+#[derive(Clone, Copy)]
+pub struct ShapingFont<'a> {
+    pub id: usize,
+    pub raster: &'a FontArc,
+    pub data: &'a [u8],
+    pub face_index: u32,
+}
+
+/// Map the numeric ASS/SSA `Encoding`/`\fe` value to the corresponding
+/// Windows code page.  Subtitle text arrives here as Rust Unicode, so the
+/// only safe compatibility bridge is to reinterpret legacy single-byte
+/// values (`U+0000..U+00FF`) while leaving already-Unicode scripts intact.
+/// Multibyte legacy characters must already have been decoded by the caller;
+/// this bridge still handles their ASCII-compatible portions correctly.
+fn ass_encoding(value: i32) -> Option<&'static Encoding> {
+    match value {
+        0 | 1 | 77 => Some(WINDOWS_1252),
+        128 => Some(SHIFT_JIS),
+        129 => Some(EUC_KR),
+        130 => Some(WINDOWS_1252), // Johab is not in encoding_rs.
+        134 => Some(GBK),
+        136 => Some(BIG5),
+        161 => Some(ISO_8859_7),
+        162 => Some(WINDOWS_1254),
+        163 => Some(WINDOWS_1258),
+        177 => Some(ISO_8859_8),
+        178 => Some(WINDOWS_1256),
+        186 => Some(WINDOWS_1257),
+        204 => Some(WINDOWS_1251),
+        222 => Some(WINDOWS_874),
+        238 => Some(ISO_8859_2),
+        _ => None,
+    }
 }
 
 /// True for combining marks (Mn/Mc) of the common scripts — Latin,
@@ -296,6 +340,40 @@ pub fn cjk_break_between(prev: char, next: char) -> bool {
 pub struct TextShaper;
 
 impl TextShaper {
+    /// Apply an ASS charset to the legacy byte-like portion of subtitle text.
+    /// ASCII and non-legacy Unicode scalars are preserved.  Unknown and
+    /// Symbol encodings intentionally remain Unicode-neutral because there
+    /// is no portable code-page mapping for them in the current renderer.
+    pub fn decode_font_encoding(text: &str, encoding: i32) -> String {
+        let Some(codec) = ass_encoding(encoding) else {
+            return text.to_string();
+        };
+        let mut output = String::with_capacity(text.len());
+        let mut bytes = Vec::new();
+        let flush = |output: &mut String, bytes: &mut Vec<u8>| {
+            if bytes.is_empty() {
+                return;
+            }
+            let (decoded, had_errors) = codec.decode_without_bom_handling(bytes);
+            if had_errors {
+                output.extend(bytes.iter().copied().map(char::from));
+            } else {
+                output.push_str(&decoded);
+            }
+            bytes.clear();
+        };
+        for ch in text.chars() {
+            if (ch as u32) <= u32::from(u8::MAX) {
+                bytes.push(ch as u8);
+            } else {
+                flush(&mut output, &mut bytes);
+                output.push(ch);
+            }
+        }
+        flush(&mut output, &mut bytes);
+        output
+    }
+
     /// Shape a text string into positioned glyphs (supports multi-line with \n).
     ///
     /// `font_id` is the stable [`FontManager`](super::font::FontManager)
@@ -456,6 +534,116 @@ impl TextShaper {
         }
     }
 
+    /// Shape with OpenType substitutions/positioning and Unicode bidi.
+    ///
+    /// Fallback is resolved at cluster boundaries first, then each
+    /// fallback run is shaped as a real OpenType run.  The resulting
+    /// glyphs, advances, offsets, and clusters are the same data used by
+    /// rendering and measurement; no scalar-width approximation is used
+    /// on this path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shape_with_opentype(
+        text: &str,
+        fonts: &[ShapingFont<'_>],
+        font_size: f64,
+        scale_x: f64,
+        scale_y: f64,
+        font_weight: u16,
+        italic: bool,
+        spacing: f64,
+        color: Color,
+        outline_color: Color,
+        shadow_color: Color,
+        rotation: f64,
+    ) -> ShapedLine {
+        let empty = ShapedLine {
+            glyphs: Vec::new(),
+            width: 0.0,
+            height: 0.0,
+            baseline: 0.0,
+            line_height: 0.0,
+            missing_glyphs: 0,
+        };
+        if fonts.is_empty()
+            || !font_size.is_finite()
+            || font_size <= 0.0
+            || font_size > f64::from(f32::MAX)
+        {
+            return empty;
+        }
+        let Some(primary) = fonts.first() else {
+            return empty;
+        };
+        let scale_x = scale_x.max(0.0);
+        let scale_y = scale_y.max(0.0);
+        let px_scale = PxScale::from(font_size as f32);
+        let primary_scaled = primary.raster.as_scaled(px_scale);
+        let baseline = primary_scaled.ascent() as f64 * scale_y;
+        let line_height = primary_scaled.height() as f64 * scale_y;
+        let mut glyphs = Vec::new();
+        let mut width: f64 = 0.0;
+        let mut y = 0.0;
+        let mut missing_glyphs = 0u32;
+
+        for (line_index, line) in text.split(['\n', '\r']).enumerate() {
+            let (line_glyphs, line_width, missing) = shape_opentype_line(
+                line,
+                fonts,
+                font_size,
+                scale_x,
+                scale_y,
+                font_weight,
+                italic,
+                spacing,
+                color,
+                outline_color,
+                shadow_color,
+                rotation,
+            );
+            missing_glyphs = missing_glyphs.saturating_add(missing);
+            width = width.max(line_width);
+            for mut glyph in line_glyphs {
+                glyph.y += y;
+                glyph.scale_y = scale_y;
+                glyph.font_size = font_size;
+                glyph.font_weight = font_weight;
+                glyph.italic = italic;
+                glyph.color = color;
+                glyph.outline_color = outline_color;
+                glyph.shadow_color = shadow_color;
+                glyph.rotation = rotation;
+                glyphs.push(glyph);
+            }
+            if line_index + 1 < text.split(['\n', '\r']).count() {
+                y += line_height;
+            }
+        }
+
+        // A trailing line break still contributes a line box, matching the
+        // scalar path and the renderer's line accounting.
+        let line_count = text.chars().filter(|c| *c == '\n' || *c == '\r').count() + 1;
+        let height = line_height * line_count as f64;
+        ShapedLine {
+            glyphs,
+            width,
+            height,
+            baseline,
+            line_height,
+            missing_glyphs,
+        }
+    }
+
+    /// Measure using the exact OpenType+bidi pipeline used by shaping.
+    pub fn measure_text_with_opentype(
+        text: &str,
+        fonts: &[ShapingFont<'_>],
+        font_size: f64,
+        scale_x: f64,
+        spacing: f64,
+    ) -> f64 {
+        shape_measure_opentype(text, fonts, font_size, scale_x, spacing)
+    }
+
     /// Measure text width without creating glyphs. For multiline text,
     /// returns the widest line (newlines are breaks, not skips).
     pub fn measure_text(text: &str, font: &FontArc, font_size: f64, spacing: f64) -> f64 {
@@ -560,6 +748,197 @@ impl TextShaper {
     }
 }
 
+/// Shape one logical line into visual-order OpenType runs.  This helper is
+/// deliberately bounded by the input line length and the caller's document
+/// caps; rustybuzz itself performs the GSUB/GPOS work.
+fn shape_opentype_line(
+    text: &str,
+    fonts: &[ShapingFont<'_>],
+    font_size: f64,
+    scale_x: f64,
+    scale_y: f64,
+    font_weight: u16,
+    italic: bool,
+    spacing: f64,
+    color: Color,
+    outline_color: Color,
+    shadow_color: Color,
+    rotation: f64,
+) -> (Vec<ShapedGlyph>, f64, u32) {
+    if text.is_empty() {
+        return (Vec::new(), 0.0, 0);
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let picks = cluster_font_picks(text, fonts.len(), |face, ch| {
+        fonts
+            .get(face)
+            .is_some_and(|font| font.raster.glyph_id(ch).0 != 0)
+    });
+
+    let bidi = BidiInfo::new(text, None);
+    let para = bidi.paragraphs.first();
+    let levels = para
+        .map(|p| bidi.reordered_levels_per_char(p, p.range.clone()))
+        .unwrap_or_else(|| vec![unicode_bidi::LTR_LEVEL; chars.len()]);
+    let levels = if levels.len() == chars.len() {
+        levels
+    } else {
+        vec![unicode_bidi::LTR_LEVEL; chars.len()]
+    };
+    let visual_indices = BidiInfo::reorder_visual(&levels);
+
+    let mut runs: Vec<(usize, usize, usize, bool)> = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let pick = picks.get(start).copied().unwrap_or(0);
+        let rtl = levels.get(start).is_some_and(|l| l.is_rtl());
+        let mut end = start + 1;
+        while end < chars.len()
+            && picks.get(end).copied().unwrap_or(0) == pick
+            && levels.get(end).is_some_and(|l| l.is_rtl()) == rtl
+        {
+            end += 1;
+        }
+        runs.push((start, end, pick, rtl));
+        start = end;
+    }
+
+    // Bidi L2 returns character indices in visual order.  Stable sorting by
+    // the first visual member keeps adjacent fallback sub-runs together.
+    let mut visual_run_ids: Vec<usize> = (0..runs.len()).collect();
+    visual_run_ids.sort_by_key(|run_id| {
+        let (from, to, _, _) = runs[*run_id];
+        visual_indices
+            .iter()
+            .position(|idx| *idx >= from && *idx < to)
+            .unwrap_or(usize::MAX)
+    });
+
+    let mut output = Vec::new();
+    let mut pen_x = 0.0;
+    let mut missing = 0u32;
+    for run_id in visual_run_ids {
+        let (from, to, pick, rtl) = runs[run_id];
+        let byte_start = chars[from].0;
+        let byte_end = if to < chars.len() {
+            chars[to].0
+        } else {
+            text.len()
+        };
+        let run_text = &text[byte_start..byte_end];
+        let Some(font) = fonts.get(pick.min(fonts.len().saturating_sub(1))) else {
+            continue;
+        };
+        let Some(face) = rustybuzz::Face::from_slice(font.data, font.face_index) else {
+            continue;
+        };
+        // `ab_glyph::PxScale` treats ASS's font size as the requested
+        // em-height (`height_unscaled`), rather than as raw OpenType
+        // units-per-em.  Use the same raster scale for HarfBuzz positions
+        // or shaped advances will be wider than the bitmaps they place.
+        let font_scale = font_size / f64::from(font.raster.height_unscaled().max(1.0));
+        let mut buffer = UnicodeBuffer::new();
+        buffer.set_direction(if rtl {
+            Direction::RightToLeft
+        } else {
+            Direction::LeftToRight
+        });
+        buffer.set_cluster_level(BufferClusterLevel::MonotoneCharacters);
+        buffer.push_str(run_text);
+        let shaped = rustybuzz::shape(&face, &[], buffer);
+        let infos = shaped.glyph_infos();
+        let positions = shaped.glyph_positions();
+        if infos.is_empty() {
+            continue;
+        }
+        let advances: Vec<f64> = positions
+            .iter()
+            .map(|position| f64::from(position.x_advance) * font_scale * scale_x)
+            .collect();
+        let gaps: Vec<f64> = (0..infos.len())
+            .map(|i| {
+                if i + 1 < infos.len() && infos[i].cluster != infos[i + 1].cluster {
+                    spacing * scale_x
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let run_width: f64 = advances
+            .iter()
+            .zip(&gaps)
+            .map(|(advance, gap)| advance + gap)
+            .sum();
+        let mut cursor = if rtl { run_width } else { 0.0 };
+        for (index, (info, position)) in infos.iter().zip(positions).enumerate() {
+            let advance = advances[index];
+            let gap = gaps[index];
+            let local_x = if rtl {
+                cursor -= advance;
+                let x = cursor;
+                cursor -= gap;
+                x
+            } else {
+                let x = cursor;
+                cursor += advance + gap;
+                x
+            };
+            let cluster_byte = usize::try_from(info.cluster).unwrap_or(0);
+            let ch = run_text
+                .get(cluster_byte..)
+                .and_then(|s| s.chars().next())
+                .unwrap_or('�');
+            let glyph_id = GlyphId(info.glyph_id.min(u32::from(u16::MAX)) as u16);
+            if glyph_id.0 == 0 {
+                missing = missing.saturating_add(1);
+            }
+            output.push(ShapedGlyph {
+                glyph_id,
+                font_id: font.id,
+                ch,
+                x: pen_x + local_x + f64::from(position.x_offset) * font_scale * scale_x,
+                y: -f64::from(position.y_offset) * font_scale * scale_y,
+                advance,
+                font_size,
+                color,
+                outline_color,
+                shadow_color,
+                font_weight,
+                italic,
+                scale_x,
+                scale_y,
+                rotation,
+            });
+        }
+        pen_x += run_width;
+    }
+    (output, pen_x, missing)
+}
+
+fn shape_measure_opentype(
+    text: &str,
+    fonts: &[ShapingFont<'_>],
+    font_size: f64,
+    scale_x: f64,
+    spacing: f64,
+) -> f64 {
+    let shaped = TextShaper::shape_with_opentype(
+        text,
+        fonts,
+        font_size,
+        scale_x,
+        1.0,
+        400,
+        false,
+        spacing,
+        Color::white(),
+        Color::black(),
+        Color::black(),
+        0.0,
+    );
+    shaped.width
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,6 +955,22 @@ mod tests {
     #[test]
     fn test_text_shaper_new() {
         let _ = TextShaper;
+    }
+
+    #[test]
+    fn test_ass_charset_mapping_preserves_unicode_scripts() {
+        assert_eq!(TextShaper::decode_font_encoding("caf\u{e9}", 1), "café");
+        assert_eq!(TextShaper::decode_font_encoding("\u{82}\u{a0}", 128), "あ");
+        assert_eq!(
+            TextShaper::decode_font_encoding("\u{d6}\u{d0}\u{ce}\u{c4}", 134),
+            "中文"
+        );
+        assert_eq!(TextShaper::decode_font_encoding("\u{3b1}", 161), "α");
+        // A real Unicode scalar outside the legacy-byte bridge is left alone.
+        assert_eq!(TextShaper::decode_font_encoding("日本語", 128), "日本語");
+        // Symbol/unknown values have no portable code-page mapping here.
+        assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 2), "ð");
+        assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 999), "ð");
     }
 
     #[test]
@@ -704,6 +1099,54 @@ mod tests {
             0.0,
         );
         assert!(line.glyphs.is_empty());
+    }
+
+    #[test]
+    fn test_opentype_shaping_uses_gsub_bidi_and_marks() {
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("Debug", font::get_fallback_font(), false, false)
+            .unwrap();
+        let raster = manager.get_font(0).unwrap();
+        let (data, face_index) = manager.shaping_data(0).unwrap();
+        let ot = ShapingFont {
+            id: 0,
+            raster,
+            data,
+            face_index,
+        };
+        let shape = |text: &str| {
+            TextShaper::shape_with_opentype(
+                text,
+                &[ot],
+                36.0,
+                1.0,
+                1.0,
+                400,
+                false,
+                0.0,
+                Color::white(),
+                Color::black(),
+                Color::black(),
+                0.0,
+            )
+        };
+        // DejaVu Sans exposes an ffi ligature: GSUB must reduce six source
+        // scalars to four raster glyphs.
+        let ligature = shape("office");
+        assert_eq!(ligature.glyphs.len(), 4);
+        assert!(ligature.width > 0.0);
+        // Arabic is emitted in visual order with joined glyph IDs rather
+        // than five isolated scalar glyphs.
+        let arabic = shape("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
+        assert_eq!(arabic.glyphs.len(), 5);
+        assert!(arabic.glyphs.windows(2).any(|pair| pair[0].x > pair[1].x));
+        assert!(arabic.glyphs.iter().all(|glyph| glyph.glyph_id.0 != 0));
+        // Combining marks stay in the base cluster and are positioned by
+        // GPOS, so the mark does not create an independent advance.
+        let mark = shape("A\u{301}");
+        assert_eq!(mark.glyphs.len(), 1);
+        assert!(mark.glyphs[0].glyph_id.0 != 0);
     }
 
     #[test]

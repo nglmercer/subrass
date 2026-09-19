@@ -640,11 +640,20 @@ impl RenderBuffer {
     /// Apply box blur (single pass; callers repeat for Gaussian approximation).
     /// The radius is clamped to [`MAX_BLUR_RADIUS`].
     pub fn box_blur(&mut self, radius: u32) {
-        let radius = radius.min(MAX_BLUR_RADIUS);
-        if radius == 0 || self.width == 0 || self.height == 0 {
+        self.box_blur_xy(radius, radius);
+    }
+
+    /// Apply an axis-specific box blur. libass scales blur horizontally and
+    /// vertically from the active layout resolution, which can differ from
+    /// PlayRes for anamorphic scripts.
+    pub fn box_blur_xy(&mut self, radius_x: u32, radius_y: u32) {
+        let radius_x = radius_x.min(MAX_BLUR_RADIUS);
+        let radius_y = radius_y.min(MAX_BLUR_RADIUS);
+        if (radius_x == 0 && radius_y == 0) || self.width == 0 || self.height == 0 {
             return;
         }
-        let r = radius as i32;
+        let rx = radius_x as i32;
+        let ry = radius_y as i32;
         let w = self.width as i32;
         let h = self.height as i32;
         let mut out = vec![0u8; self.pixels.len()];
@@ -658,7 +667,7 @@ impl RenderBuffer {
             let mut sum_a = 0u32;
             let mut count = 0u32;
 
-            for dx in -r..=r {
+            for dx in -rx..=rx {
                 let sx = dx;
                 if sx >= 0 && sx < w {
                     let idx = ((y * w + sx) * 4) as usize;
@@ -679,7 +688,7 @@ impl RenderBuffer {
             // Slide window: for each subsequent x, add right edge, remove left edge
             for x in 1..w {
                 // Add new pixel entering window (right side)
-                let add_x = x + r;
+                let add_x = x + rx;
                 if add_x < w {
                     let idx = ((y * w + add_x) * 4) as usize;
                     sum_r += self.pixels[idx] as u32;
@@ -690,7 +699,7 @@ impl RenderBuffer {
                 }
 
                 // Remove pixel leaving window (left side)
-                let remove_x = x - r - 1;
+                let remove_x = x - rx - 1;
                 if (0..w).contains(&remove_x) {
                     let idx = ((y * w + remove_x) * 4) as usize;
                     sum_r -= self.pixels[idx] as u32;
@@ -718,7 +727,7 @@ impl RenderBuffer {
             let mut sum_a = 0u32;
             let mut count = 0u32;
 
-            for dy in -r..=r {
+            for dy in -ry..=ry {
                 let sy = dy;
                 if sy >= 0 && sy < h {
                     let idx = ((sy * w + x) * 4) as usize;
@@ -739,7 +748,7 @@ impl RenderBuffer {
             // Slide window: for each subsequent y, add bottom edge, remove top edge
             for y in 1..h {
                 // Add new pixel entering window (bottom)
-                let add_y = y + r;
+                let add_y = y + ry;
                 if add_y < h {
                     let idx = ((add_y * w + x) * 4) as usize;
                     sum_r += out[idx] as u32;
@@ -750,7 +759,7 @@ impl RenderBuffer {
                 }
 
                 // Remove pixel leaving window (top)
-                let remove_y = y - r - 1;
+                let remove_y = y - ry - 1;
                 if (0..h).contains(&remove_y) {
                     let idx = ((remove_y * w + x) * 4) as usize;
                     sum_r -= out[idx] as u32;

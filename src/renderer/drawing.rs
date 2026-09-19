@@ -3,8 +3,11 @@ use crate::renderer::buffer::RenderBuffer;
 /// Defensive caps for untrusted drawing input.
 pub const MAX_DRAWING_COMMANDS: usize = 100_000;
 pub const MAX_DRAWING_POINTS: usize = 1_000_000;
-/// Subdivisions per spline span.
-const SPLINE_STEPS: usize = 8;
+/// Maximum recursion depth for cubic flattening. The flatness threshold is
+/// in drawing units; subdivision is therefore stable before the caller's
+/// device-scale conversion.
+const CURVE_MAX_DEPTH: u8 = 12;
+const CURVE_FLATNESS: f64 = 0.05;
 
 #[derive(Debug, Clone)]
 enum DrawCommand {
@@ -103,6 +106,8 @@ impl DrawingParser {
     fn parse(text: &str) -> Vec<DrawCommand> {
         let mut commands = Vec::new();
         let mut chars = text.chars().peekable();
+        let mut m_seen = false;
+        let mut spline_active = false;
 
         macro_rules! push {
             ($cmd:expr) => {
@@ -118,6 +123,8 @@ impl DrawingParser {
             match ch {
                 'm' | 'M' => {
                     chars.next();
+                    m_seen = true;
+                    spline_active = false;
                     while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
                         push!(DrawCommand::MoveTo {
                             x,
@@ -128,6 +135,12 @@ impl DrawingParser {
                 }
                 'n' | 'N' => {
                     chars.next();
+                    if !m_seen {
+                        // libass rejects a drawing whose first usable
+                        // command is `n` without a preceding `m`.
+                        return Vec::new();
+                    }
+                    spline_active = false;
                     while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
                         push!(DrawCommand::MoveTo {
                             x,
@@ -138,12 +151,19 @@ impl DrawingParser {
                 }
                 'l' | 'L' => {
                     chars.next();
+                    if !m_seen {
+                        continue;
+                    }
                     while let Some((x, y)) = Self::next_coord_pair(&mut chars) {
                         push!(DrawCommand::LineTo { x, y });
                     }
                 }
                 'b' | 'B' => {
                     chars.next();
+                    if !m_seen {
+                        continue;
+                    }
+                    spline_active = false;
                     while let (Some((x1, y1)), Some((x2, y2)), Some((x, y))) = (
                         Self::next_coord_pair(&mut chars),
                         Self::next_coord_pair(&mut chars),
@@ -161,17 +181,19 @@ impl DrawingParser {
                 }
                 's' | 'S' => {
                     chars.next();
+                    if !m_seen {
+                        continue;
+                    }
                     let mut points = Vec::new();
                     while let Some(pt) = Self::next_coord_pair(&mut chars) {
                         points.push(pt);
                     }
-                    if points.len() >= 2 {
+                    if points.len() >= 3 {
+                        spline_active = true;
                         push!(DrawCommand::SplineTo {
                             points,
                             closed: false,
                         });
-                    } else if let Some(&(x, y)) = points.first() {
-                        push!(DrawCommand::LineTo { x, y });
                     }
                 }
                 'p' | 'P' => {
@@ -185,31 +207,35 @@ impl DrawingParser {
                     }
                     // Extend the open spline, or start one from the
                     // current point when there is none.
+                    if !m_seen || !spline_active {
+                        continue;
+                    }
                     match commands.last_mut() {
                         Some(DrawCommand::SplineTo {
                             points: existing,
                             closed: false,
                         }) => existing.extend(points),
-                        _ => {
-                            if points.len() >= 2 {
-                                push!(DrawCommand::SplineTo {
-                                    points,
-                                    closed: false,
-                                });
-                            } else if let Some(&(x, y)) = points.first() {
-                                push!(DrawCommand::LineTo { x, y });
-                            }
-                        }
+                        _ => {}
                     }
                 }
                 'c' | 'C' => {
                     chars.next();
                     // Close an open spline (connect end to start), then
                     // close the outline.
-                    if let Some(DrawCommand::SplineTo { closed, .. }) = commands.last_mut() {
-                        *closed = true;
+                    if spline_active {
+                        if let Some(DrawCommand::SplineTo { closed, .. }) = commands.last_mut() {
+                            *closed = true;
+                        }
+                        push!(DrawCommand::Close);
+                        spline_active = false;
+                    } else if commands.last().is_some_and(|command| {
+                        matches!(
+                            command,
+                            DrawCommand::LineTo { .. } | DrawCommand::CurveTo { .. }
+                        )
+                    }) {
+                        push!(DrawCommand::Close);
                     }
-                    push!(DrawCommand::Close);
                 }
                 ' ' | ',' | '\n' | '\r' | '\t' => {
                     chars.next();
@@ -340,35 +366,52 @@ impl DrawingParser {
                     y,
                 } => {
                     if let Some(&last) = current_polygon.last() {
-                        let steps = SPLINE_STEPS;
-                        for i in 1..=steps {
-                            let t = i as f64 / steps as f64;
-                            let mt = 1.0 - t;
-                            let px = mt.powi(3) * last.0
-                                + 3.0 * mt.powi(2) * t * x1
-                                + 3.0 * mt * t.powi(2) * x2
-                                + t.powi(3) * x;
-                            let py = mt.powi(3) * last.1
-                                + 3.0 * mt.powi(2) * t * y1
-                                + 3.0 * mt * t.powi(2) * y2
-                                + t.powi(3) * y;
-                            Self::push_point(&mut current_polygon, (px, py));
-                        }
+                        Self::append_cubic(
+                            &mut current_polygon,
+                            last,
+                            (*x1, *y1),
+                            (*x2, *y2),
+                            (*x, *y),
+                        );
                     }
                 }
                 DrawCommand::SplineTo { points, closed } => {
-                    // Prepend the current point so the spline starts
-                    // where the pen is.
-                    let mut control: Vec<(f64, f64)> = Vec::with_capacity(points.len() + 1);
-                    if let Some(&last) = current_polygon.last() {
-                        control.push(last);
-                    }
+                    // libass converts each four-point uniform B-spline span
+                    // to a cubic Bezier. The current pen is the first
+                    // control point; subsequent spans advance by one point.
+                    let Some(&pen) = current_polygon.last() else {
+                        continue;
+                    };
+                    let mut control = Vec::with_capacity(points.len() + 4);
+                    control.push(pen);
                     control.extend_from_slice(points);
-                    if control.len() < 2 {
+                    if *closed {
+                        let wrap = control[..3].to_vec();
+                        control.extend_from_slice(&wrap);
+                    }
+                    if control.len() < 4 {
                         continue;
                     }
-                    for pt in Self::eval_bspline(&control, *closed) {
-                        Self::push_point(&mut current_polygon, pt);
+                    // The first B-spline span replaces the move-only pen
+                    // point. For an already-started outline, its existing
+                    // endpoint is the Bezier span's start instead.
+                    let replace_pen = current_polygon.len() == 1;
+                    if replace_pen {
+                        current_polygon.clear();
+                    }
+                    for window in control.windows(4) {
+                        let bezier = Self::bspline_to_bezier(window);
+                        if current_polygon.is_empty() {
+                            Self::push_point(&mut current_polygon, bezier[0]);
+                        }
+                        let start = *current_polygon.last().unwrap_or(&bezier[0]);
+                        Self::append_cubic(
+                            &mut current_polygon,
+                            start,
+                            bezier[1],
+                            bezier[2],
+                            bezier[3],
+                        );
                     }
                 }
                 DrawCommand::Close => {
@@ -386,49 +429,60 @@ impl DrawingParser {
         polygons
     }
 
-    /// Evaluate a uniform cubic B-spline through `control` (clamped ends
-    /// unless `closed`, which wraps the control polygon).
-    fn eval_bspline(control: &[(f64, f64)], closed: bool) -> Vec<(f64, f64)> {
-        let mut pts: Vec<(f64, f64)> = control.to_vec();
-        if closed {
-            if pts.len() < 3 {
-                return pts;
-            }
-            // Wrap the first three points for a closed spline.
-            pts.push(pts[0]);
-            pts.push(pts[1]);
-            pts.push(pts[2]);
-        } else {
-            if pts.len() < 2 {
-                return pts;
-            }
-            // Clamp ends by duplicating them.
-            pts.insert(0, pts[0]);
-            pts.push(pts[pts.len() - 1]);
+    /// Convert one libass uniform B-spline span into cubic Bezier controls.
+    fn bspline_to_bezier(points: &[(f64, f64)]) -> [(f64, f64); 4] {
+        let [p0, p1, p2, p3] = [points[0], points[1], points[2], points[3]];
+        let d01 = ((p1.0 - p0.0) / 3.0, (p1.1 - p0.1) / 3.0);
+        let d12 = ((p2.0 - p1.0) / 3.0, (p2.1 - p1.1) / 3.0);
+        let d23 = ((p3.0 - p2.0) / 3.0, (p3.1 - p2.1) / 3.0);
+        [
+            (p1.0 + (d12.0 - d01.0) / 2.0, p1.1 + (d12.1 - d01.1) / 2.0),
+            (p1.0 + d12.0, p1.1 + d12.1),
+            (p2.0 - d12.0, p2.1 - d12.1),
+            (p2.0 + (d23.0 - d12.0) / 2.0, p2.1 + (d23.1 - d12.1) / 2.0),
+        ]
+    }
+
+    fn append_cubic(
+        polygon: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+    ) {
+        if polygon.is_empty() {
+            Self::push_point(polygon, p0);
         }
-        let mut out = Vec::new();
-        // Spans of 4 control points; skip the leading duplicate span.
-        let spans = pts.len().saturating_sub(3);
-        for s in 0..spans {
-            let (p0, p1, p2, p3) = (pts[s], pts[s + 1], pts[s + 2], pts[s + 3]);
-            for i in 1..=SPLINE_STEPS {
-                let t = i as f64 / SPLINE_STEPS as f64;
-                let mt = 1.0 - t;
-                // Uniform cubic B-spline basis.
-                let b0 = mt * mt * mt / 6.0;
-                let b1 = (3.0 * t * t * t - 6.0 * t * t + 4.0) / 6.0;
-                let b2 = (-3.0 * t * t * t + 3.0 * t * t + 3.0 * t + 1.0) / 6.0;
-                let b3 = t * t * t / 6.0;
-                out.push((
-                    b0 * p0.0 + b1 * p1.0 + b2 * p2.0 + b3 * p3.0,
-                    b0 * p0.1 + b1 * p1.1 + b2 * p2.1 + b3 * p3.1,
-                ));
-                if out.len() >= MAX_DRAWING_POINTS {
-                    return out;
-                }
-            }
+        Self::flatten_cubic(polygon, [p0, p1, p2, p3], 0);
+    }
+
+    fn flatten_cubic(polygon: &mut Vec<(f64, f64)>, [p0, p1, p2, p3]: [(f64, f64); 4], depth: u8) {
+        if polygon.len() >= MAX_DRAWING_POINTS {
+            return;
         }
-        out
+        let flat = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let denom = (dx * dx + dy * dy).sqrt();
+            if denom <= f64::EPSILON {
+                ((p.0 - a.0).powi(2) + (p.1 - a.1).powi(2)).sqrt()
+            } else {
+                ((dy * p.0 - dx * p.1 + b.0 * a.1 - b.1 * a.0).abs()) / denom
+            }
+        };
+        if depth >= CURVE_MAX_DEPTH
+            || (flat(p1, p0, p3) <= CURVE_FLATNESS && flat(p2, p0, p3) <= CURVE_FLATNESS)
+        {
+            Self::push_point(polygon, p3);
+            return;
+        }
+        let m01 = ((p0.0 + p1.0) / 2.0, (p0.1 + p1.1) / 2.0);
+        let m12 = ((p1.0 + p2.0) / 2.0, (p1.1 + p2.1) / 2.0);
+        let m23 = ((p2.0 + p3.0) / 2.0, (p2.1 + p3.1) / 2.0);
+        let m012 = ((m01.0 + m12.0) / 2.0, (m01.1 + m12.1) / 2.0);
+        let m123 = ((m12.0 + m23.0) / 2.0, (m12.1 + m23.1) / 2.0);
+        let mid = ((m012.0 + m123.0) / 2.0, (m012.1 + m123.1) / 2.0);
+        Self::flatten_cubic(polygon, [p0, m01, m012, mid], depth + 1);
+        Self::flatten_cubic(polygon, [mid, m123, m23, p3], depth + 1);
     }
 
     /// Scanline raster core: calls `emit(x, y)` for covered pixels.

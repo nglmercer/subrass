@@ -89,6 +89,11 @@ impl SubtitleRenderer {
             }
         }
 
+        #[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
+        {
+            font_manager.load_system_fonts();
+        }
+
         // Static document diagnostics: unknown tags, unsupported
         // effects, missing fonts, and right-to-left text. Collected
         // once here (deduplicated, capped) rather than per frame.
@@ -254,6 +259,16 @@ impl SubtitleRenderer {
 
             let mut resolved = Compositor::resolve_style(style, event);
             resolved.scaled_border_and_shadow = self.doc.script_info.scaled_border_and_shadow;
+            resolved.layout_res_x = self
+                .doc
+                .script_info
+                .layout_res_x
+                .unwrap_or(self.video_width);
+            resolved.layout_res_y = self
+                .doc
+                .script_info
+                .layout_res_y
+                .unwrap_or(self.video_height);
 
             self.compositor.composite_event(
                 &mut self.buffer,

@@ -4,7 +4,7 @@ use super::buffer::{
 use super::effects;
 use super::font::{DecorationMetrics, FontManager};
 use super::glyph_cache::GlyphCache;
-use super::shaper::TextShaper;
+use super::shaper::{ShapingFont, TextShaper};
 use crate::types::color::Color;
 use crate::types::override_tag::{parse_text_segments, parse_text_segments_with_wrap, TextSegment};
 use crate::types::{Event, EventType, LegacyEffect, OverrideTag, Style};
@@ -69,6 +69,20 @@ pub struct ResolvedStyle {
     /// Needed because `\fad(0,0)` is otherwise indistinguishable from
     /// "no fade tag". Persists across `\r` with the fade values.
     pub parsed_fade: bool,
+    /// Effective per-event `\q` override.  Keeping it in the resolved
+    /// state makes transformed `\q` participate in wrapping at the same
+    /// timestamp as every other event-global property.
+    pub wrap_style: Option<i32>,
+    /// Script-space canvas used as the initial rectangular clip while a
+    /// transform is interpolating a clip that did not previously exist.
+    pub clip_canvas: (i32, i32),
+    /// Set only for the frame-level state.  Segment resolution uses this
+    /// marker to avoid applying event-global transform targets twice.
+    event_globals_applied: bool,
+    /// ASS-2 layout resolution used for blur and unscaled border/shadow
+    /// metrics. Zero means the legacy PlayRes fallback.
+    pub layout_res_x: u32,
+    pub layout_res_y: u32,
     pub drawing_mode: i32,
     pub drawing_baseline_offset: f64,
     pub blur: f64,
@@ -109,6 +123,11 @@ struct LineGlobalKeep {
     alignment: i32,
     parsed_alignment: bool,
     parsed_fade: bool,
+    wrap_style: Option<i32>,
+    clip_canvas: (i32, i32),
+    event_globals_applied: bool,
+    layout_res_x: u32,
+    layout_res_y: u32,
     drawing_mode: i32,
     drawing_baseline_offset: f64,
 }
@@ -129,6 +148,11 @@ impl LineGlobalKeep {
             alignment: resolved.alignment,
             parsed_alignment: resolved.parsed_alignment,
             parsed_fade: resolved.parsed_fade,
+            wrap_style: resolved.wrap_style,
+            clip_canvas: resolved.clip_canvas,
+            event_globals_applied: resolved.event_globals_applied,
+            layout_res_x: resolved.layout_res_x,
+            layout_res_y: resolved.layout_res_y,
             drawing_mode: resolved.drawing_mode,
             drawing_baseline_offset: resolved.drawing_baseline_offset,
         }
@@ -148,6 +172,11 @@ impl LineGlobalKeep {
         resolved.alignment = self.alignment;
         resolved.parsed_alignment = self.parsed_alignment;
         resolved.parsed_fade = self.parsed_fade;
+        resolved.wrap_style = self.wrap_style;
+        resolved.clip_canvas = self.clip_canvas;
+        resolved.event_globals_applied = self.event_globals_applied;
+        resolved.layout_res_x = self.layout_res_x;
+        resolved.layout_res_y = self.layout_res_y;
         resolved.drawing_mode = self.drawing_mode;
         resolved.drawing_baseline_offset = self.drawing_baseline_offset;
     }
@@ -218,6 +247,20 @@ fn wrap_event_text(
     font_size: f64,
     spacing: f64,
 ) -> String {
+    let measure =
+        |value: &str| TextShaper::measure_text_with_fallback(value, fonts, font_size, spacing);
+    wrap_event_text_with_measure(text, wrap_style, max_width, &measure)
+}
+
+fn wrap_event_text_with_measure<F>(
+    text: &str,
+    wrap_style: i32,
+    max_width: f64,
+    measure: &F,
+) -> String
+where
+    F: Fn(&str) -> f64,
+{
     if wrap_style == 2 || max_width <= 0.0 {
         return text.to_string();
     }
@@ -286,7 +329,7 @@ fn wrap_event_text(
                 .map(|w| w.max(0.0))
                 .unwrap_or(0.0)
         } else {
-            TextShaper::measure_text_with_fallback(word, fonts, font_size, spacing)
+            measure(word)
         };
         *is_drawing = false;
         words.push(WrapWord {
@@ -432,9 +475,9 @@ fn wrap_event_text(
     // CJK break opportunities inside words (conservative UAX #14):
     // overlong CJK runs wrap without spaces. Continuation pieces glue
     // with no gap; run starts remap to the split indices.
-    let words = split_cjk_words(words, &mut run_starts, fonts, font_size, spacing);
+    let words = split_cjk_words(words, &mut run_starts, measure);
 
-    let space_width = TextShaper::measure_text_with_fallback(" ", fonts, font_size, spacing);
+    let space_width = measure(" ");
 
     // Wrap each explicit-line run independently, then rejoin with breaks.
     let mut out = String::with_capacity(text.len() + 16);
@@ -467,13 +510,10 @@ fn wrap_event_text(
 /// Skips drawing words (verbatim text with groups), empty words, and
 /// breaks right after a backslash (would split `\x` escapes across
 /// lines). Remaps `run_starts` to the split indices in place.
-fn split_cjk_words(
-    words: Vec<WrapWord>,
-    run_starts: &mut [usize],
-    fonts: &[&FontArc],
-    font_size: f64,
-    spacing: f64,
-) -> Vec<WrapWord> {
+fn split_cjk_words<F>(words: Vec<WrapWord>, run_starts: &mut [usize], measure: &F) -> Vec<WrapWord>
+where
+    F: Fn(&str) -> f64,
+{
     use super::shaper::cjk_break_between;
     let mut out: Vec<WrapWord> = Vec::with_capacity(words.len());
     let mut index_of: Vec<usize> = Vec::with_capacity(words.len() + 1);
@@ -500,7 +540,7 @@ fn split_cjk_words(
                 continue;
             }
             let piece: String = chars[start..=i].iter().collect();
-            let width = TextShaper::measure_text_with_fallback(&piece, fonts, font_size, spacing);
+            let width = measure(&piece);
             if first {
                 out.push(WrapWord {
                     prefix: std::mem::take(&mut word.prefix),
@@ -522,7 +562,7 @@ fn split_cjk_words(
             start = i + 1;
         }
         let piece: String = chars[start..].iter().collect();
-        let width = TextShaper::measure_text_with_fallback(&piece, fonts, font_size, spacing);
+        let width = measure(&piece);
         if first {
             out.push(WrapWord {
                 prefix: word.prefix,
@@ -2188,12 +2228,17 @@ impl Compositor {
                     // Rectangular clips are interpolated coordinate by
                     // coordinate by libass. The default clip is the full
                     // PlayRes canvas used by the renderer's default style.
-                    let from = resolved
-                        .clip
-                        .or(resolved.inverse_clip)
-                        .unwrap_or((0, 0, 384, 288));
+                    let from = resolved.clip.or(resolved.inverse_clip).unwrap_or((
+                        0,
+                        0,
+                        resolved.clip_canvas.0,
+                        resolved.clip_canvas.1,
+                    ));
                     let lerp = |a: i32, b: i32| {
-                        (f64::from(a) * (1.0 - progress) + f64::from(b) * progress).round() as i32
+                        // libass converts the interpolated ASS coordinate
+                        // with an integer cast (truncate toward zero), not
+                        // with mathematical rounding.
+                        (f64::from(a) * (1.0 - progress) + f64::from(b) * progress) as i32
                     };
                     let rect = (
                         lerp(from.0, *x0),
@@ -2235,6 +2280,156 @@ impl Compositor {
                 _ => Self::apply_single_tag(resolved, target),
             }
         }
+    }
+
+    /// Apply only the event-global portion of a transform.  The normal
+    /// segment resolver also walks transform tags, but event-global tags
+    /// must be resolved before wrapping and block geometry are computed.
+    /// Keeping this filtered pass separate prevents a `\t(\fs...)` from
+    /// being applied once to the event and again to each segment.
+    fn apply_event_global_transform_tags(
+        resolved: &mut ResolvedStyle,
+        tags: &[OverrideTag],
+        progress: f64,
+        depth: u32,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) {
+        for target in tags {
+            match target {
+                OverrideTag::Transform {
+                    t1,
+                    t2,
+                    accel,
+                    tags: nested,
+                } if depth < 32 => {
+                    let nested_progress =
+                        Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
+                    Self::apply_event_global_transform_tags(
+                        resolved,
+                        nested,
+                        nested_progress,
+                        depth + 1,
+                        time_ms,
+                        start_ms,
+                        end_ms,
+                    );
+                }
+                OverrideTag::Transform { .. } => {}
+                OverrideTag::Clip(x0, y0, x1, y1) | OverrideTag::InverseClip(x0, y0, x1, y1) => {
+                    let from = resolved.clip.or(resolved.inverse_clip).unwrap_or((
+                        0,
+                        0,
+                        resolved.clip_canvas.0,
+                        resolved.clip_canvas.1,
+                    ));
+                    let lerp = |a: i32, b: i32| {
+                        (f64::from(a) * (1.0 - progress) + f64::from(b) * progress) as i32
+                    };
+                    let rect = (
+                        lerp(from.0, *x0),
+                        lerp(from.1, *y0),
+                        lerp(from.2, *x1),
+                        lerp(from.3, *y1),
+                    );
+                    if matches!(target, OverrideTag::Clip(..)) {
+                        resolved.clip = Some(rect);
+                        resolved.inverse_clip = None;
+                    } else {
+                        resolved.inverse_clip = Some(rect);
+                        resolved.clip = None;
+                    }
+                }
+                tag if tag.is_event_layout() => Self::apply_single_tag(resolved, tag),
+                _ => {}
+            }
+        }
+    }
+
+    /// Segment-local transform walk used after the event-global pass.  It
+    /// retains all font, color, geometry, drawing, and karaoke behavior,
+    /// while leaving the already-resolved event layout fields untouched.
+    fn apply_transform_segment_tags(
+        resolved: &mut ResolvedStyle,
+        tags: &[OverrideTag],
+        progress: f64,
+        depth: u32,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) {
+        for target in tags {
+            match target {
+                OverrideTag::Transform {
+                    t1,
+                    t2,
+                    accel,
+                    tags: nested,
+                } if depth < 32 => {
+                    let nested_progress =
+                        Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
+                    Self::apply_transform_segment_tags(
+                        resolved,
+                        nested,
+                        nested_progress,
+                        depth + 1,
+                        time_ms,
+                        start_ms,
+                        end_ms,
+                    );
+                }
+                OverrideTag::Transform { .. } => {}
+                tag if !tag.is_event_layout() => Self::apply_transform_tags_depth(
+                    resolved,
+                    std::slice::from_ref(target),
+                    progress,
+                    depth,
+                    time_ms,
+                    start_ms,
+                    end_ms,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    /// Resolve the event-global state at a frame timestamp.  This is the
+    /// render-level counterpart of `resolve_style`: it evaluates all
+    /// top-level transforms in source order and exposes the resulting
+    /// position, origin, alignment, wrapping, fade, and clip state to the
+    /// complete event render.
+    fn resolve_event_globals_at_time(
+        resolved: &ResolvedStyle,
+        event: &Event,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+        play_res_x: u32,
+        play_res_y: u32,
+    ) -> ResolvedStyle {
+        let mut frame = resolved.clone();
+        frame.clip_canvas = (
+            play_res_x.min(i32::MAX as u32) as i32,
+            play_res_y.min(i32::MAX as u32) as i32,
+        );
+        for tag in &event.parsed_tags {
+            if let OverrideTag::Transform {
+                t1,
+                t2,
+                accel,
+                tags,
+            } = tag
+            {
+                let progress =
+                    Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
+                Self::apply_event_global_transform_tags(
+                    &mut frame, tags, progress, 0, time_ms, start_ms, end_ms,
+                );
+            }
+        }
+        frame.event_globals_applied = true;
+        frame
     }
 
     /// Resolve an event's style with all override tags applied (no animation)
@@ -2285,6 +2480,11 @@ impl Compositor {
             fade_out: 0,
             complex_fade: None,
             parsed_fade: false,
+            wrap_style: None,
+            clip_canvas: (384, 288),
+            event_globals_applied: false,
+            layout_res_x: 0,
+            layout_res_y: 0,
             drawing_mode: 0,
             drawing_baseline_offset: 0.0,
             blur: 0.0,
@@ -2549,6 +2749,7 @@ impl Compositor {
             OverrideTag::EdgeBlur(b) => resolved.blur = *b,
             OverrideTag::Drawing(mode) => resolved.drawing_mode = *mode,
             OverrideTag::DrawingBaseline(pbo) => resolved.drawing_baseline_offset = *pbo,
+            OverrideTag::WrapStyle(q) => resolved.wrap_style = Some(*q),
             _ => {}
         }
     }
@@ -2703,14 +2904,26 @@ impl Compositor {
             {
                 let progress =
                     Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
-                Self::apply_transform_tags(
-                    &mut segment_resolved,
-                    tags,
-                    progress,
-                    time_ms,
-                    start_ms,
-                    end_ms,
-                );
+                if segment_resolved.event_globals_applied {
+                    Self::apply_transform_segment_tags(
+                        &mut segment_resolved,
+                        tags,
+                        progress,
+                        0,
+                        time_ms,
+                        start_ms,
+                        end_ms,
+                    );
+                } else {
+                    Self::apply_transform_tags(
+                        &mut segment_resolved,
+                        tags,
+                        progress,
+                        time_ms,
+                        start_ms,
+                        end_ms,
+                    );
+                }
             } else if let OverrideTag::Reset(style_name) = tag {
                 let base = match style_name {
                     Some(name) => styles
@@ -2781,6 +2994,7 @@ impl Compositor {
             let chain = font_manager.fallback_chain(font_match.id);
             let mut faces = Vec::with_capacity(chain.len());
             let mut shape_fonts: Vec<(usize, &FontArc)> = Vec::with_capacity(chain.len());
+            let mut opentype_fonts: Vec<ShapingFont<'_>> = Vec::with_capacity(chain.len());
             for id in chain {
                 let (faux_bold, faux_italic) =
                     font_manager.faux_for(id, seg_resolved.font_weight, seg_resolved.italic);
@@ -2791,22 +3005,49 @@ impl Compositor {
                 });
                 if let Some(face) = font_manager.get_font(id) {
                     shape_fonts.push((id, face));
+                    if let Some((data, face_index)) = font_manager.shaping_data(id) {
+                        opentype_fonts.push(ShapingFont {
+                            id,
+                            raster: face,
+                            data,
+                            face_index,
+                        });
+                    }
                 }
             }
-            let shaped = TextShaper::shape_with_fallback(
-                &segment.text,
-                &shape_fonts,
-                seg_font_size,
-                seg_resolved.scale_x / 100.0,
-                seg_resolved.scale_y / 100.0,
-                seg_resolved.font_weight,
-                seg_resolved.italic,
-                seg_resolved.spacing,
-                seg_resolved.color,
-                seg_resolved.outline_color,
-                seg_resolved.shadow_color,
-                seg_resolved.angle,
-            );
+            let shaped_text =
+                TextShaper::decode_font_encoding(&segment.text, seg_resolved.font_encoding);
+            let shaped = if opentype_fonts.is_empty() {
+                TextShaper::shape_with_fallback(
+                    &shaped_text,
+                    &shape_fonts,
+                    seg_font_size,
+                    seg_resolved.scale_x / 100.0,
+                    seg_resolved.scale_y / 100.0,
+                    seg_resolved.font_weight,
+                    seg_resolved.italic,
+                    seg_resolved.spacing,
+                    seg_resolved.color,
+                    seg_resolved.outline_color,
+                    seg_resolved.shadow_color,
+                    seg_resolved.angle,
+                )
+            } else {
+                TextShaper::shape_with_opentype(
+                    &shaped_text,
+                    &opentype_fonts,
+                    seg_font_size,
+                    seg_resolved.scale_x / 100.0,
+                    seg_resolved.scale_y / 100.0,
+                    seg_resolved.font_weight,
+                    seg_resolved.italic,
+                    seg_resolved.spacing,
+                    seg_resolved.color,
+                    seg_resolved.outline_color,
+                    seg_resolved.shadow_color,
+                    seg_resolved.angle,
+                )
+            };
             // Per-segment drawing state (mixed drawing/text supported).
             let mode = segment_drawing_mode(&segment.tags, resolved.drawing_mode);
             let drawing = if !skipped && mode > 0 {
@@ -2817,9 +3058,10 @@ impl Compositor {
                         min_x: min_x * unit,
                         width: w * unit,
                         height: h * unit,
-                        baseline: (h - seg_resolved.drawing_baseline_offset * unit)
-                            .max(0.0)
-                            .min(h),
+                        // `\\pbo` is an authored baseline offset.  Keep
+                        // negative and oversized values: libass lets
+                        // the drawing move outside its nominal ink box.
+                        baseline: h - seg_resolved.drawing_baseline_offset * unit,
                     }
                 })
             } else {
@@ -2909,6 +3151,10 @@ impl Compositor {
 
         let start_ms = event.start.to_millis();
         let end_ms = event.end.to_millis();
+        let frame_resolved = Self::resolve_event_globals_at_time(
+            resolved, event, time_ms, start_ms, end_ms, play_res_x, play_res_y,
+        );
+
         if time_ms < start_ms || time_ms >= end_ms {
             return;
         }
@@ -2922,11 +3168,11 @@ impl Compositor {
             Some(LegacyEffect::Banner { fadeaway, .. }) => fadeaway > 0.0,
             None => false,
         };
-        if resolved.clip.is_some()
-            || resolved.inverse_clip.is_some()
-            || resolved.clip_vector.is_some()
-            || resolved.inverse_clip_vector.is_some()
-            || resolved.blur > 0.0
+        if frame_resolved.clip.is_some()
+            || frame_resolved.inverse_clip.is_some()
+            || frame_resolved.clip_vector.is_some()
+            || frame_resolved.inverse_clip_vector.is_some()
+            || frame_resolved.blur > 0.0
             || effect_needs_isolation
         {
             match RenderBuffer::new(video_width, video_height) {
@@ -2934,7 +3180,7 @@ impl Compositor {
                     self.composite_event_inner(
                         &mut event_buffer,
                         event,
-                        resolved,
+                        &frame_resolved,
                         font_manager,
                         time_ms,
                         play_res_x,
@@ -2951,7 +3197,7 @@ impl Compositor {
                     self.composite_event_inner(
                         buffer,
                         event,
-                        resolved,
+                        &frame_resolved,
                         font_manager,
                         time_ms,
                         play_res_x,
@@ -2967,7 +3213,7 @@ impl Compositor {
             self.composite_event_inner(
                 buffer,
                 event,
-                resolved,
+                &frame_resolved,
                 font_manager,
                 time_ms,
                 play_res_x,
@@ -3045,8 +3291,34 @@ impl Compositor {
             .collect();
         let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
 
+        let mut opentype_measure_fonts = Vec::with_capacity(measure_chain.len());
+        for id in font_manager.fallback_chain(font_match.id) {
+            if let (Some(raster), Some((data, face_index))) =
+                (font_manager.get_font(id), font_manager.shaping_data(id))
+            {
+                opentype_measure_fonts.push(ShapingFont {
+                    id,
+                    raster,
+                    data,
+                    face_index,
+                });
+            }
+        }
+
         let scale_x = video_width as f64 / play_res_x as f64;
         let scale_y = video_height as f64 / play_res_y as f64;
+        let layout_res_x = if resolved.layout_res_x == 0 {
+            play_res_x.max(1)
+        } else {
+            resolved.layout_res_x
+        };
+        let layout_res_y = if resolved.layout_res_y == 0 {
+            play_res_y.max(1)
+        } else {
+            resolved.layout_res_y
+        };
+        let blur_scale_x = video_width as f64 / layout_res_x as f64;
+        let blur_scale_y = video_height as f64 / layout_res_y as f64;
 
         // Legacy scroll effect (Banner/Scroll up/Scroll down), if any.
         // Parsed once and reused for wrap, positioning, and clipping.
@@ -3056,37 +3328,39 @@ impl Compositor {
         let wrap_style = if matches!(legacy_effect, Some(LegacyEffect::Banner { .. })) {
             2
         } else {
-            event
-                .parsed_tags
-                .iter()
-                .rev()
-                .find_map(|tag| match tag {
-                    OverrideTag::WrapStyle(q) => Some(*q),
-                    _ => None,
-                })
-                // libass `tag("q")`: the last `\q` wins (plain
-                // assignment), and anything outside 0-3 falls back to
-                // the track default instead of applying.
-                .map(|q| {
-                    if (0..=3).contains(&q) {
-                        q
-                    } else {
-                        script_wrap_style
-                    }
-                })
+            // `\q` is part of the frame-resolved event state, including
+            // when it is nested inside `\t`.  Invalid values fall back to
+            // the track default just as the parser/render context does.
+            resolved
+                .wrap_style
+                .filter(|q| (0..=3).contains(q))
                 .unwrap_or(script_wrap_style)
         };
         let wrap_width =
             (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
         // Drawing runs pass through the wrapper verbatim (never wrapped).
-        let wrapped_text = wrap_event_text(
-            &event.text,
-            wrap_style,
-            wrap_width,
-            &measure_chain,
-            font_size,
-            resolved.spacing,
-        );
+        let wrap_input = TextShaper::decode_font_encoding(&event.text, resolved.font_encoding);
+        let wrapped_text = if opentype_measure_fonts.is_empty() {
+            wrap_event_text(
+                &wrap_input,
+                wrap_style,
+                wrap_width,
+                &measure_chain,
+                font_size,
+                resolved.spacing,
+            )
+        } else {
+            let measure = |value: &str| {
+                TextShaper::measure_text_with_opentype(
+                    value,
+                    &opentype_measure_fonts,
+                    font_size,
+                    resolved.scale_x / 100.0,
+                    resolved.spacing,
+                )
+            };
+            wrap_event_text_with_measure(&wrap_input, wrap_style, wrap_width, &measure)
+        };
 
         // Parse text into segments for per-override rendering
         let segments = parse_text_segments_with_wrap(&wrapped_text, wrap_style);
@@ -3238,7 +3512,7 @@ impl Compositor {
             let (box_rx, box_ry) = if resolved.scaled_border_and_shadow {
                 (scale_x, scale_y)
             } else {
-                (1.0, 1.0)
+                (blur_scale_x, blur_scale_y)
             };
             let pad_x = clamp_i32(
                 (resolved.outline_x * box_rx * resolved.scale_x / 100.0)
@@ -3504,7 +3778,7 @@ impl Compositor {
             let (res_x, res_y) = if segment_resolved.scaled_border_and_shadow {
                 (scale_x, scale_y)
             } else {
-                (1.0, 1.0)
+                (blur_scale_x, blur_scale_y)
             };
             let outline_active = segment_resolved.border_style == 1
                 && (segment_resolved.outline_x > 0.0 || segment_resolved.outline_y > 0.0);
@@ -4182,7 +4456,11 @@ impl Compositor {
         // Blur before clipping: blurring after a clip would bleed
         // pixels outside the clip region.
         if resolved.blur > 0.0 {
-            effects::apply_blur(buffer, resolved.blur);
+            effects::apply_blur_xy(
+                buffer,
+                resolved.blur * blur_scale_x,
+                resolved.blur * blur_scale_y,
+            );
         }
 
         // Apply clipping (after all segments rendered)

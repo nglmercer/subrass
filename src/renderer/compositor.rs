@@ -27,9 +27,10 @@ use self::lines::{
 mod karaoke;
 use self::karaoke::{
     build_karaoke_runs, complex_fade_opacity, karaoke_outline_suppressed, paint_glyph_fill,
-    BufferedSweepGlyph, GlyphGeom, KaraokeBuild, KaraokeKind, KaraokeRun, SweepState,
-    MAX_SWEEP_BUFFER_BYTES,
+    BufferedSweepGlyph, GlyphGeom, KaraokeKind, SweepState, MAX_SWEEP_BUFFER_BYTES,
 };
+#[cfg(test)]
+use self::karaoke::{KaraokeBuild, KaraokeRun};
 #[path = "transforms.rs"]
 mod transforms;
 

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::utils::Matrix3x3;
 #[path = "buffer_geometry.rs"]
 mod buffer_geometry;

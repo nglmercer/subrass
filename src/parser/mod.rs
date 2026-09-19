@@ -1,11 +1,15 @@
 pub mod attachment;
 pub mod errors;
 pub mod event;
+mod input;
 pub mod script_info;
+mod sections;
 pub mod style;
 
-use crate::types::{Attachment, AttachmentKind, Event, ScriptInfo, Style};
-use errors::{ParseError, Section};
+#[cfg(test)]
+use self::sections::{check_global_attachments, check_global_count};
+use crate::types::{Attachment, Event, ScriptInfo, Style};
+use errors::ParseError;
 
 /// Complete ASS document
 #[derive(Debug, Clone)]
@@ -31,55 +35,7 @@ impl AssDocument {
     /// strip the `[Script Info]` header (and its PlayRes) is lost
     /// because the first section line no longer starts with `[`.
     pub fn parse(input: &str) -> Result<Self, ParseError> {
-        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
-        let mut doc = AssDocument::new();
-        let mut current_section: Option<Section> = None;
-        let mut section_lines: Vec<&str> = Vec::new();
-        let mut line_number = 0;
-        let mut section_start_line = 0;
-        let mut found_section = false;
-
-        for line in input.lines() {
-            line_number += 1;
-            let trimmed = line.trim();
-
-            // Check for section headers
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                // Process previous section. Content starts on the line
-                // after the header, so error line numbers add one.
-                if let Some(section) = current_section {
-                    process_section(&mut doc, section, &section_lines, section_start_line + 1)?;
-                }
-
-                // Start new section
-                current_section = Section::from_header(trimmed);
-                if current_section.is_some() {
-                    found_section = true;
-                }
-                section_lines.clear();
-                section_start_line = line_number;
-                continue;
-            }
-
-            // Add line to current section
-            if current_section.is_some() {
-                section_lines.push(line);
-            }
-        }
-
-        // Process last section
-        if let Some(section) = current_section {
-            process_section(&mut doc, section, &section_lines, section_start_line + 1)?;
-        }
-
-        // Reject non-empty input that contains no recognizable ASS sections
-        if !found_section && input.lines().any(|l| !l.trim().is_empty()) {
-            return Err(ParseError::Unexpected(
-                "No valid ASS sections found".to_string(),
-            ));
-        }
-
-        Ok(doc)
+        input::parse_text(input)
     }
 
     pub fn get_event_count(&self) -> usize {
@@ -130,148 +86,6 @@ impl Default for AssDocument {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn process_section(
-    doc: &mut AssDocument,
-    section: Section,
-    lines: &[&str],
-    first_content_line: usize,
-) -> Result<(), ParseError> {
-    match section {
-        Section::ScriptInfo => {
-            doc.script_info = script_info::parse_script_info(lines, first_content_line)?;
-        }
-        // Repeated style/event sections append: earlier data is kept,
-        // but every cap is enforced per document (checked), so extra
-        // sections cannot bypass the per-section limits.
-        Section::V4PlusStyles => {
-            let parsed = style::parse_styles(lines, first_content_line, false)?;
-            check_global_count(
-                doc.styles.len(),
-                parsed.len(),
-                style::MAX_STYLES,
-                "styles",
-                first_content_line,
-            )?;
-            doc.styles.extend(parsed);
-        }
-        Section::V4Styles => {
-            let parsed = style::parse_styles(lines, first_content_line, true)?;
-            check_global_count(
-                doc.styles.len(),
-                parsed.len(),
-                style::MAX_STYLES,
-                "styles",
-                first_content_line,
-            )?;
-            doc.styles.extend(parsed);
-        }
-        Section::Events => {
-            let parsed = event::parse_events(lines, first_content_line)?;
-            check_global_count(
-                doc.events.len(),
-                parsed.len(),
-                event::MAX_EVENTS,
-                "events",
-                first_content_line,
-            )?;
-            doc.events.extend(parsed);
-        }
-        Section::Fonts => {
-            let parsed = attachment::parse_attachments_with_budget(
-                lines,
-                AttachmentKind::Font,
-                first_content_line,
-                remaining_attachment_budget(doc),
-            )?;
-            check_global_attachments(doc, &parsed, first_content_line)?;
-            doc.attachments.extend(parsed);
-        }
-        Section::Graphics => {
-            let parsed = attachment::parse_attachments_with_budget(
-                lines,
-                AttachmentKind::Graphic,
-                first_content_line,
-                remaining_attachment_budget(doc),
-            )?;
-            check_global_attachments(doc, &parsed, first_content_line)?;
-            doc.attachments.extend(parsed);
-        }
-    }
-    Ok(())
-}
-
-/// Enforce a per-document count cap across appended sections with
-/// checked arithmetic. Pure over lengths, so boundaries (including
-/// `usize` overflow) are unit-testable without huge inputs.
-fn check_global_count(
-    existing: usize,
-    additional: usize,
-    max: usize,
-    what: &str,
-    line: usize,
-) -> Result<usize, ParseError> {
-    let total = existing
-        .checked_add(additional)
-        .ok_or_else(|| ParseError::line_error(line, format!("Too many {what} (count overflow)")))?;
-    if total > max {
-        return Err(ParseError::line_error(
-            line,
-            format!("Too many {what} (limit {max} per document)"),
-        ));
-    }
-    Ok(total)
-}
-
-/// Remaining document-level attachment budget before parsing another
-/// [Fonts]/[Graphics] section. Passing it into the section parser lets
-/// over-budget data be rejected while decoding — before temp buffers
-/// grow — instead of only after a full section was allocated.
-fn remaining_attachment_budget(doc: &AssDocument) -> attachment::AttachmentBudget {
-    attachment::AttachmentBudget {
-        remaining_count: attachment::MAX_ATTACHMENTS.saturating_sub(doc.attachments.len()),
-        remaining_bytes: attachment::MAX_TOTAL_ATTACHMENT_BYTES
-            .saturating_sub(doc.total_attachment_bytes()),
-    }
-}
-
-/// Enforce the document-wide attachment count and decoded-byte budget
-/// before appending a freshly parsed section. Both sums use checked
-/// arithmetic; pure over lengths except for the final byte summation.
-fn check_global_attachments(
-    doc: &AssDocument,
-    parsed: &[Attachment],
-    line: usize,
-) -> Result<(), ParseError> {
-    check_global_count(
-        doc.attachments.len(),
-        parsed.len(),
-        attachment::MAX_ATTACHMENTS,
-        "attachments",
-        line,
-    )?;
-    let mut total = 0usize;
-    for len in doc
-        .attachments
-        .iter()
-        .chain(parsed.iter())
-        .map(|a| a.data.len())
-    {
-        total = total.checked_add(len).ok_or_else(|| {
-            ParseError::line_error(line, "Attachment data size overflow".to_string())
-        })?;
-        if total > attachment::MAX_TOTAL_ATTACHMENT_BYTES {
-            return Err(ParseError::line_error(
-                line,
-                format!(
-                    "Total attachment data exceeds the {} MiB document budget",
-                    attachment::MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

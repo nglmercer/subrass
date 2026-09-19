@@ -3,9 +3,9 @@ mod serialization;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+use self::serialization::{to_js, to_js_millis};
 #[cfg(test)]
 use self::serialization::{validate_millis, JS_MAX_SAFE_INTEGER};
-use self::serialization::{to_js, to_js_millis};
 use crate::parser::AssDocument;
 use crate::renderer::SubtitleRenderer as InnerRenderer;
 

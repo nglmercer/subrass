@@ -50,7 +50,7 @@ src/
 2. **Filter** — Active *dialogue* events are selected for the current timestamp (comments never render)
 3. **Sort** — Events are stable-sorted by layer (equal layers keep source order)
 4. **Wrap** — Automatic word-wrapping per the effective wrap style (per-event `\q` or script `WrapStyle`)
-5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`/`\iclip` incl. vector, `\fad`/`\fade`) apply wherever they appear, and `\an`/`\q` lay out the whole line (last wins)
+5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`/`\iclip` incl. vector, `\fad`/`\fade`, `\an`) apply wherever they appear textually, first tag wins per libass (`EVENT_POSITIONED`, `PARSED_A`, `PARSED_FADE`, first vector clip), while `\q` lays out the whole line last-wins
 6. **Layout** — Every segment is shaped/measured with its own style; alignment, positioning, rotation origins, and opaque boxes use these per-segment dimensions
 7. **Rasterize** — Glyphs are rasterized to coverage bitmaps (per-font cache; faux bold/italic only when the face lacks the style), then sheared/rotated
 8. **Effects** — Elliptical outline, offset shadow, blur, then rectangular/vector clipping
@@ -63,19 +63,19 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 
 | Category | Supported | Partial | Parsed |
 |---|---|---|---|
-| Position | `\pos`, `\move` (with/without timing), `\org` | | |
+| Position | `\pos`, `\move` (with/without timing), `\org` (first positioning tag wins, first `\org` wins, like libass) | | |
 | Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | | |
 | Font | `\fn`, `\fs` (absolute, relative `\fs+N/-N`, bare reset), `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
 | Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz` (counterclockwise on screen), `\fscx`, `\fscy`, `\fax`, `\fay` (pre-rotation shear + `\fay` baseline slant, libass order) | Rotation uses a fixed perspective distance (see known limitations) | |
 | Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative), `\be`, `\blur` | | |
-| Clipping | `\clip`, `\iclip` (rectangular and vector) | | |
+| Clipping | `\clip`, `\iclip` (rectangular and vector; rect and vector are separate state like libass: later rect replaces + flips mode, first vector retained, both render) | | |
 | Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
-| Fade | `\fad`, `\fade` | `\fade` with degenerate timing saturates instead of dividing by zero | |
+| Fade | `\fad`, `\fade` (first fade tag wins, like libass) | `\fade` with degenerate timing saturates instead of dividing by zero | |
 | Karaoke | `\k`, `\kt` (explicit syllable starts), `\K`/`\kf` (continuous sweep, split within glyph bitmaps), `\ko` (secondary fill + outline suppressed before start; primary + outline from start) | | |
 | Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; mode 0 smart wrap (greedy fill + pairwise rebalance, libass algorithm); each line aligns independently; conservative CJK break opportunities | | |
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
-| Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear, clip, position | Unsupported inner tags are ignored | |
-| Alignment | `\an`, legacy `\a` (SSA numbering converted) | | |
+| Animation | `\t` (accel `t^accel`, optional timing) for colors, alpha, size, scales, spacing, rotation, borders, shadows, shear | Position/clip/fade/alignment/drawing/karaoke tags and nested `\t` are ignored inside `\t` | |
+| Alignment | `\an`, legacy `\a` (SSA numbering converted; first tag wins, like libass) | | |
 | Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` | `LayoutResX/Y`, `YCbCr Matrix` are parsed but unused (ASS-2 draft / RGB pipeline) | |
 | Attachments | `[Fonts]` parsed, decoded, and best-effort auto-loaded as fallback faces (failures surface via `warnings()`); `[Graphics]` parsed, decoded, exposed via `get_attachment_*`; manual `load_font(name, data)` | | |
 | Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter); `\fe` parsed/stored/reset (no charset remapping) | Unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
@@ -88,7 +88,7 @@ Position tags use the event's alignment as their anchor: for example, `\an5\pos(
 - Per-glyph font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); no system-font lookup.
 - Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
 - Rotation perspective distance follows libass (312.5 × vertical resolution ratio); extreme angles degrade to empty glyphs rather than over-allocating.
-- `\r` preserves only line-global state (position, clip, fades) by design; drawing mode, fonts, colors, rotation, karaoke, and alignment reset.
+- `\r` preserves line-global state (position, move, origin, clips, fades) plus alignment, like libass; drawing mode, fonts, colors, rotation, and karaoke reset (note: libass keeps drawing mode across `\r` too — kept VSFilter-compatible here, see `CONFORMANCE.md`).
 - Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz`; short smoke runs are CI-gated, longer sessions run locally.
 
 ## Build

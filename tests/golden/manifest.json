@@ -36,5 +36,18 @@
   "karaoke-kf-late": {"time_ms": 1900},
   "relative-fs-early": {"time_ms": 500},
   "relative-fs-late": {"time_ms": 1500},
-  "opaque-box-multiline": {"time_ms": 1000}
+  "opaque-box-multiline": {"time_ms": 1000},
+  "pos-before-move": {"time_ms": 2500},
+  "move-before-pos": {"time_ms": 2500},
+  "pos-pos": {"time_ms": 1000},
+  "move-move": {"time_ms": 2500},
+  "an-an": {"time_ms": 1000},
+  "a-an": {"time_ms": 1000},
+  "an-a": {"time_ms": 1000},
+  "fad-fade": {"time_ms": 250},
+  "fade-fad": {"time_ms": 250},
+  "org-org": {"time_ms": 1000},
+  "rect-vector-clip": {"time_ms": 1000},
+  "vector-rect-clip": {"time_ms": 1000},
+  "vector-vector-clip": {"time_ms": 1000}
 }}

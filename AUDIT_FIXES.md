@@ -5,8 +5,10 @@ plus follow-up review passes. All Rust behavior changes carry regression
 tests; run `cargo test`. `CONFORMANCE.md` is the test-backed
 compatibility statement; this file is the history of how it got there.
 
-Applies to HEAD after `ff336a4` (second-pass remediation) and the
-follow-up pass described at the bottom.
+Applies to HEAD after `ff336a4` (second-pass remediation), the
+follow-up passes described below, and the precedence/clip/server pass
+at the bottom (first-wins semantics, libass clip state, dev-server
+rewrite, attachment budgets, 13 new reference fixtures).
 
 ## Phase 1 — Safety invariants (#1–3, #70–75, #95)
 
@@ -105,8 +107,9 @@ follow-up pass described at the bottom.
 - **#20 `\rStyleName`**: `Reset(Option<String>)` with style-table lookup;
   unknown names fall back to the event style.
 - **#21 Global vs segment tags**: `OverrideTag::is_line_global` classifies
-  `\pos \move \org \clip \iclip \fad \fade`; `resolve_style` scans all segments
-  (last wins), so placement after the first segment no longer drops them.
+  `\pos \move \org \clip \iclip \fad \fade \an \a`; `resolve_style` scans all
+  segments in textual order (first wins per libass, except rect clips and
+  `\q`), so placement after the first segment no longer drops them.
 - **#22 X/Y borders**: `outline_x/outline_y` state, `\xbord \ybord` (and `\t`)
   support, elliptical `apply_outline_xy` with degenerate-axis fallback.
 - **#23 X/Y shadows**: `shadow_x/shadow_y` (signed, incl. negatives),
@@ -134,8 +137,11 @@ follow-up pass described at the bottom.
 - **#33 Vector clips**: `\clip([scale,]drawing)` / `\iclip(...)` parsed
   (rect-vs-vector disambiguated; malformed rectangles rejected, not mistaken
   for vectors) and rendered as alpha masks in script coordinates.
-- **#34 Clip/blur order**: blur now runs **before** clipping so blurred pixels
-  cannot bleed outside the clip region (documented intentional order).
+- **#34 Clip/blur order**: blur runs **before** clipping so blurred pixels
+  cannot bleed outside the clip region. Re-verified against libass
+  `ass_render.c` ("convert glyphs to bitmaps, combine them, apply blur",
+  clips applied at blend time): the order matches libass; only the blur
+  granularity differs (per combined-bitmap run vs whole event buffer).
 - **#35 Layout measurement**: two-pass layout — every segment resolved (incl.
   `\t` at the frame time) and shaped with its own style; alignment, `\pos`,
   `\move`, rotation origins, and opaque boxes use block metrics from the same
@@ -148,9 +154,11 @@ follow-up pass described at the bottom.
   the whole block while libass draws per-line boxes (known divergence, has a
   dedicated fixture).
 - **#83 `\r` semantics**: resets segment state (fonts, colors, border/shadow,
-  rotation, karaoke, wrap, alignment, **drawing mode**, `\pbo`) to the
-  event/named style while preserving line-global state (position, move,
-  origin, clips, fades). `\r` exits drawing mode (`\p` is not line-global).
+  rotation, karaoke, **drawing mode**, `\pbo`) to the event/named style while
+  preserving line-global state (position, move, origin, clips, fades) plus
+  alignment (libass `ass_reset_render_context` never touches alignment).
+  `\r` exits drawing mode (`\p` is not line-global); libass keeps drawing
+  across `\r`, which stays a documented intentional difference.
 
 ## Phase 4 — Fonts, attachments, colors (#37–45, #93, #94, #97)
 
@@ -222,15 +230,15 @@ follow-up pass described at the bottom.
   demo typecheck, fuzz smoke.
 - **#62 Reference tests: done.** `tests/reference.rs` compares subrass output
   against libass-rendered frames (ffmpeg `ass` filter, pinned build recorded
-  in `tests/reference/provenance.json`). 20/20 gated fixtures pass on
+  in `tests/reference/provenance.json`). 48/48 gated fixtures pass on
   structural gates (bbox IoU ≥ 0.70, ink ratio 0.5–2.0, block mean error ≤ 25,
   hard-error fraction ≤ 0.15); 3 legacy/fallback fixtures are measured but
-  known-divergent; 7 newer fixtures are golden-covered with libass frames
-  pending (the harness reports them as pending, never as passes).
+  known-divergent; 0 pending (every manifest fixture has a libass frame, and
+  `SUBRASS_STRICT_REFERENCES=1` in CI fails the gate on any future pending).
 - **#63 Fuzz targets: done.** `fuzz/` workspace (`parse_ass`, `drawing`,
   `render`) plus a CI `fuzz-smoke` job (nightly, builds all targets, runs
   each briefly). Longer sessions run locally; see `fuzz/README.md`.
-- **#64 Golden tests: done.** `tests/golden.rs` renders 30 fixtures and
+- **#64 Golden tests: done.** `tests/golden.rs` renders 51 fixtures and
   compares byte-exact against stored raw-RGBA expectations
   (`UPDATE_GOLDENS=1` regenerates; never automatic).
 - **#65 Dependency audit**: CI job added; `cargo audit` status recorded below.
@@ -273,19 +281,18 @@ follow-up pass described at the bottom.
   (`test_relative_fs_*`), a render test
   (`test_degenerate_font_size_resets_to_style_safely`), the updated
   `tests/robustness.rs` geometry test, and the `relative-fs` golden +
-  (pending) reference fixture.
+  reference fixture.
 - **Combination fixtures** (`tests/golden.rs`): added `relative-fs`,
-  `shear-rotation`, `karaoke-kf-frz/frx/fax/fay`, and
-  `opaque-box-multiline` (the karaoke fixtures are centered so the
+  `shear-rotation`, `karaoke-kf-frz/frx/fax/fay/fry/combined`,
+  `karaoke-early/late`, `karaoke-kf-early/late`, `relative-fs-early/late`,
+  and `opaque-box-multiline` (the karaoke fixtures are centered so the
   transformed sweep stays fully on-frame; each shows both sweep colors).
-  All are golden-covered; their libass frames are pending generation
-  with `tests/reference/gen_references.ps1` (no ffmpeg+libass in this
-  environment), and `tests/reference.rs` reports them as pending rather
-  than passing. `opaque-box-multiline` joins `KNOWN_DIVERGENT` once its
-  frame exists (whole-block vs per-line boxes).
-- **`\K/\kf` under transforms**: documented as proportional across the
-  transformed bitmap (exact when unrotated); the new fixtures will gate
-  it against libass once their frames exist.
+  All are golden-covered and gated against generated libass frames
+  (`tests/reference/gen_references.ps1`); `opaque-box-multiline` gates
+  (IoU 1.000, per-line boxes like libass) instead of diverging.
+- **`\K/\kf` under transforms**: proportional across the transformed
+  bitmap (exact when unrotated); gated against libass by the
+  `karaoke-kf-frz/frx/fax/fay/fry/combined` fixtures (IoU 0.918–0.963).
 - **Shear order**: kept pre-rotation shear — verified against libass
   `calc_transform_matrix`, which builds the shear basis first and
   composes Z/X/Y rotations over it. The earlier "move shear after
@@ -304,19 +311,83 @@ follow-up pass described at the bottom.
   claims (reference/fuzz/golden done; Effect rendered; `\r` exits
   drawing mode; current counts below).
 
+## Precedence/clip/server pass (after `3c463f3`)
+
+- **First-wins precedence** (`src/types/override_tag.rs`,
+  `src/renderer/compositor.rs`): `\pos`/`\move` share one first-wins slot
+  (libass `EVENT_POSITIONED`), first `\org` wins (`have_origin`), first
+  `\fad`/`\fade` wins (`PARSED_FADE`), first `\an`/`\a` wins (`PARSED_A`,
+  with the `\a4`/`\a8`→`\a5` quirk and bare/out-of-range style fallback
+  via `AlignmentReset`). Verified against libass `ass_parse.c`/`ass_render.c`
+  and empirically: `{\pos…\move…}X` ≡ `{\pos…}X` byte-identical under
+  ffmpeg libass. Old last-wins tests rewritten; resolve- and render-level
+  coverage in `test_shared_slots_first_tag_wins`,
+  `test_pos_move_first_wins_both_orders`,
+  `test_fad_fade_first_wins_both_orders`,
+  `test_alignment_first_tag_applies_event_wide`, `test_org_first_wins`.
+- **`\r` preserves alignment**: libass `ass_reset_render_context` never
+  touches alignment, so the first `\an`/`\a` survives resets (verified:
+  `{\an7}A{\r}B` ≡ `{\an7}AB` byte-identical under libass).
+  `test_reset_keeps_first_alignment_and_ignores_later` locks this in.
+- **Clip semantics** (`apply_single_tag`): rect and vector are separate
+  state — later rect coordinates replace earlier ones, `\clip` vs `\iclip`
+  flips the rect mode, the first vector clip is retained across forms,
+  and both render. `test_clip_libass_rect_vector_semantics` covers all
+  eight rect/vector/normal/inverse combinations plus render coexistence.
+- **Precedence fixtures** (`tests/golden.rs` + libass frames): 13 new
+  gated fixtures — `pos-before-move`, `move-before-pos`, `pos-pos`,
+  `move-move`, `an-an`, `a-an`, `an-a`, `fad-fade`, `fade-fad`,
+  `org-org`, `rect-vector-clip`, `vector-rect-clip`, `vector-vector-clip`
+  (IoU 0.849–0.988, all thresholds unweakened). Pending stays 0.
+- **Dev-server rewrite** (`server.ts`, `tests/server.test.ts`): canonical
+  `/basic`→`/basic/`, `/worker`→`/worker/` 301 redirects, generic contained
+  demo static handler (`.ts` transpiled, correct MIME per extension),
+  `/pkg/*` + `/fonts/*` from their own roots, GET/HEAD only (405 otherwise),
+  bodiless HEAD with `Content-Length`, strict `PORT` validation
+  (`RangeError` on empty/`NaN`/negatives/decimals/out-of-range).
+  17 HTTP-level tests (ephemeral port + raw-socket traversal vectors).
+- **Attachment budgets** (`src/parser/attachment.rs`, `src/parser/mod.rs`):
+  the remaining document count/byte budget is passed into section parsing
+  (`parse_attachments_with_budget`), so over-budget data is rejected while
+  decoding — count on the exceeding header, encoded growth as soon as its
+  implied size exceeds room, exact decoded size before output allocation
+  (pure `decoded_len_for`) — instead of after allocating hundreds of MiB.
+- **Divergence review**: blur-before-clip re-verified to match libass order
+  (granularity differs only); underline/strikeout bars documented as
+  axis-aligned under all transforms; no-system-font-discovery and
+  `\r`-exits-drawing (libass keeps drawing, probed empirically) added to
+  `CONFORMANCE.md`; complex shaping deferred with an explicit
+  rustybuzz+bidi roadmap rather than a half-integration.
+- **Doc accuracy**: fixed stale counts everywhere (see table), the
+  `shear-rotation` IoU inconsistency (0.972→0.988), and the false README /
+  `CONFORMANCE.md` claim that `\t` animates clip/position (the
+  transformability matrix in `apply_transform_tags` ignores them).
+- **Robustness re-audit**: production code has no `unwrap`/`expect`/
+  `panic!`/`todo!`/`unsafe` except one guard-adjacent `expect` in
+  `smart_wrap_lines` (safe by construction); all 171 pedantic cast
+  sites triaged — one real bug found and fixed (`blend_pixel` color
+  channels could wrap mod 256 for tiny `out_a`, e.g. 763/2=381 →
+  125 instead of 255; now saturates like `blend_pixel_premul`,
+  `test_blend_pixel_saturates_tiny_alpha`). Everything else verified:
+  bounds-checked indices, clamped casts, checked allocation math,
+  capped drawing/blur/gap budgets, wasm32-safe `usize` conversions.
+
 ## Verification commands and results
 
 | Command | Result |
 |---|---|
-| `cargo test --locked --all-features` | 328 passed, 0 failed (317 lib + 11 integration) |
+| `cargo test --locked --all-features` | 368 passed, 0 failed (352 lib + 2 corpus + 1 golden + 2 reference + 11 robustness) |
+| `cargo test --locked --no-default-features` | 368 passed, 0 failed (same breakdown as above) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo check --target wasm32-unknown-unknown --tests --locked` | ok |
-| `cargo test --test reference -- --nocapture` | 20/20 gated pass, 7 pending (see report) |
+| `cargo test --test reference -- --nocapture` | 48/48 gated pass, 0 pending, 3 known-divergent (see report) |
+| `cargo test --test golden` | 51/51 byte-exact pass |
 | `wasm-pack build --target web --out-dir pkg` | ok |
-| `bun run typecheck` | clean |
-| `bun test` | 24 passed, 0 failed |
-| `wasm-pack test --headless --chrome` | not run locally (no browser); runs in CI |
+| `bun install --frozen-lockfile` + `bun run typecheck` | clean |
+| `bun test` | 41 passed, 0 failed (13 demo/paths + 17 server HTTP + 11 worker-backend) |
+| `wasm-pack test --headless --chrome` | runs in CI (browser); `cargo check` covers the wasm target locally |
+| fuzz smoke (`parse_ass`, `drawing`, `render`) | CI-gated on Linux (`fuzz-smoke` job); cannot link locally (Windows MSVC `LNK2001`, no C toolchain in WSL). Stable-toolchain hostile-value coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
 
 `cargo audit`: run it in CI; if it reports the known unmaintained-`ttf-parser`
 advisory (transitive via `ab_glyph`), that is pre-existing and informational —
@@ -333,12 +404,12 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
 
 1. Blur runs before clipping so blurred pixels cannot bleed outside the clip
    region.
-2. `\r` preserves only line-global tags (position, move, origin, clips,
-   fades); everything else, including drawing mode, resets.
+2. `\r` preserves line-global tags (position, move, origin, clips,
+   fades) plus alignment; everything else, including drawing mode, resets.
 3. Rotation uses libass's perspective distance (312.5 × vertical
    resolution ratio); extreme angles degrade to empty glyphs instead of
    over-allocating. (`frx`/`fry` inverse-map and `\fay` per-run shear
-   reset verified against libass references; all 35 gated fixtures pass.)
+   reset verified against libass references; all 48 gated fixtures pass.)
 4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
    Indic/Arabic contextual forms); no system-font lookup. Cluster-aware
    deterministic fallback covers already-loaded faces.

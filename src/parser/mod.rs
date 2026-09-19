@@ -175,14 +175,22 @@ fn process_section(
             doc.events.extend(parsed);
         }
         Section::Fonts => {
-            let parsed =
-                attachment::parse_attachments(lines, AttachmentKind::Font, first_content_line)?;
+            let parsed = attachment::parse_attachments_with_budget(
+                lines,
+                AttachmentKind::Font,
+                first_content_line,
+                remaining_attachment_budget(doc),
+            )?;
             check_global_attachments(doc, &parsed, first_content_line)?;
             doc.attachments.extend(parsed);
         }
         Section::Graphics => {
-            let parsed =
-                attachment::parse_attachments(lines, AttachmentKind::Graphic, first_content_line)?;
+            let parsed = attachment::parse_attachments_with_budget(
+                lines,
+                AttachmentKind::Graphic,
+                first_content_line,
+                remaining_attachment_budget(doc),
+            )?;
             check_global_attachments(doc, &parsed, first_content_line)?;
             doc.attachments.extend(parsed);
         }
@@ -210,6 +218,18 @@ fn check_global_count(
         ));
     }
     Ok(total)
+}
+
+/// Remaining document-level attachment budget before parsing another
+/// [Fonts]/[Graphics] section. Passing it into the section parser lets
+/// over-budget data be rejected while decoding — before temp buffers
+/// grow — instead of only after a full section was allocated.
+fn remaining_attachment_budget(doc: &AssDocument) -> attachment::AttachmentBudget {
+    attachment::AttachmentBudget {
+        remaining_count: attachment::MAX_ATTACHMENTS.saturating_sub(doc.attachments.len()),
+        remaining_bytes: attachment::MAX_TOTAL_ATTACHMENT_BYTES
+            .saturating_sub(doc.total_attachment_bytes()),
+    }
 }
 
 /// Enforce the document-wide attachment count and decoded-byte budget

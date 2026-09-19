@@ -69,6 +69,10 @@ pub enum OverrideTag {
     MoveWithTiming(f64, f64, f64, f64, u64, u64),
     Origin(f64, f64),
     Alignment(i32),
+    /// Bare `\an` / `\a` (or a value libass rejects): reset to the
+    /// event style alignment. Still consumes the first-wins alignment
+    /// slot (libass `PARSED_A`), so later `\an`/`\a` tags are ignored.
+    AlignmentReset,
 
     // Transformations
     RotationX(f64),
@@ -209,10 +213,12 @@ impl OverrideTag {
     }
 
     /// Line-global tags preserved across `\r`: the non-style line
-    /// properties (\pos, \move, \org, \clip, \iclip, \fad, \fade).
-    /// `\r` restores ordinary override state (fonts, colors, border,
-    /// rotation, karaoke, drawing mode, wrap, alignment, ...) to the
-    /// target style, so only these position/clip/fade properties survive.
+    /// properties (\pos, \move, \org, \clip, \iclip, \fad, \fade) plus
+    /// `\an`/`\a`: libass `ass_reset_render_context` (the `\r` handler)
+    /// does not touch alignment, so the first alignment tag survives
+    /// resets like the other line-global properties. `\r` restores
+    /// ordinary override state (fonts, colors, border, rotation,
+    /// karaoke, drawing mode, ...) to the target style.
     pub fn is_line_global(&self) -> bool {
         matches!(
             self,
@@ -226,17 +232,19 @@ impl OverrideTag {
                 | Self::InverseClipVector { .. }
                 | Self::Fade(..)
                 | Self::ComplexFade(..)
+                | Self::Alignment(..)
+                | Self::AlignmentReset
         )
     }
 
-    /// Event-layout tags: line-global tags plus `\an` and `\q`, which
-    /// position and wrap the whole line no matter where they appear
-    /// textually (`Hello{\an7}` aligns the entire line). Unlike the
-    /// `\r`-preserved set, these are style-level layout properties:
-    /// event layout is determined once from the full line (last wins),
-    /// independent of `\r` segmentation.
+    /// Event-layout tags: line-global tags plus `\q`, which position,
+    /// fade, clip, align, and wrap the whole line no matter where they
+    /// appear textually (`Hello{\an7}` aligns the entire line).
+    /// Resolution is first-wins per libass (`EVENT_POSITIONED`,
+    /// `PARSED_FADE`, `PARSED_A`, first vector clip), except `\q`,
+    /// which keeps last-wins like libass's plain assignment.
     pub fn is_event_layout(&self) -> bool {
-        self.is_line_global() || matches!(self, Self::Alignment(..) | Self::WrapStyle(..))
+        self.is_line_global() || matches!(self, Self::WrapStyle(..))
     }
 
     /// True when every numeric payload is finite (layout-safe).
@@ -723,12 +731,30 @@ fn parse_tag_with_params(name: &str, params: Option<&str>) -> Option<OverrideTag
             }
         }
         "an" => {
-            let val = params?.parse::<i32>().ok()?;
+            // Bare `\an` resets to the style alignment (libass still
+            // consumes PARSED_A); out-of-range values also fall back to
+            // the style at apply time, with the slot consumed.
+            let raw = params.map(str::trim).unwrap_or("");
+            if raw.is_empty() {
+                return Some(OverrideTag::AlignmentReset);
+            }
+            let val = raw.parse::<i32>().ok()?;
             Some(OverrideTag::Alignment(val))
         }
         "a" => {
             // Legacy SSA alignment numbering, converted to ASS numpad.
-            let val = params?.parse::<i32>().ok()?;
+            // libass `ass_parse.c` (`\a` branch): values outside 1-11
+            // fall back to the style alignment (slot still consumed),
+            // and the VSFilter quirk maps illegal \a4 / \a8 to \a5.
+            let raw = params.map(str::trim).unwrap_or("");
+            if raw.is_empty() {
+                return Some(OverrideTag::AlignmentReset);
+            }
+            let val = raw.parse::<i32>().ok()?;
+            if !(1..=11).contains(&val) {
+                return Some(OverrideTag::AlignmentReset);
+            }
+            let val = if val == 4 || val == 8 { 5 } else { val };
             Some(OverrideTag::Alignment(super::style::ssa_alignment_to_ass(
                 val,
             )))
@@ -1379,9 +1405,10 @@ mod tests {
         assert!(!OverrideTag::FontSize(10.0).is_line_global());
         assert!(!OverrideTag::FontSizeRelative(10.0).is_line_global());
         assert!(!OverrideTag::FontSizeReset.is_line_global());
-        // \an and \q are event-layout (whole-line effect) but NOT
-        // \r-preserved: \r resets them like other style state.
-        assert!(!OverrideTag::Alignment(7).is_line_global());
+        // \an is line-global (survives \r, first wins); \q is
+        // event-layout but resolved separately (last wins).
+        assert!(OverrideTag::Alignment(7).is_line_global());
+        assert!(OverrideTag::AlignmentReset.is_line_global());
         assert!(!OverrideTag::WrapStyle(2).is_line_global());
         assert!(!OverrideTag::Drawing(1).is_line_global());
     }
@@ -1396,6 +1423,7 @@ mod tests {
         assert!(OverrideTag::ComplexFade(0, 0, 0, 0, 0, 0, 0).is_event_layout());
         // Plus whole-line layout properties.
         assert!(OverrideTag::Alignment(7).is_event_layout());
+        assert!(OverrideTag::AlignmentReset.is_event_layout());
         assert!(OverrideTag::WrapStyle(2).is_event_layout());
         // Segment-level tags are neither.
         assert!(!OverrideTag::Bold(700).is_event_layout());
@@ -1405,6 +1433,43 @@ mod tests {
         assert!(!OverrideTag::KaraokeDuration(10).is_event_layout());
         assert!(!OverrideTag::Drawing(1).is_event_layout());
         assert!(!OverrideTag::Reset(None).is_event_layout());
+    }
+
+    #[test]
+    fn test_parse_bare_alignment_resets() {
+        // Bare \an / \a reset to the style alignment (libass still
+        // consumes PARSED_A); they are known tags, never Unknown.
+        for text in ["{\\an}Hi", "{\\a}Hi", "{\\an }Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::AlignmentReset),
+                "{text:?} -> {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_legacy_a_quirk_and_range() {
+        // VSFilter quirk shared by libass: \a4 and \a8 behave as \a5
+        // (top-left, ASS numpad 7).
+        for text in ["{\\a4}Hi", "{\\a8}Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::Alignment(7)),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        // Values outside 1-11 fall back to the style alignment.
+        for text in ["{\\a0}Hi", "{\\a12}Hi", "{\\a-1}Hi"] {
+            let tags = OverrideTag::parse_from_text(text);
+            assert!(
+                matches!(tags[0], OverrideTag::AlignmentReset),
+                "{text:?} -> {tags:?}"
+            );
+        }
+        // In-range values convert to ASS numpad as before.
+        let tags = OverrideTag::parse_from_text("{\\a6}Hi");
+        assert!(matches!(tags[0], OverrideTag::Alignment(8)));
     }
 
     #[test]

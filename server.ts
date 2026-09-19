@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
-import { extname, join, normalize, resolve, sep } from "node:path";
-import { createServer } from "node:http";
+import { extname, normalize, resolve, sep } from "node:path";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 
@@ -8,11 +8,23 @@ import { existsSync, statSync } from "node:fs";
 export const DEFAULT_PORT = 8001;
 
 /// Resolve the listen port: `$PORT` when set, otherwise [DEFAULT_PORT].
+///
+/// Strictly validated: a valid port is all digits in `1..=65535`.
+/// Anything else (empty, `NaN`, negatives, decimals, out-of-range)
+/// throws a `RangeError` instead of binding a surprising port.
 export function resolvePort(envPort: string | undefined): number {
-  return Number(envPort ?? DEFAULT_PORT);
+  if (envPort === undefined) return DEFAULT_PORT;
+  const text = envPort.trim();
+  if (!/^\d+$/.test(text)) {
+    throw new RangeError(`Invalid PORT ${JSON.stringify(envPort)}: expected an integer 1..65535`);
+  }
+  const port = Number(text);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new RangeError(`Invalid PORT ${JSON.stringify(envPort)}: expected an integer 1..65535`);
+  }
+  return port;
 }
 
-const PORT = resolvePort(process.env.PORT);
 const DEMO_INDEX = "./demo/index.html";
 
 const MIME_TYPES: Record<string, string> = {
@@ -37,10 +49,12 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
+/// Example pages keyed by canonical path (trailing slash, so the
+/// relative `./main.ts` module URLs in the pages resolve correctly).
 const EXAMPLE_PAGES = new Map([
   ["/", DEMO_INDEX],
-  ["/basic", "./demo/basic/index.html"],
-  ["/worker", "./demo/worker/index.html"],
+  ["/basic/", "./demo/basic/index.html"],
+  ["/worker/", "./demo/worker/index.html"],
 ]);
 
 /// Content type for a file extension (leading dot, lowercase).
@@ -83,87 +97,115 @@ export function resolveContained(root: string, requestPath: string): string | nu
   return abs;
 }
 
-const server = createServer(async (req, res) => {
-  try {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-    const pathname = url.pathname;
-
-    // Serve files from pkg/ (compiled JS/WASM/text artifacts)
-    if (pathname.startsWith("/pkg/")) {
-      const filePath = resolveContained(PKG_ROOT, pathname.slice("/pkg/".length));
-      if (!filePath) {
-        res.writeHead(404);
-        res.end("Not found");
+/// Create the dev-server request handler (exported for tests).
+///
+/// Serves, in order:
+/// ```text
+/// /                      demo landing page
+/// /basic/ /worker/       example pages (bare /basic and /worker
+///                        redirect here with 301 so relative module
+///                        URLs resolve)
+/// /pkg/* /fonts/*        built artifacts and bundled fonts
+/// demo static files      /shared/*, /basic/*, /worker/*, /sample.ass
+///                        (.ts transpiled on the fly, everything else
+///                        by extension MIME)
+/// ```
+/// Only `GET` and `HEAD` are served; anything else gets `405`.
+/// `HEAD` returns headers (including `Content-Length`) without a body.
+export function createAppServer(): Server {
+  return createHttpServer(async (req, res) => {
+    try {
+      const method = req.method ?? "GET";
+      if (method !== "GET" && method !== "HEAD") {
+        res.writeHead(405, { Allow: "GET, HEAD" });
+        res.end("Method not allowed");
         return;
       }
-      const data = await readFile(filePath);
-      res.writeHead(200, { "Content-Type": mimeFor(extname(filePath)) });
-      res.end(data);
-      return;
-    }
+      const headOnly = method === "HEAD";
+      const send = (status: number, headers: Record<string, string>, body?: string | Buffer) => {
+        const payload = body === undefined ? Buffer.alloc(0) : Buffer.from(body);
+        res.writeHead(status, { ...headers, "Content-Length": String(payload.length) });
+        res.end(headOnly ? undefined : payload);
+      };
 
-    // Serve font files so demos can fetch the bundled fonts
-    if (pathname.startsWith("/fonts/")) {
-      const filePath = resolveContained(FONTS_ROOT, pathname.slice("/fonts/".length));
-      if (!filePath) {
-        res.writeHead(404);
-        res.end("Not found");
+      const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+      const pathname = url.pathname;
+
+      // Canonicalize example URLs: without the trailing slash the
+      // pages' relative `./main.ts` would resolve to `/main.ts`.
+      if (pathname === "/basic" || pathname === "/worker") {
+        res.writeHead(301, { Location: `${pathname}/` });
+        res.end();
         return;
       }
-      const data = await readFile(filePath);
-      res.writeHead(200, { "Content-Type": mimeFor(extname(filePath)) });
-      res.end(data);
-      return;
-    }
 
-    // Serve .ts example sources compiled on the fly by Bun
-    if (pathname.endsWith(".ts")) {
+      // Example pages.
+      const examplePath = EXAMPLE_PAGES.get(pathname);
+      if (examplePath) {
+        const data = await readFile(examplePath, "utf-8");
+        send(200, { "Content-Type": "text/html" }, data);
+        return;
+      }
+
+      // Built JS/WASM artifacts and bundled fonts, each contained to
+      // its own root (never the demo tree or the repo at large).
+      for (const [prefix, root] of [
+        ["/pkg/", PKG_ROOT],
+        ["/fonts/", FONTS_ROOT],
+      ] as const) {
+        if (pathname.startsWith(prefix)) {
+          const filePath = resolveContained(root, pathname.slice(prefix.length));
+          if (!filePath) {
+            send(404, {}, "Not found");
+            return;
+          }
+          const data = await readFile(filePath);
+          send(200, { "Content-Type": mimeFor(extname(filePath).toLowerCase()) }, data);
+          return;
+        }
+      }
+
+      // Generic demo static files: /shared/*, /basic/*, /worker/*,
+      // /sample.ass. TypeScript sources are transpiled on the fly so
+      // the browser receives plain modules; everything else is served
+      // by extension MIME. Containment keeps this inside demo/.
       const filePath = resolveContained(DEMO_ROOT, pathname);
       if (!filePath) {
-        res.writeHead(404);
-        res.end("Not found");
+        send(404, {}, "Not found");
         return;
       }
-      const transpiler = new Bun.Transpiler({ loader: "ts" });
-      const source = await readFile(filePath, "utf-8");
-      const js = transpiler.transformSync(source);
-      res.writeHead(200, { "Content-Type": "text/javascript" });
-      res.end(js);
-      return;
+      const ext = extname(filePath).toLowerCase();
+      if (ext === ".ts") {
+        const transpiler = new Bun.Transpiler({ loader: "ts" });
+        const source = await readFile(filePath, "utf-8");
+        const js = transpiler.transformSync(source);
+        send(200, { "Content-Type": "text/javascript" }, js);
+        return;
+      }
+      const data = await readFile(filePath);
+      send(200, { "Content-Type": mimeFor(ext) }, data);
+    } catch (error) {
+      console.error("Server error:", error);
+      if (!res.headersSent) res.writeHead(500);
+      res.end(req.method === "HEAD" ? undefined : "Internal server error");
     }
-
-    // Subtitle sample
-    if (pathname === "/sample.ass") {
-      const data = await readFile("./demo/sample.ass");
-      res.writeHead(200, { "Content-Type": mimeFor(".ass") });
-      res.end(data);
-      return;
-    }
-
-    // Serve example pages
-    const examplePath = EXAMPLE_PAGES.get(pathname);
-    if (examplePath) {
-      const data = await readFile(examplePath, "utf-8");
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(data);
-      return;
-    }
-
-    res.writeHead(404);
-    res.end("Not found");
-  } catch (error) {
-    console.error("Server error:", error);
-    res.writeHead(500);
-    res.end("Internal server error");
-  }
-});
+  });
+}
 
 if (import.meta.main) {
-  server.listen(PORT, () => {
-    console.log(`Dev server running at http://localhost:${PORT}`);
+  let port: number;
+  try {
+    port = resolvePort(process.env.PORT);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+  const server = createAppServer();
+  server.listen(port, () => {
+    console.log(`Dev server running at http://localhost:${port}`);
     console.log(`  / ........... ${DEMO_INDEX}`);
-    console.log(`  /basic ...... ./demo/basic/index.html`);
-    console.log(`  /worker ..... ./demo/worker/index.html`);
+    console.log(`  /basic/ ..... ./demo/basic/index.html`);
+    console.log(`  /worker/ .... ./demo/worker/index.html`);
   });
 }
 

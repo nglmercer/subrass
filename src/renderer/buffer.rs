@@ -236,16 +236,20 @@ impl RenderBuffer {
         let out_a = src_a + dst_a * (255 - src_a) / 255;
 
         if out_a > 0 {
+            // Integer-division floors let the numerator exceed 255 *
+            // out_a (up to ~2x) when out_a is tiny (e.g. src_a=1 over
+            // dst_a=2 gives 763/2=381), so saturate: a bare `as u8`
+            // would wrap mod 256 and render near-black for white.
             let inv_src = 255 - src_a;
-            self.pixels[idx] = ((r as u32 * src_a
-                + self.pixels[idx] as u32 * dst_a * inv_src / 255)
-                / out_a) as u8;
-            self.pixels[idx + 1] = ((g as u32 * src_a
-                + self.pixels[idx + 1] as u32 * dst_a * inv_src / 255)
-                / out_a) as u8;
-            self.pixels[idx + 2] = ((b as u32 * src_a
-                + self.pixels[idx + 2] as u32 * dst_a * inv_src / 255)
-                / out_a) as u8;
+            self.pixels[idx] =
+                ((r as u32 * src_a + self.pixels[idx] as u32 * dst_a * inv_src / 255) / out_a)
+                    .min(255) as u8;
+            self.pixels[idx + 1] =
+                ((g as u32 * src_a + self.pixels[idx + 1] as u32 * dst_a * inv_src / 255) / out_a)
+                    .min(255) as u8;
+            self.pixels[idx + 2] =
+                ((b as u32 * src_a + self.pixels[idx + 2] as u32 * dst_a * inv_src / 255) / out_a)
+                    .min(255) as u8;
             self.pixels[idx + 3] = ((out_a * 255 + 128) / 255) as u8;
         }
     }
@@ -838,6 +842,17 @@ mod tests {
         buf.blend_pixel(5, 5, 255, 255, 255, 128);
         let px = buf.get_pixel(5, 5);
         assert!(px[3] > 128);
+    }
+
+    #[test]
+    fn test_blend_pixel_saturates_tiny_alpha() {
+        // src_a=1 white over dst_a=2 white: the quotient reaches 381
+        // (integer-division floors), which must saturate to 255, not
+        // wrap mod 256 to near-black.
+        let mut buf = RenderBuffer::new(2, 1).unwrap();
+        buf.set_pixel(0, 0, 255, 255, 255, 2);
+        buf.blend_pixel(0, 0, 255, 255, 255, 1);
+        assert_eq!(buf.get_pixel(0, 0), [255, 255, 255, 2]);
     }
 
     #[test]

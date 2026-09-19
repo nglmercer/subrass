@@ -45,6 +45,10 @@ pub struct ResolvedStyle {
     pub shear_x: f64,
     pub shear_y: f64,
     pub alignment: i32,
+    /// libass `PARSED_A`: an `\an`/`\a` tag was already consumed for
+    /// this event, so later alignment tags are ignored (first wins).
+    /// Persists across `\r`, which never resets alignment in libass.
+    pub parsed_alignment: bool,
     pub margin_l: i32,
     pub margin_r: i32,
     pub margin_v: i32,
@@ -58,6 +62,11 @@ pub struct ResolvedStyle {
     pub fade_in: u64,
     pub fade_out: u64,
     pub complex_fade: Option<ComplexFade>,
+    /// libass `PARSED_FADE`: a `\fad`/`\fade` tag was already consumed
+    /// for this event, so later fade tags are ignored (first wins).
+    /// Needed because `\fad(0,0)` is otherwise indistinguishable from
+    /// "no fade tag". Persists across `\r` with the fade values.
+    pub parsed_fade: bool,
     pub drawing_mode: i32,
     pub drawing_baseline_offset: f64,
     pub blur: f64,
@@ -73,12 +82,14 @@ pub struct VectorClip {
     pub drawing: String,
 }
 
-/// Line-global state preserved across `\r` resets: exactly the
-/// non-style line properties (`\pos`, `\move`, `\org`, `\clip`,
-/// `\iclip`, `\fad`, `\fade`). Everything else — including `\p`
-/// drawing mode, `\pbo`, fonts, colors, border/shadow, rotation,
-/// karaoke, wrap, and alignment — resets to the target style, because
-/// `\r` restores ordinary override state for following text.
+/// Line-global state preserved across `\r` resets: the non-style
+/// line properties (`\pos`, `\move`, `\org`, `\clip`, `\iclip`,
+/// `\fad`, `\fade`) plus alignment: libass
+/// `ass_reset_render_context` (the `\r` handler) never touches
+/// alignment, so the first `\an`/`\a` survives resets. Everything
+/// else — including `\p` drawing mode, `\pbo`, fonts, colors,
+/// border/shadow, rotation, and karaoke — resets to the target
+/// style, because `\r` restores ordinary override state.
 struct LineGlobalKeep {
     position: Option<(f64, f64)>,
     origin: Option<(f64, f64)>,
@@ -90,6 +101,9 @@ struct LineGlobalKeep {
     fade_in: u64,
     fade_out: u64,
     complex_fade: Option<ComplexFade>,
+    alignment: i32,
+    parsed_alignment: bool,
+    parsed_fade: bool,
 }
 
 impl LineGlobalKeep {
@@ -105,6 +119,9 @@ impl LineGlobalKeep {
             fade_in: resolved.fade_in,
             fade_out: resolved.fade_out,
             complex_fade: resolved.complex_fade.clone(),
+            alignment: resolved.alignment,
+            parsed_alignment: resolved.parsed_alignment,
+            parsed_fade: resolved.parsed_fade,
         }
     }
 
@@ -119,6 +136,9 @@ impl LineGlobalKeep {
         resolved.fade_in = self.fade_in;
         resolved.fade_out = self.fade_out;
         resolved.complex_fade = self.complex_fade;
+        resolved.alignment = self.alignment;
+        resolved.parsed_alignment = self.parsed_alignment;
+        resolved.parsed_fade = self.parsed_fade;
     }
 }
 
@@ -2056,6 +2076,7 @@ impl Compositor {
             shear_x: 0.0,
             shear_y: 0.0,
             alignment: base_style.alignment,
+            parsed_alignment: false,
             margin_l: base_style.margin_l,
             margin_r: base_style.margin_r,
             margin_v: base_style.margin_v,
@@ -2069,6 +2090,7 @@ impl Compositor {
             fade_in: 0,
             fade_out: 0,
             complex_fade: None,
+            parsed_fade: false,
             drawing_mode: 0,
             drawing_baseline_offset: 0.0,
             blur: 0.0,
@@ -2147,34 +2169,63 @@ impl Compositor {
                 resolved.shadow_color = resolved.shadow_color.with_alpha(*a);
                 resolved.back_color = resolved.back_color.with_alpha(*a);
             }
-            // \pos and \move share one slot (VSFilter EF_MOVE): the
-            // last tag wins, so \pos clears an earlier \move.
+            // \pos and \move share one first-wins slot (libass
+            // `EVENT_POSITIONED`): whichever comes first wins, and later
+            // \pos / \move tags are ignored, so both are never set.
             OverrideTag::Position(x, y) => {
-                resolved.position = Some((*x, *y));
-                resolved.move_data = None;
+                if resolved.position.is_none() && resolved.move_data.is_none() {
+                    resolved.position = Some((*x, *y));
+                }
             }
             OverrideTag::Move(x1, y1, x2, y2) => {
-                resolved.move_data = Some(MoveData {
-                    x1: *x1,
-                    y1: *y1,
-                    x2: *x2,
-                    y2: *y2,
-                    t1: 0,
-                    t2: 0,
-                });
+                if resolved.position.is_none() && resolved.move_data.is_none() {
+                    resolved.move_data = Some(MoveData {
+                        x1: *x1,
+                        y1: *y1,
+                        x2: *x2,
+                        y2: *y2,
+                        t1: 0,
+                        t2: 0,
+                    });
+                }
             }
             OverrideTag::MoveWithTiming(x1, y1, x2, y2, t1, t2) => {
-                resolved.move_data = Some(MoveData {
-                    x1: *x1,
-                    y1: *y1,
-                    x2: *x2,
-                    y2: *y2,
-                    t1: *t1,
-                    t2: *t2,
-                });
+                if resolved.position.is_none() && resolved.move_data.is_none() {
+                    resolved.move_data = Some(MoveData {
+                        x1: *x1,
+                        y1: *y1,
+                        x2: *x2,
+                        y2: *y2,
+                        t1: *t1,
+                        t2: *t2,
+                    });
+                }
             }
-            OverrideTag::Origin(x, y) => resolved.origin = Some((*x, *y)),
-            OverrideTag::Alignment(a) => resolved.alignment = *a,
+            // First \org wins (libass `have_origin`).
+            OverrideTag::Origin(x, y) => {
+                if resolved.origin.is_none() {
+                    resolved.origin = Some((*x, *y));
+                }
+            }
+            // First alignment tag wins (libass `PARSED_A`, shared by
+            // \an and legacy \a). Out-of-range values fall back to
+            // the style alignment with the slot still consumed.
+            OverrideTag::Alignment(a) => {
+                if !resolved.parsed_alignment {
+                    resolved.parsed_alignment = true;
+                    resolved.alignment = if (1..=9).contains(a) {
+                        *a
+                    } else {
+                        resolved.base_style.alignment
+                    };
+                }
+            }
+            OverrideTag::AlignmentReset => {
+                if !resolved.parsed_alignment {
+                    resolved.parsed_alignment = true;
+                    resolved.alignment = resolved.base_style.alignment;
+                }
+            }
             OverrideTag::ScaleX(s) => resolved.scale_x = *s,
             OverrideTag::ScaleY(s) => resolved.scale_y = *s,
             OverrideTag::RotationZ(r) => resolved.angle = *r,
@@ -2208,61 +2259,62 @@ impl Compositor {
             }
             OverrideTag::ShearX(s) => resolved.shear_x = *s,
             OverrideTag::ShearY(s) => resolved.shear_y = *s,
-            // \fad and \fade share one slot (VSFilter EF_FADE): the
-            // last tag wins, so each form clears the other.
+            // \fad and \fade share one first-wins slot (libass
+            // `PARSED_FADE`): the first fade tag wins in either order
+            // and later ones are ignored, so both forms never coexist.
             OverrideTag::Fade(fi, fo) => {
-                resolved.fade_in = *fi;
-                resolved.fade_out = *fo;
-                resolved.complex_fade = None;
+                if !resolved.parsed_fade {
+                    resolved.parsed_fade = true;
+                    resolved.fade_in = *fi;
+                    resolved.fade_out = *fo;
+                }
             }
             OverrideTag::ComplexFade(a1, a2, a3, t1, t2, t3, t4) => {
-                // Alpha components wrap mod 256 (`as u8`), matching
-                // libass's `(uint8_t)` truncation; in-spec 0-255 values
-                // are unaffected, and opacity clamps to [0, 1] at use.
-                resolved.complex_fade = Some(ComplexFade {
-                    a1: *a1 as u8,
-                    a2: *a2 as u8,
-                    a3: *a3 as u8,
-                    t1: *t1,
-                    t2: *t2,
-                    t3: *t3,
-                    t4: *t4,
-                });
-                resolved.fade_in = 0;
-                resolved.fade_out = 0;
+                if !resolved.parsed_fade {
+                    resolved.parsed_fade = true;
+                    // Alpha components wrap mod 256 (`as u8`), matching
+                    // libass's `(uint8_t)` truncation; in-spec 0-255
+                    // values are unaffected, and opacity clamps to
+                    // [0, 1] at use.
+                    resolved.complex_fade = Some(ComplexFade {
+                        a1: *a1 as u8,
+                        a2: *a2 as u8,
+                        a3: *a3 as u8,
+                        t1: *t1,
+                        t2: *t2,
+                        t3: *t3,
+                        t4: *t4,
+                    });
+                }
             }
-            // Single clip state: the last \clip-family tag wins across
-            // rect/vector and normal/inverse forms (later tags replace
-            // earlier ones rather than intersecting).
+            // libass keeps rectangular and vector clipping as separate
+            // state: a later rect replaces the earlier rect coordinates
+            // and `\clip` vs `\iclip` flips the rect mode, while the
+            // first vector clip is retained (either form consumes the
+            // vector slot) and both rect and vector clips render.
             OverrideTag::Clip(x1, y1, x2, y2) => {
                 resolved.clip = Some((*x1, *y1, *x2, *y2));
                 resolved.inverse_clip = None;
-                resolved.clip_vector = None;
-                resolved.inverse_clip_vector = None;
             }
             OverrideTag::InverseClip(x1, y1, x2, y2) => {
                 resolved.inverse_clip = Some((*x1, *y1, *x2, *y2));
                 resolved.clip = None;
-                resolved.clip_vector = None;
-                resolved.inverse_clip_vector = None;
             }
             OverrideTag::ClipVector { scale, drawing } => {
-                resolved.clip_vector = Some(VectorClip {
-                    scale: *scale,
-                    drawing: drawing.clone(),
-                });
-                resolved.clip = None;
-                resolved.inverse_clip = None;
-                resolved.inverse_clip_vector = None;
+                if resolved.clip_vector.is_none() && resolved.inverse_clip_vector.is_none() {
+                    resolved.clip_vector = Some(VectorClip {
+                        scale: *scale,
+                        drawing: drawing.clone(),
+                    });
+                }
             }
             OverrideTag::InverseClipVector { scale, drawing } => {
-                resolved.inverse_clip_vector = Some(VectorClip {
-                    scale: *scale,
-                    drawing: drawing.clone(),
-                });
-                resolved.clip = None;
-                resolved.inverse_clip = None;
-                resolved.clip_vector = None;
+                if resolved.clip_vector.is_none() && resolved.inverse_clip_vector.is_none() {
+                    resolved.inverse_clip_vector = Some(VectorClip {
+                        scale: *scale,
+                        drawing: drawing.clone(),
+                    });
+                }
             }
             OverrideTag::Blur(b) => resolved.blur = *b,
             OverrideTag::EdgeBlur(b) => resolved.blur = *b,
@@ -2277,9 +2329,11 @@ impl Compositor {
     /// Segment style tags from the initial override groups establish the
     /// defaults, but event-layout tags (\pos, \move, \org, \clip, \iclip,
     /// \fad, \fade, \an, \q) apply no matter where they appear textually:
-    /// they are scanned across all segments (last one wins), so
+    /// they are scanned across all segments in textual order, so
     /// `{\pos(100,100)}Hi` and `Hi{\pos(100,100)}` resolve identically,
-    /// as do `{\an7}Hi` and `Hi{\an7}`.
+    /// as do `{\an7}Hi` and `Hi{\an7}`. Repeated tags resolve first-wins
+    /// per libass, except rect clips (later coordinates replace earlier
+    /// ones) and `\q` (last wins, consumed separately).
     pub fn resolve_style(base_style: &Style, event: &Event) -> ResolvedStyle {
         let segments = parse_text_segments(&event.text);
         let initial_tags = segments
@@ -2290,7 +2344,8 @@ impl Compositor {
 
         // Event-layout tags apply regardless of textual placement.
         // Segments carry accumulated tags, so only newly added tags per
-        // segment are considered; later ones overwrite earlier ones.
+        // segment are considered; each first-wins slot keeps the
+        // textually first tag, including re-scanned initial tags.
         // (\q has no ResolvedStyle field and is consumed separately from
         // the event tag list; scanning it here is a harmless no-op.)
         let mut prev_tag_count = 0usize;
@@ -4152,40 +4207,45 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_slots_last_tag_wins() {
-        // \pos/\move share EF_MOVE, \fad/\fade share EF_FADE, the
-        // \clip family shares one rect/vector slot, and \an/\a share
-        // alignment: in every pair the LAST tag wins (VSFilter).
+    fn test_shared_slots_first_tag_wins() {
+        // \pos/\move share one slot (libass EVENT_POSITIONED),
+        // \fad/\fade share one slot (libass PARSED_FADE), and \an/\a
+        // share one slot (libass PARSED_A): in every pair the FIRST
+        // tag wins. Rect \clip/\iclip instead replace coordinates and
+        // flip the rect mode (libass keeps rect state separate).
         let style = Style::new("Default");
         let resolve = |text: &str| {
             let line = format!("Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}");
             let event = Event::parse_from_line(&line).unwrap();
             Compositor::resolve_style(&style, &event)
         };
-        // \move-after-\pos keeps both at resolve; the render path
-        // lets move override position (effective last-wins).
+        // First positioning tag wins in either order; the loser is
+        // ignored, so position and move_data never coexist.
         let r = resolve(r"{\pos(1,2)\move(3,4,5,6)}Hi");
         assert_eq!(r.position, Some((1.0, 2.0)));
-        assert!(r.move_data.is_some());
-        let r = resolve(r"{\move(3,4,5,6)\pos(1,2)}Hi");
-        assert_eq!(r.position, Some((1.0, 2.0)));
         assert!(r.move_data.is_none());
+        let r = resolve(r"{\move(3,4,5,6)\pos(1,2)}Hi");
+        assert!(r.position.is_none());
+        assert!(r.move_data.is_some());
+        // First fade tag wins in either order.
         let r = resolve(r"{\fad(1,2)\fade(1,2,3,4,5,6,7)}Hi");
-        assert!(r.complex_fade.is_some());
-        assert_eq!((r.fade_in, r.fade_out), (0, 0));
-        let r = resolve(r"{\fade(1,2,3,4,5,6,7)\fad(1,2)}Hi");
         assert!(r.complex_fade.is_none());
         assert_eq!((r.fade_in, r.fade_out), (1, 2));
+        let r = resolve(r"{\fade(1,2,3,4,5,6,7)\fad(1,2)}Hi");
+        assert!(r.complex_fade.is_some());
+        assert_eq!((r.fade_in, r.fade_out), (0, 0));
+        // Rect clip then iclip: later coordinates win, mode flips.
         let r = resolve(r"{\clip(1,2,3,4)\iclip(5,6,7,8)}Hi");
         assert!(r.clip.is_none());
         assert_eq!(r.inverse_clip, Some((5, 6, 7, 8)));
         let r = resolve(r"{\iclip(5,6,7,8)\clip(1,2,3,4)}Hi");
         assert_eq!(r.clip, Some((1, 2, 3, 4)));
         assert!(r.inverse_clip.is_none());
+        // First alignment tag wins across \a / \an forms.
         let r = resolve(r"{\a1\an7}Hi");
-        assert_eq!(r.alignment, 7);
-        let r = resolve(r"{\an7\a1}Hi");
         assert_eq!(r.alignment, 1);
+        let r = resolve(r"{\an7\a1}Hi");
+        assert_eq!(r.alignment, 7);
     }
 
     #[test]
@@ -4220,8 +4280,9 @@ mod tests {
     #[test]
     fn test_reset_preserves_only_line_global() {
         // \r keeps exactly \pos/\move/\org/\clip/\iclip/\fad/\fade and
-        // resets everything else (fonts, colors, border/shadow, rotation,
-        // blur, spacing, alignment, \p, \pbo) to the target style.
+        // alignment (libass never resets alignment) and resets
+        // everything else (fonts, colors, border/shadow, rotation,
+        // blur, spacing, \p, \pbo) to the target style.
         use crate::types::override_tag::TextSegment;
         let base = Style::new("Default");
         let event =
@@ -4253,13 +4314,15 @@ mod tests {
             ],
         };
         let seg = Compositor::resolve_segment_style(&resolved, &segment, &event, &[], 0, 0, 2000);
-        // Line-global survivors (last clip wins across forms).
+        // Line-global survivors: first \pos beats the later \move,
+        // later rect coordinates replace earlier ones (iclip mode).
         assert_eq!(seg.position, Some((5.0, 6.0)));
-        assert!(seg.move_data.is_some());
+        assert!(seg.move_data.is_none());
         assert_eq!(seg.origin, Some((7.0, 8.0)));
         assert_eq!(seg.clip, None);
         assert_eq!(seg.inverse_clip, Some((0, 0, 20, 20)));
         assert_eq!((seg.fade_in, seg.fade_out), (100, 200));
+        assert_eq!(seg.alignment, 7);
         // Ordinary state resets to the style.
         assert_eq!(seg.font_weight, if base.bold { 700 } else { 400 });
         assert_eq!(seg.font_name, base.font_name);
@@ -4271,7 +4334,6 @@ mod tests {
         assert_eq!(seg.blur, 0.0);
         assert_eq!(seg.angle, 0.0);
         assert_eq!(seg.scale_x, base.scale_x);
-        assert_eq!(seg.alignment, base.alignment);
         assert_eq!(seg.drawing_mode, 0);
         assert_eq!(seg.drawing_baseline_offset, 0.0);
     }
@@ -4335,7 +4397,7 @@ mod tests {
 
     #[test]
     fn test_late_an_aligns_whole_line() {
-        // \an anywhere positions the entire line (last wins).
+        // \an anywhere positions the entire line (first wins).
         let base = Style::new("Default");
         for text in ["{\\an7}Hi", "Hi{\\an7}"] {
             let event = Event::parse_from_line(&format!(
@@ -4352,7 +4414,7 @@ mod tests {
             "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\an7}A{\\an1}B",
         )
         .unwrap();
-        assert_eq!(Compositor::resolve_style(&base, &event).alignment, 1);
+        assert_eq!(Compositor::resolve_style(&base, &event).alignment, 7);
         // Render-level: late \an7 moves all ink to the top half.
         let top = render_text("AAAA{\\an7}", 1000);
         let bottom = render_text("AAAA", 1000);
@@ -4383,8 +4445,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_global_tags_last_wins() {
-        // Repeated \pos: last one wins.
+    fn test_multiple_global_tags_first_wins() {
+        // Repeated \pos: first one wins (libass EVENT_POSITIONED).
         let base = Style::new("Default");
         let event = Event::parse_from_line(
             "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\pos(10,10)}A{\\pos(100,100)}B",
@@ -4392,9 +4454,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             Compositor::resolve_style(&base, &event).position,
-            Some((100.0, 100.0))
+            Some((10.0, 10.0))
         );
-        // Clip forms: strictly last tag wins (no intersection stacking).
+        // Rect clips: later coordinates replace earlier ones and the
+        // \clip vs \iclip form flips the rect mode (libass).
         for (text, want_clip, want_iclip) in [
             (
                 "{\\clip(0,0,10,10)}A{\\iclip(0,0,20,20)}B",
@@ -4418,25 +4481,26 @@ mod tests {
                 "{text:?}"
             );
         }
-        // Rect then vector (and back): single clip state.
+        // Rect and vector clips coexist (libass keeps separate state).
         let event = Event::parse_from_line(
             "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\clip(0,0,10,10)}A{\\clip(m 0 0 l 9 0 l 9 9)}B",
         )
         .unwrap();
         let r = Compositor::resolve_style(&base, &event);
-        assert!(r.clip.is_none() && r.clip_vector.is_some());
-        // \pos + \move: move animation takes precedence (locked behavior;
-        // reference-fixture verification tracked in CONFORMANCE.md).
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.clip_vector.is_some());
+        // \pos + \move: the first tag wins, so a leading \pos renders
+        // identical to a lone \pos (static across frames).
         let event = Event::parse_from_line(
             "Dialogue: 0,0:00:00.00,0:00:04.00,Default,,0,0,0,,{\\pos(10,10)\\move(0,0,100,0)}Hi",
         )
         .unwrap();
         let r = Compositor::resolve_style(&base, &event);
         assert_eq!(r.position, Some((10.0, 10.0)));
-        assert!(r.move_data.is_some());
-        let moved = render_text("{\\pos(10,10)\\move(0,0,100,0)}Hi", 2000);
+        assert!(r.move_data.is_none());
+        let first_wins = render_text("{\\pos(10,10)\\move(0,0,100,0)}Hi", 2000);
         let static_pos = render_text("{\\pos(10,10)}Hi", 2000);
-        assert_ne!(moved.as_bytes(), static_pos.as_bytes());
+        assert_eq!(first_wins.as_bytes(), static_pos.as_bytes());
     }
 
     fn render_event_text(text: &str, scaled: bool) -> RenderBuffer {
@@ -4830,8 +4894,11 @@ mod tests {
         assert_eq!(resolve_after_reset("A{\\r Alt }B"), "Alt");
     }
 
-    /// Plan #61: `\rAlt` restores alignment/border from the target
+    /// Plan #61: `\rAlt` restores border/margins from the target
     /// style, while nonzero event margins still override the target.
+    /// Alignment is NOT restored: libass `ass_reset_render_context`
+    /// never touches alignment, so the event alignment survives `\r`
+    /// (here the Default style's, since no `\an` tag occurred).
     #[test]
     fn test_reset_restores_target_layout_but_keeps_event_margins() {
         let base = Style::new("Default");
@@ -4847,11 +4914,45 @@ mod tests {
         let segments = parse_text_segments(&event.text);
         let seg =
             Compositor::resolve_segment_style(&resolved, &segments[1], &event, &styles, 0, 0, 2000);
-        assert_eq!(seg.alignment, 7);
+        assert_eq!(seg.alignment, base.alignment);
         assert_eq!(seg.outline_x, 9.0);
         assert_eq!(seg.margin_l, 11);
         // Event MarginV overrides the target style's margin.
         assert_eq!(seg.margin_v, 33);
+    }
+
+    /// `\r` preserves the first `\an`/`\a` (libass `PARSED_A` spans the
+    /// whole event): text after the reset keeps the earlier alignment,
+    /// and a later alignment tag is ignored.
+    #[test]
+    fn test_reset_keeps_first_alignment_and_ignores_later() {
+        let base = Style::new("Default");
+        let styles = vec![base.clone()];
+        for (text, want) in [
+            ("{\\an7}A{\\r}B", 7),
+            ("{\\an7}A{\\r}B{\\an1}C", 7),
+            ("A{\\r}B{\\an1}C", 1),
+            ("{\\a6}A{\\r}B", 8),
+        ] {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            let resolved = Compositor::resolve_style(&base, &event);
+            assert_eq!(resolved.alignment, want, "{text:?} at event level");
+            let segments = parse_text_segments(&event.text);
+            let last = segments.len() - 1;
+            let seg = Compositor::resolve_segment_style(
+                &resolved,
+                &segments[last],
+                &event,
+                &styles,
+                0,
+                0,
+                2000,
+            );
+            assert_eq!(seg.alignment, want, "{text:?} after \\r");
+        }
     }
 
     /// Plan #62: `\q` is event-level and survives `\r`; the last
@@ -4873,9 +4974,10 @@ mod tests {
     }
 
     /// Plan #63: `\an` applies event-wide wherever it appears; the
-    /// last occurrence wins (VSFilter line-global alignment).
+    /// first occurrence wins (libass `PARSED_A`), including across
+    /// `\r` (libass never resets alignment).
     #[test]
-    fn test_alignment_late_tag_applies_event_wide() {
+    fn test_alignment_first_tag_applies_event_wide() {
         let base = Style::new("Default");
         let resolve = |text: &str| {
             let event = Event::parse_from_line(&format!(
@@ -4885,14 +4987,27 @@ mod tests {
             Compositor::resolve_style(&base, &event).alignment
         };
         assert_eq!(resolve("Hello{\\an7}"), 7);
-        assert_eq!(resolve("{\\an7}Hello{\\an1}"), 1);
+        assert_eq!(resolve("{\\an7}Hello{\\an1}"), 7);
         assert_eq!(resolve("{\\an9}A{\\r}B"), 9);
+        // All \a / \an combinations: first wins.
+        assert_eq!(resolve("{\\an7}A{\\an1}B"), 7);
+        assert_eq!(resolve("{\\a6}A{\\an1}B"), 8);
+        assert_eq!(resolve("{\\an7}A{\\a1}B"), 7);
+        // Bare / out-of-range tags reset to the style and still
+        // consume the slot, blocking later alignment tags.
+        assert_eq!(resolve("{\\an}A{\\an7}B"), base.alignment);
+        assert_eq!(resolve("{\\an0}A{\\an7}B"), base.alignment);
+        assert_eq!(resolve("{\\a12}A{\\an7}B"), base.alignment);
+        // Render-level: first \an7 wins over a later \an1 (ink up top).
+        let first = render_text("{\\an7}AAAA{\\an1}", 1000);
+        let lone = render_text("{\\an7}AAAA", 1000);
+        assert_eq!(first.as_bytes(), lone.as_bytes());
     }
 
-    /// Plan #64/#65: `\pos` and `\move` share one slot — the last
-    /// tag wins in either order (VSFilter EF_MOVE parity).
+    /// Plan #64/#65: `\pos` and `\move` share one slot — the first
+    /// tag wins in either order (libass `EVENT_POSITIONED`).
     #[test]
-    fn test_pos_move_last_wins_both_orders() {
+    fn test_pos_move_first_wins_both_orders() {
         let base = Style::new("Default");
         let resolve = |text: &str| {
             let event = Event::parse_from_line(&format!(
@@ -4901,21 +5016,37 @@ mod tests {
             .unwrap();
             Compositor::resolve_style(&base, &event)
         };
+        // Pos-before-move keeps \pos; the \move is ignored.
         let r = resolve("{\\pos(10,10)}A{\\move(0,0,100,0)}B");
-        assert!(r.move_data.is_some());
-        let r = resolve("{\\move(0,0,100,0)}A{\\pos(100,100)}B");
+        assert_eq!(r.position, Some((10.0, 10.0)));
         assert!(r.move_data.is_none());
-        assert_eq!(r.position, Some((100.0, 100.0)));
-        // Render-level: pos-after-move is static across frames.
-        let a = render_event_effect("{\\move(0,0,100,0)}A{\\pos(100,100)}Hi", "", true, 500);
-        let b = render_event_effect("{\\move(0,0,100,0)}A{\\pos(100,100)}Hi", "", true, 1500);
+        // Move-before-pos keeps \move; the \pos is ignored.
+        let r = resolve("{\\move(0,0,100,0)}A{\\pos(100,100)}B");
+        assert!(r.move_data.is_some());
+        assert!(r.position.is_none());
+        // Repeated tags: first wins.
+        let r = resolve("{\\pos(10,10)}A{\\pos(100,100)}B");
+        assert_eq!(r.position, Some((10.0, 10.0)));
+        let r = resolve("{\\move(0,0,10,0)}A{\\move(0,0,100,0)}B");
+        assert!(r.move_data.is_some());
+        // Render-level: pos-before-move is static across frames and
+        // identical to a lone \pos; move-before-pos animates.
+        let text = "{\\pos(10,10)\\move(0,0,100,0)}Hi";
+        let a = render_event_effect(text, "", true, 500);
+        let b = render_event_effect(text, "", true, 1500);
         assert_eq!(a.as_bytes(), b.as_bytes());
+        let lone = render_event_effect("{\\pos(10,10)}Hi", "", true, 500);
+        assert_eq!(a.as_bytes(), lone.as_bytes());
+        let text = "{\\move(200,150,400,150)\\pos(100,100)}Hi";
+        let a = render_event_effect(text, "", true, 500);
+        let b = render_event_effect(text, "", true, 1500);
+        assert_ne!(a.as_bytes(), b.as_bytes());
     }
 
-    /// Plan #64: `\fad` and `\fade` share one slot — the last tag
-    /// wins in either order (VSFilter EF_FADE parity).
+    /// Plan #64: `\fad` and `\fade` share one slot — the first tag
+    /// wins in either order (libass `PARSED_FADE`).
     #[test]
-    fn test_fad_fade_last_wins_both_orders() {
+    fn test_fad_fade_first_wins_both_orders() {
         let base = Style::new("Default");
         let resolve = |text: &str| {
             let event = Event::parse_from_line(&format!(
@@ -4925,18 +5056,36 @@ mod tests {
             Compositor::resolve_style(&base, &event)
         };
         let fade = "\\fade(255,0,255,0,500,1500,2000)";
+        // fad-before-fade keeps \fad; fade-before-fad keeps \fade.
         let r = resolve(&format!("{{\\fad(100,200)}}A{{{fade}}}B"));
-        assert!(r.complex_fade.is_some());
-        assert_eq!((r.fade_in, r.fade_out), (0, 0));
-        let r = resolve(&format!("{{{fade}}}A{{\\fad(100,200)}}B"));
         assert!(r.complex_fade.is_none());
         assert_eq!((r.fade_in, r.fade_out), (100, 200));
+        let r = resolve(&format!("{{{fade}}}A{{\\fad(100,200)}}B"));
+        assert!(r.complex_fade.is_some());
+        assert_eq!((r.fade_in, r.fade_out), (0, 0));
+        // Repeated same-form tags: first wins.
+        let r = resolve("{\\fad(100,200)}A{\\fad(300,400)}B");
+        assert_eq!((r.fade_in, r.fade_out), (100, 200));
+        let r = resolve(&format!("{{{fade}}}A{{{fade}}}B"));
+        assert!(r.complex_fade.is_some());
+        // Even \fad(0,0) consumes the slot (indistinguishable from
+        // unset without the flag, but libass still sets PARSED_FADE).
+        let r = resolve(&format!("{{\\fad(0,0)}}A{{{fade}}}B"));
+        assert!(r.complex_fade.is_none());
+        assert_eq!((r.fade_in, r.fade_out), (0, 0));
+        // Render-level: fad-before-fade matches a lone \fad.
+        let text = "{\\fad(500,500)}Hi";
+        let first = render_event_effect(&format!("{{\\fad(500,500){fade}}}Hi"), "", true, 250);
+        let lone = render_event_effect(text, "", true, 250);
+        assert_eq!(first.as_bytes(), lone.as_bytes());
     }
 
-    /// Plan #66: rect/vector/normal/inverse clips share one slot —
-    /// the last `\clip`-family tag wins across all forms.
+    /// Plan #66: libass keeps rectangular and vector clipping as
+    /// separate state — later rect coordinates replace earlier ones,
+    /// `\clip` vs `\iclip` flips the rect mode, the first vector clip
+    /// is retained, and rect + vector clips coexist in rendering.
     #[test]
-    fn test_clip_forms_last_wins_across_forms() {
+    fn test_clip_libass_rect_vector_semantics() {
         let base = Style::new("Default");
         let resolve = |text: &str| {
             let event = Event::parse_from_line(&format!(
@@ -4946,18 +5095,89 @@ mod tests {
             Compositor::resolve_style(&base, &event)
         };
         let vector = "\\clip(m 0 0 l 10 0 l 10 10)";
-        // Rect then vector: only the vector survives.
-        let r = resolve(&format!("{{\\clip(0,0,10,10)}}A{{{vector}}}B"));
-        assert!(r.clip.is_none());
-        assert!(r.clip_vector.is_some());
-        // Vector then rect: only the rect survives.
-        let r = resolve(&format!("{{{vector}}}A{{\\clip(0,0,10,10)}}B"));
-        assert_eq!(r.clip, Some((0, 0, 10, 10)));
-        assert!(r.clip_vector.is_none());
-        // Clip then iclip: only the inverse survives.
+        let ivector = "\\iclip(m 0 0 l 10 0 l 10 10)";
+        // rect -> rect: later coordinates win.
+        let r = resolve("{\\clip(0,0,10,10)}A{\\clip(1,1,9,9)}B");
+        assert_eq!(r.clip, Some((1, 1, 9, 9)));
+        assert!(r.inverse_clip.is_none());
+        // clip -> iclip and back: mode flips with the latest form.
         let r = resolve("{\\clip(0,0,10,10)}A{\\iclip(1,1,9,9)}B");
         assert!(r.clip.is_none());
         assert_eq!(r.inverse_clip, Some((1, 1, 9, 9)));
+        let r = resolve("{\\iclip(1,1,9,9)}A{\\clip(0,0,10,10)}B");
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.inverse_clip.is_none());
+        // rect -> vector and back: both survive (separate state).
+        let r = resolve(&format!("{{\\clip(0,0,10,10)}}A{{{vector}}}B"));
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.clip_vector.is_some());
+        let r = resolve(&format!("{{{vector}}}A{{\\clip(0,0,10,10)}}B"));
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.clip_vector.is_some());
+        // vector -> vector: the first vector clip is retained, even
+        // across normal/inverse forms (either consumes the slot).
+        let r = resolve(&format!("{{{vector}}}A{{{vector}}}B"));
+        assert!(r.clip_vector.is_some());
+        assert!(r.inverse_clip_vector.is_none());
+        let r = resolve(&format!("{{{vector}}}A{{{ivector}}}B"));
+        assert!(r.clip_vector.is_some());
+        assert!(r.inverse_clip_vector.is_none());
+        let r = resolve(&format!("{{{ivector}}}A{{{vector}}}B"));
+        assert!(r.clip_vector.is_none());
+        assert!(r.inverse_clip_vector.is_some());
+        // vector iclip -> rect clip and back: rect never disturbs the
+        // vector slot and the vector never disturbs the rect slot.
+        let r = resolve(&format!("{{{ivector}}}A{{\\clip(0,0,10,10)}}B"));
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.inverse_clip_vector.is_some());
+        let r = resolve(&format!("{{\\clip(0,0,10,10)}}A{{{ivector}}}B"));
+        assert_eq!(r.clip, Some((0, 0, 10, 10)));
+        assert!(r.inverse_clip_vector.is_some());
+        // Render-level: rect + vector clips both apply. Centered
+        // text spans the frame middle, so a left-half rect and a
+        // right-half vector each keep ink alone, while their
+        // (near-empty) intersection keeps strictly less than either.
+        let rect_only = render_event_text("{\\clip(0,0,320,200)}Hello", true);
+        let vector_only =
+            render_event_text("{\\clip(m 320 0 l 640 0 l 640 200 l 320 200)}Hello", true);
+        let both = render_event_text(
+            "{\\clip(0,0,320,200)\\clip(m 320 0 l 640 0 l 640 200 l 320 200)}Hello",
+            true,
+        );
+        let rect_ink = painted_pixels(&rect_only);
+        let vector_ink = painted_pixels(&vector_only);
+        let both_ink = painted_pixels(&both);
+        assert!(rect_ink > 0 && vector_ink > 0, "each clip keeps ink alone");
+        assert!(
+            both_ink < rect_ink,
+            "rect+vector ({both_ink}) must keep less than rect-only ({rect_ink})"
+        );
+        assert!(
+            both_ink < vector_ink,
+            "rect+vector ({both_ink}) must keep less than vector-only ({vector_ink})"
+        );
+    }
+
+    /// First `\org` wins (libass `have_origin`); later origins are
+    /// ignored. Render-level: the rotation pivot follows the first
+    /// origin, so an ignored second origin renders identically.
+    #[test]
+    fn test_org_first_wins() {
+        let base = Style::new("Default");
+        let resolve = |text: &str| {
+            let event = Event::parse_from_line(&format!(
+                "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}"
+            ))
+            .unwrap();
+            Compositor::resolve_style(&base, &event)
+        };
+        let r = resolve("{\\org(10,20)}A{\\org(100,200)}B");
+        assert_eq!(r.origin, Some((10.0, 20.0)));
+        let r = resolve("{\\org(100,200)}A{\\org(10,20)}B");
+        assert_eq!(r.origin, Some((100.0, 200.0)));
+        let first = render_event_text("{\\frz30\\org(10,20)\\org(300,100)}Spun", true);
+        let lone = render_event_text("{\\frz30\\org(10,20)}Spun", true);
+        assert_eq!(first.as_bytes(), lone.as_bytes());
     }
 
     #[test]

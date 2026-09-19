@@ -9,6 +9,6 @@
                   144
               ],
     "background":  "black (ass composited over opaque black)",
-    "generated_utc":  "2026-09-19T01:45:08.9853374Z",
+    "generated_utc":  "2026-09-19T02:57:53.7740122Z",
     "note":  "effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent)"
 }

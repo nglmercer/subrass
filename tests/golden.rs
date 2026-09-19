@@ -245,6 +245,94 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             one("Box", "{\\an5}First line\\NSecond longer line"),
             1000,
         ),
+        // First-wins precedence (libass EVENT_POSITIONED / PARSED_A /
+        // PARSED_FADE / have_origin): the first tag of each shared slot
+        // wins in either order and across repeated tags.
+        (
+            "pos-before-move".to_string(),
+            one("Default", "{\\pos(300,180)\\move(20,20,300,180)}PosMove"),
+            2500,
+        ),
+        (
+            "move-before-pos".to_string(),
+            one("Default", "{\\move(20,20,300,180)\\pos(300,180)}MovePos"),
+            2500,
+        ),
+        (
+            "pos-pos".to_string(),
+            one("Default", "{\\pos(60,60)\\pos(300,180)}PosPos"),
+            1000,
+        ),
+        (
+            "move-move".to_string(),
+            one(
+                "Default",
+                "{\\move(20,20,300,180)\\move(300,180,20,20)}MoveMove",
+            ),
+            2500,
+        ),
+        (
+            "an-an".to_string(),
+            one("Default", "{\\an7\\an1}AlignAn"),
+            1000,
+        ),
+        (
+            "a-an".to_string(),
+            one("Default", "{\\a6\\an1}AlignAAn"),
+            1000,
+        ),
+        (
+            "an-a".to_string(),
+            one("Default", "{\\an1\\a6}AlignAnA"),
+            1000,
+        ),
+        (
+            "fad-fade".to_string(),
+            one(
+                "Default",
+                "{\\fad(500,500)\\fade(255,0,255,0,1000,4000,5000)}FadFade",
+            ),
+            250,
+        ),
+        (
+            "fade-fad".to_string(),
+            one(
+                "Default",
+                "{\\fade(255,0,255,0,1000,4000,5000)\\fad(500,500)}FadeFad",
+            ),
+            250,
+        ),
+        (
+            "org-org".to_string(),
+            one("Default", "{\\an5\\frz30\\org(192,108)\\org(60,60)}OrgOrg"),
+            1000,
+        ),
+        // Rect and vector clips coexist (libass keeps separate state);
+        // order-independent, and the first vector clip is retained.
+        (
+            "rect-vector-clip".to_string(),
+            one(
+                "Default",
+                "{\\an5\\clip(0,0,200,216)\\clip(m 0 100 l 384 100 l 384 216 l 0 216)}RectVector",
+            ),
+            1000,
+        ),
+        (
+            "vector-rect-clip".to_string(),
+            one(
+                "Default",
+                "{\\an5\\clip(m 0 100 l 384 100 l 384 216 l 0 216)\\clip(0,0,200,216)}VectorRect",
+            ),
+            1000,
+        ),
+        (
+            "vector-vector-clip".to_string(),
+            one(
+                "Default",
+                "{\\an5\\clip(m 0 0 l 192 0 l 192 216 l 0 216)\\clip(m 192 0 l 384 0 l 384 216 l 192 216)}VecVec",
+            ),
+            1000,
+        ),
     ]
 }
 

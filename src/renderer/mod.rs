@@ -89,10 +89,9 @@ impl SubtitleRenderer {
             }
         }
 
-        #[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
-        {
-            font_manager.load_system_fonts();
-        }
+        // Note: system-font discovery is explicit (see
+        // `load_system_fonts`), never eager here, so construction stays
+        // deterministic in every feature combination.
 
         // Static document diagnostics: unknown tags, unsupported
         // effects, missing fonts, and right-to-left text. Collected
@@ -199,6 +198,14 @@ impl SubtitleRenderer {
         self.font_manager.load_font_auto(name, data)
     }
 
+    /// Discover native system fonts (opt-in `system-fonts` feature,
+    /// never WASM). Embedded/manual faces were loaded first and keep
+    /// deterministic precedence; returns the number of families added.
+    #[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
+    pub fn load_system_fonts(&mut self) -> usize {
+        self.font_manager.load_system_fonts()
+    }
+
     /// Set the canvas element to render to
     pub fn set_canvas(&mut self, canvas: HtmlCanvasElement) -> Result<(), String> {
         let ctx = canvas
@@ -259,16 +266,12 @@ impl SubtitleRenderer {
 
             let mut resolved = Compositor::resolve_style(style, event);
             resolved.scaled_border_and_shadow = self.doc.script_info.scaled_border_and_shadow;
-            resolved.layout_res_x = self
-                .doc
-                .script_info
-                .layout_res_x
-                .unwrap_or(self.video_width);
-            resolved.layout_res_y = self
-                .doc
-                .script_info
-                .layout_res_y
-                .unwrap_or(self.video_height);
+            // 0 = unset: `composite_event` owns the libass
+            // `ass_layout_res` fallback (both axes set, else video
+            // size), so every caller shares one semantic.
+            resolved.layout_res_x = self.doc.script_info.layout_res_x.unwrap_or(0);
+            resolved.layout_res_y = self.doc.script_info.layout_res_y.unwrap_or(0);
+            resolved.kerning = self.doc.script_info.kerning;
 
             self.compositor.composite_event(
                 &mut self.buffer,
@@ -362,7 +365,13 @@ mod tests {
         let ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n\n[Fonts]\nfontname: Bad.ttf\n15*$\n";
         let renderer = SubtitleRenderer::new(ass).unwrap();
         // Best-effort: construction succeeds but records a warning.
-        assert_eq!(renderer.font_count(), 1);
+        // Relative to a fontless baseline so optional system-font
+        // discovery (which adds faces) cannot break the count.
+        let baseline = SubtitleRenderer::new(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n",
+        )
+        .unwrap();
+        assert_eq!(renderer.font_count(), baseline.font_count());
         assert_eq!(renderer.warnings().len(), 1);
         assert!(renderer.warnings()[0].contains("Bad.ttf"));
     }
@@ -382,7 +391,39 @@ mod tests {
         }
         let renderer = SubtitleRenderer::new(&ass).unwrap();
         assert!(renderer.warnings().is_empty());
-        assert_eq!(renderer.font_count(), 2);
+        // Relative to a fontless baseline so optional system-font
+        // discovery (which adds faces) cannot break the count: the
+        // embedded face adds exactly one.
+        let baseline = SubtitleRenderer::new(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n",
+        )
+        .unwrap();
+        assert_eq!(renderer.font_count(), baseline.font_count() + 1);
+    }
+
+    /// System-font discovery is explicit and idempotent; the bundled
+    /// fallback keeps precedence over any discovered same-named family.
+    /// Env-independent: discovery may find zero faces on a bare system.
+    #[cfg(all(feature = "system-fonts", not(target_arch = "wasm32")))]
+    #[test]
+    fn test_system_font_discovery_is_explicit_and_idempotent() {
+        let mut renderer = SubtitleRenderer::new(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 480\n",
+        )
+        .unwrap();
+        // Construction alone discovers nothing (deterministic).
+        assert_eq!(renderer.font_count(), 1);
+        let before = renderer.font_count();
+        let added = renderer.load_system_fonts();
+        // `added` counts families; collections contribute extra faces.
+        assert!(renderer.font_count() >= before + added);
+        // Second scan adds nothing (families already present).
+        assert_eq!(renderer.load_system_fonts(), 0);
+        // Bundled "DejaVu Sans" still resolves to the fallback face.
+        let m = renderer
+            .font_manager
+            .find_font_with_weight("DejaVu Sans", 400, false);
+        assert_eq!(m.id, 0);
     }
 
     /// Plan #58: one document exercising every diagnostic class.

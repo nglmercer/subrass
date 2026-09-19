@@ -8,7 +8,8 @@ A pure Rust ASS/SSA subtitle parser and renderer, compiled to WebAssembly. No li
 - **ASS/SSA parsing** — Script Info, V4+ Styles, V4 Styles (SSA), Events, `[Fonts]`/`[Graphics]` attachments, override tags (see matrix below)
 - **Native rendering** — glyph rasterization via `ab_glyph`, per-segment layout, scanline fill for vector drawing, elliptical outlines, shadows, blur, rectangular and vector clipping
 - **WebAssembly** — compiles to WASM, renders to HTML Canvas via `putImageData`, or headlessly in a Web Worker
-- **Font management** — TTF/OTF loading with sfnt metadata detection, deterministic matching, faux bold/italic synthesis, built-in fallback (DejaVu Sans)
+- **Font management** — TTF/OTF/TTC/OTC loading with sfnt metadata detection, deterministic matching, faux bold/italic synthesis, built-in fallback (DejaVu Sans), opt-in native system-font discovery (`system-fonts` feature, explicit `load_system_fonts`)
+- **OpenType shaping** — `harfrust` GSUB/GPOS + `unicode-bidi` visual runs: Arabic/Hebrew/Indic shaping, ligatures, mark positioning, cluster-aware fallback, `kern` behind the `Kerning:` header (default off, like libass)
 
 ## Architecture
 
@@ -76,17 +77,17 @@ Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered 
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
 | Animation | `\t` (accel `t^accel`, optional timing) recursively consumes libass discrete/event-global tags, interpolates rectangular clips, and animates colors, alpha, size, scales, spacing, rotation, borders, shadows, and shear | Vector clip geometry remains discrete; transform nesting is bounded for hostile input | |
 | Alignment | `\an`, legacy `\a` (SSA numbering converted; first tag wins, like libass) | | |
-| Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` | `LayoutResX/Y`, `YCbCr Matrix` are parsed but unused (ASS-2 draft / RGB pipeline) | |
+| Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` (unscaled = 1:1 video px, VSFilter/legacy-libass), `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators, unset = video size), `Kerning` (default off, like libass) | `YCbCr Matrix` is parsed but unused (RGB pipeline) | |
 | Attachments | `[Fonts]` parsed, decoded, and best-effort auto-loaded as fallback faces (failures surface via `warnings()`); `[Graphics]` parsed, decoded, exposed via `get_attachment_*`; manual `load_font(name, data)` | | |
-| Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter) | `\fe` parsed/stored/reset but kept `Partial` (Unicode-only, no charset remapping); unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
+| Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter) | `\fe`/charset bridge remaps legacy single-byte text via codepage tables (Unicode passthrough, error fallback); unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
 
 Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur is applied **before** clipping so blurred pixels cannot bleed outside the clip region.
 
 ## Known Limitations
 
-- No complex text shaping: left-to-right `ab_glyph` shaping only (no HarfBuzz, no RTL, no ligature-aware caret mapping).
-- Per-glyph font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); no system-font lookup.
-- Font collections (`.ttc`/`.otc`) are rejected; load single-face `.ttf`/`.otf` files instead.
+- OpenType shaping covers `kern` (behind `Kerning:`), `liga`/`clig` (off when `\fsp` spacing is non-zero, like libass), bidi visual runs, and mark positioning; vertical text and stylistic sets are not exposed.
+- Cluster-aware font fallback covers loaded faces in deterministic order (requested face → family alternates → other faces → built-in); native system fonts load only via explicit `load_system_fonts()` with the `system-fonts` feature (never on WASM).
+- Font collections (`.ttc`/`.otc`) load every face with per-face metadata, matching, and shaping identity (never silently face 0).
 - Rotation perspective distance follows libass (312.5 × vertical resolution ratio); extreme angles degrade to empty glyphs rather than over-allocating.
 - `\r` preserves line-global state (position, move, origin, clips, fades) plus alignment and drawing mode (with `\pbo`), like libass; fonts, colors, rotation, and karaoke styling reset (karaoke timing survives a no-op reset so runs rejoin).
 - Rasterizer differences remain by design: unhinted `ab_glyph` coverage vs libass/FreeType hinted outlines (~1px placement/AA differences; see `CONFORMANCE.md`). Fuzz targets (`fuzz/`) need nightly `cargo-fuzz`; short smoke runs are CI-gated, longer sessions run locally.

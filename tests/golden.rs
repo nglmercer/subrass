@@ -25,6 +25,15 @@ const MISSING_FONT_STYLE: &str = "Style: Missing,NoSuchFamilyXYZ,36,&H00FFFFFF,&
 const EVENTS_HEADER: &str =
     "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
 
+// Fixtures whose Script Info differs from HEADER: `kerning` enables the
+// libass `Kerning:` header; `transform-nondefault-playres` uses a 720p
+// script resolution with matching style sizes.
+const HEADER_KERNING: &str = "[Script Info]\nTitle: golden\nScriptType: v4.00+\nPlayResX: 384\nPlayResY: 216\nWrapStyle: 0\nScaledBorderAndShadow: yes\nKerning: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n";
+const HEADER_720P: &str = "[Script Info]\nTitle: golden\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n";
+const DEFAULT_STYLE_72: &str = "Style: Default,DejaVu Sans,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n";
+const BOX_STYLE_72: &str = "Style: Box,DejaVu Sans,72,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,0,0,0,0,100,100,0,0,3,6,0,5,10,10,10,1\n";
+const MISSING_FONT_STYLE_72: &str = "Style: Missing,NoSuchFamilyXYZ,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n";
+
 /// (name, event lines, time_ms). The Default/Box/Missing styles
 /// ride along in every doc.
 fn fixtures() -> Vec<(String, Vec<String>, u64)> {
@@ -485,14 +494,186 @@ fn fixtures() -> Vec<(String, Vec<String>, u64)> {
             ),
             1000,
         ),
+        (
+            "transform-pos".to_string(),
+            one(
+                "Default",
+                "{\\pos(40,40)\\t(0,2000,\\pos(220,140))}Moving",
+            ),
+            1000,
+        ),
+        (
+            "transform-org".to_string(),
+            one(
+                "Default",
+                "{\\org(90,90)\\t(0,2000,\\frz45\\org(250,120))}Spin",
+            ),
+            1000,
+        ),
+        (
+            "transform-an".to_string(),
+            one("Default", "{\\an1\\t(0,2000,\\an9)}Corner"),
+            1000,
+        ),
+        (
+            "transform-q".to_string(),
+            one(
+                "Default",
+                "{\\t(0,2000,\\q2)}A fairly long line that would normally wrap across the frame width",
+            ),
+            1000,
+        ),
+        (
+            "transform-fade".to_string(),
+            one("Default", "{\\t(0,2000,\\fad(800,200))}Fading"),
+            1000,
+        ),
+        (
+            "transform-clip".to_string(),
+            one(
+                "Default",
+                "{\\t(0,2000,\\clip(60,60,220,160))}Clipped",
+            ),
+            1000,
+        ),
+        (
+            "transform-iclip".to_string(),
+            one(
+                "Default",
+                "{\\t(0,2000,\\iclip(120,80,300,180))}Inverse",
+            ),
+            1000,
+        ),
+        (
+            "transform-discrete".to_string(),
+            one("Default", "{\\t(0,2000,\\b1\\i1\\bord4\\shad3)}Bold"),
+            1000,
+        ),
+        (
+            "transform-karaoke".to_string(),
+            one("Default", "{\\k100\\t(0,3000,\\fs48)}Kara"),
+            1500,
+        ),
+        (
+            "transform-nested".to_string(),
+            one(
+                "Default",
+                "{\\t(0,4000,\\fs48\\t(1000,3000,\\fs24))}Nested",
+            ),
+            2000,
+        ),
+        (
+            "transform-nested-accel".to_string(),
+            one(
+                "Default",
+                "{\\t(0,4000,2.0,\\fs48\\t(1000,3000,0.5,\\fs24))}Accel",
+            ),
+            2000,
+        ),
+        (
+            // Non-default PlayRes exercises the transform clip canvas
+            // (full script canvas, not a hard-coded default).
+            "transform-nondefault-playres".to_string(),
+            one(
+                "Default",
+                "{\\t(0,2000,\\clip(100,100,700,500))}HiRes",
+            ),
+            1000,
+        ),
+        (
+            "pbo-positive".to_string(),
+            one(
+                "Default",
+                "{\\p1\\pbo20}m 0 0 l 60 0 l 60 30 l 0 30{\\p0}",
+            ),
+            1000,
+        ),
+        (
+            "pbo-negative".to_string(),
+            one(
+                "Default",
+                "{\\p1\\pbo-20}m 0 0 l 60 0 l 60 30 l 0 30{\\p0}",
+            ),
+            1000,
+        ),
+        (
+            "pbo-mixed".to_string(),
+            one(
+                "Default",
+                "Hi{\\p1\\pbo15}m 0 0 l 40 0 l 40 20 l 0 20{\\p0}Ho{\\p1\\pbo-15}m 0 0 l 40 0 l 40 20 l 0 20{\\p0}",
+            ),
+            1000,
+        ),
+        (
+            // libass numeric-prefix parsing: trailing garbage after a
+            // numeric value never drops the tag.
+            "numeric-prefix-tags".to_string(),
+            one("Default", "{\\b1foo\\bord2abc\\fs40foo}Prefixed"),
+            1000,
+        ),
+        (
+            "arabic".to_string(),
+            one("Default", "مرحبا بالعالم"),
+            1000,
+        ),
+        (
+            "hebrew".to_string(),
+            one("Default", "שלום עולם"),
+            1000,
+        ),
+        (
+            "mixed-bidi".to_string(),
+            one("Default", "Hello مرحبا 123 שלום world"),
+            1000,
+        ),
+        (
+            // DejaVu Sans has no Devanagari: both sides render .notdef,
+            // gating missing-glyph advance parity.
+            "indic".to_string(),
+            one("Default", "नमस्ते दुनिया"),
+            1000,
+        ),
+        (
+            "ligature".to_string(),
+            one("Default", "office efficiency"),
+            1000,
+        ),
+        (
+            // `Kerning: yes` header (HEADER_KERNING): both sides kern.
+            "kerning".to_string(),
+            one("Default", "Top-left \"quoted\" AVATAR 17."),
+            1000,
+        ),
+        (
+            // ASCII stays neutral under charset switches (bridge
+            // identity); locks switch/reset behavior.
+            "fe-charset".to_string(),
+            one(
+                "Default",
+                "{\\fe0}Plain {\\fe161}Greek {\\fe128}CJK {\\fe0}back",
+            ),
+            1000,
+        ),
     ]
 }
 
-fn assemble(events: &[String]) -> String {
-    let mut doc = String::from(HEADER);
-    doc.push_str(DEFAULT_STYLE);
-    doc.push_str(BOX_STYLE);
-    doc.push_str(MISSING_FONT_STYLE);
+fn assemble(name: &str, events: &[String]) -> String {
+    let (header, default, box_style, missing) = if name == "transform-nondefault-playres" {
+        (
+            HEADER_720P,
+            DEFAULT_STYLE_72,
+            BOX_STYLE_72,
+            MISSING_FONT_STYLE_72,
+        )
+    } else if name == "kerning" {
+        (HEADER_KERNING, DEFAULT_STYLE, BOX_STYLE, MISSING_FONT_STYLE)
+    } else {
+        (HEADER, DEFAULT_STYLE, BOX_STYLE, MISSING_FONT_STYLE)
+    };
+    let mut doc = String::from(header);
+    doc.push_str(default);
+    doc.push_str(box_style);
+    doc.push_str(missing);
     doc.push_str(EVENTS_HEADER);
     for line in events {
         doc.push_str(line);
@@ -570,7 +751,7 @@ fn golden_images_match() {
     let mut manifest = String::from("{\"video\": [256, 144], \"fixtures\": {\n");
     let mut failures = Vec::new();
     for (name, events, time_ms) in fixtures() {
-        let ass = assemble(&events);
+        let ass = assemble(&name, &events);
         let mut renderer = SubtitleRenderer::new(&ass).expect("fixture parses");
         renderer
             .set_video_size(VIDEO_W, VIDEO_H)

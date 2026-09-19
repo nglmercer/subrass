@@ -210,12 +210,12 @@ impl DrawingParser {
                     if !m_seen || !spline_active {
                         continue;
                     }
-                    match commands.last_mut() {
-                        Some(DrawCommand::SplineTo {
-                            points: existing,
-                            closed: false,
-                        }) => existing.extend(points),
-                        _ => {}
+                    if let Some(DrawCommand::SplineTo {
+                        points: existing,
+                        closed: false,
+                    }) = commands.last_mut()
+                    {
+                        existing.extend(points);
                     }
                 }
                 'c' | 'C' => {
@@ -534,8 +534,18 @@ impl DrawingParser {
         let total_edges: usize = polygons.iter().map(|p| p.len()).sum();
         let mut intersections = Vec::with_capacity(total_edges.min(4096));
 
+        // Pixel-center sampling (FreeType convention, which libass
+        // uses for drawings and vector clips): row scan_y covers
+        // [scan_y, scan_y + 1), so edges straddle its center
+        // scan_y + 0.5, and a span [ix1, ix2] fills the columns whose
+        // centers fall inside. Edge-based spans overfill by a pixel
+        // (a rect ending exactly at x=148 paints column 148, which
+        // libass leaves to the outline) and drop edge rows on 1ulp
+        // float boundaries (probe: pbo-shifted top edge at 104+eps
+        // lost row 104); center sampling is robust to both.
         for scan_y in min_y..=max_y {
             intersections.clear();
+            let yc = scan_y as f64 + 0.5;
 
             for polygon in polygons {
                 if polygon.len() < 3 {
@@ -554,14 +564,12 @@ impl DrawingParser {
                         continue;
                     }
 
-                    if (sy1 <= scan_y as f64 && sy2 > scan_y as f64)
-                        || (sy2 <= scan_y as f64 && sy1 > scan_y as f64)
-                    {
+                    if (sy1 <= yc && sy2 > yc) || (sy2 <= yc && sy1 > yc) {
                         let denom = sy2 - sy1;
                         if denom.abs() < f64::EPSILON {
                             continue;
                         }
-                        let t = (scan_y as f64 - sy1) / denom;
+                        let t = (yc - sy1) / denom;
                         let ix = sx1 + t * (sx2 - sx1);
                         if ix.is_finite() {
                             intersections.push(ix);
@@ -574,9 +582,16 @@ impl DrawingParser {
 
             let mut i = 0;
             while i + 1 < intersections.len() {
-                // Clamp the span to the buffer before looping.
-                let x_start = (intersections[i].floor() as i64).max(0).min(w - 1);
-                let x_end = (intersections[i + 1].ceil() as i64).max(0).min(w - 1);
+                // Columns with centers inside [ix1, ix2], clamped to
+                // the buffer before looping.
+                let x_start = (intersections[i] - 0.5).ceil() as i64;
+                let x_end = (intersections[i + 1] - 0.5).floor() as i64;
+                if x_start > x_end {
+                    i += 2;
+                    continue;
+                }
+                let x_start = x_start.max(0).min(w - 1);
+                let x_end = x_end.max(0).min(w - 1);
                 for px in x_start..=x_end {
                     emit(px as i32, scan_y as i32);
                 }
@@ -643,6 +658,51 @@ impl DrawingParser {
             }
         }
         Self::fill_polygons_clipped(buffer, &Self::polygons(text), x, y, scale, color, range);
+    }
+
+    /// Stamp a drawing's outline ring and drop shadow under its fill
+    /// (libass BorderStyle 1; radii/offsets in device pixels). The
+    /// coverage comes from the same scan as the fill, so the ring hugs
+    /// the exact fill pixel set. Karaoke sweeps split only the fill —
+    /// like the text sweep path, whose outline/shadow never split —
+    /// so callers paint this once per drawing before any clipped
+    /// fill passes. No-op when both are `None`.
+    pub fn render_drawing_effects(
+        buffer: &mut RenderBuffer,
+        text: &str,
+        x: f64,
+        y: f64,
+        scale: f64,
+        outline: Option<([u8; 4], f64, f64)>,
+        shadow: Option<([u8; 4], f64, f64)>,
+    ) {
+        if outline.is_none() && shadow.is_none() {
+            return;
+        }
+        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let (w, h) = (buffer.width, buffer.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let polygons = Self::polygons(text);
+        let stride = w as usize;
+        let mut coverage = vec![0u8; stride.saturating_mul(h as usize)];
+        Self::scan_polygons(w, h, &polygons, x, y, scale, |px, py| {
+            let idx = (py as usize)
+                .saturating_mul(stride)
+                .saturating_add(px as usize);
+            if let Some(c) = coverage.get_mut(idx) {
+                *c = 255;
+            }
+        });
+        if let Some((rgba, ox, oy)) = outline {
+            crate::renderer::effects::apply_outline_xy(buffer, &coverage, w, h, 0, 0, ox, oy, rgba);
+        }
+        if let Some((rgba, ox, oy)) = shadow {
+            crate::renderer::effects::apply_shadow(buffer, &coverage, w, h, 0, 0, ox, oy, rgba);
+        }
     }
 
     fn fill_polygons_mask(
@@ -745,6 +805,40 @@ mod tests {
         );
         assert_eq!(buf.get_pixel(15, 15)[3], 255);
         assert_eq!(buf.get_pixel(30, 30)[3], 0);
+    }
+
+    /// Outline ring + drop shadow for event drawings (plan #28): the
+    /// ring paints in outline color around the fill, the shadow stamps
+    /// offset in shadow color, and the fill covers both in the core.
+    #[test]
+    fn test_drawing_effects_outline_and_shadow() {
+        let square = "m 20 20 l 40 20 l 40 40 l 20 40";
+        let mut buf = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_drawing_effects(
+            &mut buf,
+            square,
+            0.0,
+            0.0,
+            1.0,
+            Some(([0, 0, 255, 255], 2.0, 2.0)),
+            Some(([0, 255, 0, 255], 3.0, 0.0)),
+        );
+        DrawingParser::render_drawing(&mut buf, square, 0.0, 0.0, 1.0, [255, 255, 255, 255]);
+        // Fill core covers both passes: opaque white.
+        assert_eq!(buf.get_pixel(30, 30), [255, 255, 255, 255]);
+        // Outline ring left of the fill: blue only.
+        let ring = buf.get_pixel(18, 30);
+        assert_eq!((ring[0], ring[1]), (0, 0), "ring pixel {ring:?}");
+        assert!(ring[2] > 0 && ring[3] > 0, "ring pixel {ring:?}");
+        // Shadow right of fill + ring (center sampling: fill spans
+        // 20..=39, ring reaches x=41, shadowed fill spans 23..=42):
+        // pure green, then blank.
+        assert_eq!(buf.get_pixel(42, 30), [0, 255, 0, 255]);
+        assert_eq!(buf.get_pixel(43, 30), [0, 0, 0, 0]);
+        // Disabled effects leave the buffer untouched.
+        let mut blank = RenderBuffer::new(64, 64).unwrap();
+        DrawingParser::render_drawing_effects(&mut blank, square, 0.0, 0.0, 1.0, None, None);
+        assert!(blank.pixels.iter().all(|b| *b == 0));
     }
 
     #[test]

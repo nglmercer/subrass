@@ -123,8 +123,15 @@ proofs, doc sync).
   basis first and composes rotations over it. Bounded, clamped ±8.
 - **#25 `ScaledBorderAndShadow`**: threaded from ScriptInfo; `no` maps script
   units 1:1 to video pixels for borders/shadows (default `yes` scales).
-- **#26 `LayoutResX/Y`**: parsed and validated; unused with a documented reason
-  (ASS-2 draft fields; PlayRes is authoritative).
+- **#26 `LayoutResX/Y`**: parsed, validated, and applied per libass
+  `ass_layout_res` + `init_font_scale` (blur and unscaled-border/shadow
+  denominators; both axes required; unset maps to the video size, the
+  libass storage-size role). Positioning/wrap stay PlayRes-based like
+  libass; `ScaledBorderAndShadow: no` keeps the documented 1:1 contract.
+- **#26b `Kerning:`**: parsed (`yes/no`, default off like libass) and
+  threaded to the OpenType shaper (`kern` feature; `liga`/`clig` off
+  under non-zero spacing, like libass). System-font discovery is
+  explicit (`load_system_fonts`, `system-fonts` feature, never WASM).
 - **#27 YCbCr matrix**: parsed and validated; documented as not applicable to
   this RGB pipeline.
 - **#28 Drawing scale**: corrected to `res_scale / 2^(mode-1)` (was multiplied);
@@ -494,8 +501,9 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
    resolution ratio); extreme angles degrade to empty glyphs instead of
    over-allocating. (`frx`/`fry` inverse-map and `\fay` per-run shear
    reset verified against libass references; all 67 gated fixtures pass.)
-4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
-   Indic/Arabic contextual forms); no system-font lookup. Cluster-aware
+4. Complex shaping landed (`harfrust` GSUB/GPOS + `unicode-bidi` runs,
+   arabic/hebrew/mixed-bidi/ligature/kerning gated G+L); opt-in native
+   system-font discovery (`system-fonts` feature). Cluster-aware
    deterministic fallback covers already-loaded faces.
 5. Unhinted coverage rasterizer: ~1px placement/AA differences versus
    libass/FreeType hinted outlines (measured, not gated, in reference tests).
@@ -506,7 +514,9 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
    styles 0/3 FIXME).
 8. `\K`/`\kf` sweep edges split at one device-space vertical line like
    libass (gated incl. rotation/shear/perspective combinations).
-9. `\fe` parses/stores/resets but does not remap charsets.
+9. `\fe` parses/stores/resets with a legacy-byte charset bridge
+   (`decode_font_encoding`); Unicode text stays render-neutral; no
+   charset-based font linking.
 10. CJK/U+200B line breaking follows UAX #14 / VSFilter (CJK runs
     break with punctuation/combining glue; U+3000 and U+200B break),
     while default libass builds without unibreak break at ASCII
@@ -514,3 +524,41 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
     gated).
 11. `\pbo` uses libass ascent/descent metrics: single-drawing lines preserve
     their ink anchor and mixed lines use the adjusted drawing ascent.
+
+## temp_plan.md completion pass (FreeType Win-metrics sizing, 2026-09-19)
+
+- **Win-metrics sizing** (`src/renderer/font.rs`, `shaper.rs`,
+  `glyph_cache.rs`, `compositor.rs`): FreeType sizes SFNT faces by the
+  OS/2 `usWinAscent`/`usWinDescent` sum, not hhea/upm (verified against
+  `ass_face_set_size` REAL_DIM, `ass_font_get_asc_desc`, `update_hb_size`,
+  and `ass_get_glyph_outline` DECO in `C:/tmp/libass-full`, plus ffmpeg
+  libass renders: Noto NA advances pin the 1906 divisor at 7.00px
+  pitch; hhea's 1304 inflated them 46% to 10.22px). Advances,
+  baselines, raster px scale, `\fax` pivots, and decoration bars now
+  use per-face Win metrics with hhea fallback. DejaVu is bit-identical
+  (Win == hhea): a pre/post reference diff showed 91/96 fixtures
+  byte-identical, with only sub-pixel decoration-bar alignment and
+  1-ulp box-edge wobbles (all inside gates).
+- **Regression tests**: `test_win_metrics_drive_ft_scale`,
+  `test_noto_advances_use_win_divisor` (proved sensitive: fails on the
+  hhea basis); deco continuity now exempts sub-threshold edge-AA rows
+  (per-box integer snapping can split a fractional bar edge; solid
+  rows must still span).
+- **Scaffolding removed**: `tmp_dbg_*` shaper tests,
+  `tests/dbg_bold.rs`, `tests/dbg_indic.rs`, `probe_tmp/`
+  (Noto OFL kept at `fonts/OFL-NotoSansDevanagari.txt` beside the
+  committed subset both new tests load).
+- **Reference state**: 87 pass, 7 known-divergent measured, 3 open
+  failures (`indic`: reference used a fontconfig fallback font, needs
+  an embedded-Noto fixture + regen; `transform-iclip`: one faint
+  levels-1–5 AA-tail row from vector-vs-bitmap stroke edges;
+  `transform-nondefault-playres`: both sides blank, fixture needs
+  retargeting + regen), 0 pending. `CONFORMANCE.md` table rebuilt from
+  this run; feature matrix and shaping/collection/`\fe`/system-font
+  rows corrected.
+- **Gates green**: `fmt --check`, `clippy -D warnings`, lib 411,
+  all-features 412, no-default 411, golden, corpus, robustness, bun 41,
+  typecheck, `cargo audit`, wasm-pack build, wasm32 check.
+  Environmental gaps (pre-existing, unrelated): `wasm-pack test`
+  needs Chrome (not installed); `cargo fuzz` hits MSVC LNK2001 on
+  cdylib link; ffmpeg reference regen needs a local ffmpeg binary.

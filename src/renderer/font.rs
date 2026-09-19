@@ -33,6 +33,10 @@ struct LoadedFont {
     /// ASS font weight (400 = normal, 700 = bold), from OS/2
     /// usWeightClass when available, else from the style flags.
     weight: u16,
+    /// OS/2 `usWinAscent`/`usWinDescent`: FreeType sizes SFNT faces
+    /// by their sum, so these drive the face's pixel scale.
+    win_ascent: Option<u16>,
+    win_descent: Option<u16>,
     is_italic: bool,
     /// Underline/strikeout metrics for decorations.
     decorations: DecorationMetrics,
@@ -45,13 +49,18 @@ struct LoadedFont {
 
 /// Underline/strikeout font metrics (libass `ass_get_glyph_outline`
 /// `DECO_*`): `post` underline + OS/2 strikeout in font units plus
-/// units-per-em. A `None` member means "draw no bar" — libass skips
-/// the bar when its table is missing or fails the validity gate
-/// (underline needs position <= 0 and thickness > 0, strikeout
-/// needs position >= 0 and size > 0).
+/// the FreeType size divisor. A `None` member means "draw no bar" —
+/// libass skips the bar when its table is missing or fails the
+/// validity gate (underline needs position <= 0 and thickness > 0,
+/// strikeout needs position >= 0 and size > 0).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecorationMetrics {
     pub units_per_em: u16,
+    /// FreeType size divisor in font units (OS/2 Win sum when the
+    /// table parses, else the raster height): bar positions scale by
+    /// `em_px / scale_height`, matching libass `y_scale`. Zero only
+    /// for a default-constructed value, which draws no bars.
+    pub scale_height: f32,
     /// `(position, thickness)`; position <= 0 (below baseline).
     pub underline: Option<(i16, i16)>,
     /// `(position, size)`; position >= 0 (above baseline).
@@ -215,8 +224,17 @@ impl FontManager {
                 format!("Failed to parse font '{}' face {}: {}", name, face_index, e)
             })?,
         );
+        let win_height = meta
+            .as_ref()
+            .and_then(|m| match (m.win_ascent, m.win_descent) {
+                (Some(a), Some(d)) if u32::from(a) + u32::from(d) > 0 => {
+                    Some(f32::from(a) + f32::from(d))
+                }
+                _ => None,
+            });
         let decorations = DecorationMetrics {
             units_per_em: meta.as_ref().and_then(|m| m.units_per_em).unwrap_or(0),
+            scale_height: win_height.unwrap_or_else(|| font.height_unscaled().max(1.0)),
             underline: meta.as_ref().and_then(|m| m.underline),
             strikeout: meta.as_ref().and_then(|m| m.strikeout),
         };
@@ -225,6 +243,8 @@ impl FontManager {
             name: name.to_lowercase(),
             font,
             weight: weight.clamp(1, 1000),
+            win_ascent: meta.as_ref().and_then(|m| m.win_ascent),
+            win_descent: meta.as_ref().and_then(|m| m.win_descent),
             is_italic,
             decorations,
             data: Arc::new(data.to_vec()),
@@ -384,6 +404,50 @@ impl FontManager {
         self.fonts.get(index).map(|f| f.decorations)
     }
 
+    /// FreeType-compatible face metrics in font units:
+    /// `(ascender, descender, height)` with a negative descender.
+    /// FreeType sizes SFNT faces (`FT_SIZE_REQUEST_TYPE_REAL_DIM`,
+    /// which libass requests) by the OS/2 `usWinAscent` /
+    /// `usWinDescent` sum — not hhea — so the ascender/descender
+    /// values come from OS/2 too when usable (na10 probe: Noto
+    /// advances pin the 1906 divisor; hhea's 1304 inflates them
+    /// 46%). Without usable Win metrics the raster (hhea-basis)
+    /// values are returned. `None` for unknown ids.
+    pub fn ft_metrics(&self, index: usize) -> Option<(f32, f32, f32)> {
+        let loaded = self.fonts.get(index)?;
+        match (loaded.win_ascent, loaded.win_descent) {
+            (Some(a), Some(d)) if u32::from(a) + u32::from(d) > 0 => {
+                Some((f32::from(a), -f32::from(d), f32::from(a) + f32::from(d)))
+            }
+            _ => Some((
+                loaded.font.ascent_unscaled(),
+                loaded.font.descent_unscaled(),
+                loaded.font.height_unscaled().max(1.0),
+            )),
+        }
+    }
+
+    /// `ab_glyph` px-scale multiplier for an ASS font size: the raster
+    /// scales by its own (hhea-basis) height, so requesting
+    /// `size * px_ratio` yields FreeType-basis pixels. Identity for
+    /// Win==hhea faces (DejaVu), degenerate faces, and unknown ids.
+    pub fn px_ratio(&self, index: usize) -> f32 {
+        let (Some(loaded), Some((_, _, ft_height))) =
+            (self.fonts.get(index), self.ft_metrics(index))
+        else {
+            return 1.0;
+        };
+        if ft_height <= 0.0 {
+            return 1.0;
+        }
+        let ratio = loaded.font.height_unscaled() / ft_height;
+        if ratio.is_finite() && ratio > 0.0 {
+            ratio
+        } else {
+            1.0
+        }
+    }
+
     /// Get number of loaded fonts
     pub fn font_count(&self) -> usize {
         self.fonts.len()
@@ -477,6 +541,10 @@ struct FontMetadata {
     underline: Option<(i16, i16)>,
     /// OS/2 strikeout `(position, size)` when gated valid.
     strikeout: Option<(i16, i16)>,
+    /// OS/2 `usWinAscent`/`usWinDescent` (offsets 74/76) when the
+    /// table parses: FreeType sizes SFNT faces by their sum.
+    win_ascent: Option<u16>,
+    win_descent: Option<u16>,
     /// `head` unitsPerEm when nonzero.
     units_per_em: Option<u16>,
 }
@@ -525,6 +593,13 @@ fn inspect_font_metadata_at(data: &[u8], face_index: u32) -> Option<FontMetadata
             if pos >= 0 && size > 0 {
                 meta.strikeout = Some((pos, size));
             }
+        }
+        // OS/2.usWinAscent at 74, usWinDescent at 76: the FreeType
+        // size divisor (accepted as parsed; a zero sum falls back
+        // to the raster height at use).
+        if let (Some(win_asc), Some(win_desc)) = (read_u16(os2, 74), read_u16(os2, 76)) {
+            meta.win_ascent = Some(win_asc);
+            meta.win_descent = Some(win_desc);
         }
     }
 
@@ -775,7 +850,32 @@ mod tests {
         assert_eq!(deco.units_per_em, 2048);
         assert_eq!(deco.underline, Some((-130, 90)));
         assert_eq!(deco.strikeout, Some((530, 102)));
+        // DejaVu Win metrics equal hhea: bars scale by 2384.
+        assert_eq!(deco.scale_height, 2384.0);
         assert!(fm.decoration_metrics(9).is_none());
+    }
+
+    #[test]
+    fn test_win_metrics_drive_ft_scale() {
+        // FreeType sizes SFNT faces by OS/2 usWinAscent+usWinDescent
+        // (libass na10 probe pins Noto's 1906 divisor; hhea's 1304
+        // inflates advances 46%).
+        let mut fm = FontManager::new();
+        fm.load_font("DejaVu Sans", get_fallback_font(), false, false)
+            .unwrap();
+        let noto = std::fs::read("fonts/NotoSansDevanagari.ttf").unwrap();
+        fm.load_font("Noto Sans Devanagari", &noto, false, false)
+            .unwrap();
+        assert_eq!(fm.ft_metrics(0), Some((1901.0, -483.0, 2384.0)));
+        assert_eq!(fm.px_ratio(0), 1.0);
+        assert_eq!(fm.ft_metrics(1), Some((1348.0, -558.0, 1906.0)));
+        assert!((fm.px_ratio(1) - 1304.0 / 1906.0).abs() < 1e-6);
+        assert_eq!(
+            fm.decoration_metrics(1).expect("metrics").scale_height,
+            1906.0
+        );
+        assert_eq!(fm.ft_metrics(9), None);
+        assert_eq!(fm.px_ratio(9), 1.0);
     }
 
     #[test]
@@ -1042,7 +1142,7 @@ mod tests {
         let mut collection = vec![0u8; 20];
         let mut offsets = Vec::new();
         for _ in 0..2 {
-            while collection.len() % 4 != 0 {
+            while !collection.len().is_multiple_of(4) {
                 collection.push(0);
             }
             let base = collection.len();

@@ -44,15 +44,23 @@ impl GlyphCache {
     /// Get or rasterize a glyph.
     ///
     /// `font_id` is the stable [`FontManager`](super::font::FontManager)
-    /// identity of `font`. `faux_bold`/`faux_italic` describe synthesis the
-    /// cache must apply (true only when the face lacks the style); they are
-    /// part of the key because they change rasterization.
+    /// identity of `font`. `px_adjust` is the face's
+    /// [`px_ratio`](super::font::FontManager::px_ratio): `ab_glyph`
+    /// scales by the hhea-basis height, so the requested px scale is
+    /// `font_size * px_adjust` for FreeType-basis pixels (identity
+    /// for Win==hhea faces). It is a pure function of `font_id`, so
+    /// the cache key needs no extra member. `faux_bold`/`faux_italic`
+    /// describe synthesis the cache must apply (true only when the
+    /// face lacks the style); they are part of the key because they
+    /// change rasterization.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_rasterize(
         &mut self,
         font_id: usize,
         font: &FontArc,
         glyph_id: GlyphId,
         font_size: f64,
+        px_adjust: f32,
         faux_bold: bool,
         faux_italic: bool,
     ) -> &CachedGlyph {
@@ -69,7 +77,8 @@ impl GlyphCache {
         if let Some(entry) = self.cache.get_mut(&key) {
             entry.1 = tick;
         } else {
-            let glyph = Self::rasterize(font, glyph_id, font_size, faux_bold, faux_italic);
+            let glyph =
+                Self::rasterize(font, glyph_id, font_size, px_adjust, faux_bold, faux_italic);
             self.cache.insert(key.clone(), (glyph, tick));
             self.evict_if_needed(&key);
         }
@@ -108,13 +117,17 @@ impl GlyphCache {
         font: &FontArc,
         glyph_id: GlyphId,
         font_size: f64,
+        px_adjust: f32,
         faux_bold: bool,
         faux_italic: bool,
     ) -> CachedGlyph {
         // Degenerate scales never reach ab_glyph: non-finite and
         // non-positive sizes are empty, and past f32::MAX the px scale
-        // cannot even be represented (ab_glyph takes f32).
-        if !font_size.is_finite() || font_size <= 0.0 || font_size > f64::from(f32::MAX) {
+        // cannot even be represented (ab_glyph takes f32). The guard
+        // runs on the adjusted px size, so a degenerate multiplier
+        // degrades to empty rather than corrupting the raster.
+        let px_size = font_size * f64::from(px_adjust);
+        if !px_size.is_finite() || px_size <= 0.0 || px_size > f64::from(f32::MAX) {
             return CachedGlyph {
                 bitmap: Vec::new(),
                 width: 0,
@@ -124,12 +137,12 @@ impl GlyphCache {
                 advance: 0.0,
             };
         }
-        let scale = PxScale::from(font_size as f32);
+        let scale = PxScale::from(px_size as f32);
         let scaled = font.as_scaled(scale);
 
         // Get glyph outline - need to convert GlyphId to Glyph
         let glyph =
-            glyph_id.with_scale_and_position(PxScale::from(font_size as f32), point(0.0, 0.0));
+            glyph_id.with_scale_and_position(PxScale::from(px_size as f32), point(0.0, 0.0));
         let outlined = scaled.outline_glyph(glyph);
 
         match outlined {
@@ -170,27 +183,22 @@ impl GlyphCache {
                     }
                 });
 
-                // Apply faux bold by dilating
+                // Faux bold (libass/FT embolden): horizontal-only
+                // ~1px spread at half coverage. Full-pixel dilation in
+                // both axes overshoots badly (probe at 24px: ours +21%
+                // ink vs libass +4%, with identical top/bottom/left
+                // edges and +1px total width over five glyphs).
                 if faux_bold {
                     let mut bold_bitmap = bitmap.clone();
                     for y in 0..height as i32 {
                         for x in 0..width as i32 {
                             let idx = (y as u32 * width + x as u32) as usize;
-                            if bitmap[idx] > 0 {
-                                // Expand to neighbors
-                                for dy in -1i32..=1 {
-                                    for dx in 0i32..=1 {
-                                        let nx = x + dx;
-                                        let ny = y + dy;
-                                        if nx >= 0
-                                            && nx < width as i32
-                                            && ny >= 0
-                                            && ny < height as i32
-                                        {
-                                            let nidx = (ny as u32 * width + nx as u32) as usize;
-                                            bold_bitmap[nidx] = bold_bitmap[nidx].max(bitmap[idx]);
-                                        }
-                                    }
+                            let cov = bitmap[idx];
+                            if cov > 0 {
+                                let nx = x + 1;
+                                if nx < width as i32 {
+                                    let nidx = (y as u32 * width + nx as u32) as usize;
+                                    bold_bitmap[nidx] = bold_bitmap[nidx].max(cov / 2);
                                 }
                             }
                         }
@@ -198,10 +206,11 @@ impl GlyphCache {
                     bitmap = bold_bitmap;
                 }
 
-                // Apply faux italic: shear top rows right by tan(12°) ≈ 0.21
-                // per row, widening the bitmap to fit.
+                // Faux italic: shear top rows right (libass probe:
+                // stem slope ≈ 0.36 over 14px, vs tan(12°) ≈ 0.21),
+                // widening the bitmap to fit.
                 let (bitmap, width, bearing_x) = if faux_italic {
-                    let shear = 0.2126_f32;
+                    let shear = 0.36_f32;
                     let extra = (height as f32 * shear).ceil().max(1.0) as u32;
                     let new_width = width.saturating_add(extra);
                     // u64 product: `new_width * height` in u32 could wrap
@@ -303,13 +312,13 @@ mod tests {
 
         let mut cache = GlyphCache::new(64);
         let gid = m0.font.glyph_id('A');
-        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, false);
         assert_eq!(cache.len(), 1);
         // Same glyph ID/size, different font: must be a second entry.
-        cache.get_or_rasterize(m1.id, m1.font, gid, 48.0, false, false);
+        cache.get_or_rasterize(m1.id, m1.font, gid, 48.0, 1.0, false, false);
         assert_eq!(cache.len(), 2);
         // Repeat lookup hits, no growth.
-        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, false);
         assert_eq!(cache.len(), 2);
     }
 
@@ -319,9 +328,9 @@ mod tests {
         let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
         let mut cache = GlyphCache::new(64);
         let gid = m0.font.glyph_id('A');
-        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
-        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, true, false);
-        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, true);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, true, false);
+        cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, true);
         assert_eq!(cache.len(), 3);
     }
 
@@ -335,11 +344,11 @@ mod tests {
         let m0 = fm.find_font_with_match("DejaVu Sans", false, false);
         let mut cache = GlyphCache::new(64);
         let gid = m0.font.glyph_id('A');
-        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 100_000.0, false, false);
+        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 100_000.0, 1.0, false, false);
         assert_eq!((g.width, g.height), (0, 0));
         assert!(g.bitmap.is_empty());
         // Sane sizes still rasterize.
-        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+        let g = cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, false);
         assert!(g.width > 0 && g.height > 0);
         assert!(!g.bitmap.is_empty());
     }
@@ -354,7 +363,7 @@ mod tests {
         let mut cache = GlyphCache::new(64);
         let gid = m0.font.glyph_id('A');
         for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-            let g = cache.get_or_rasterize(m0.id, m0.font, gid, 1e12, bold, italic);
+            let g = cache.get_or_rasterize(m0.id, m0.font, gid, 1e12, 1.0, bold, italic);
             assert_eq!((g.width, g.height), (0, 0), "bold={bold} italic={italic}");
             assert!(g.bitmap.is_empty());
         }
@@ -367,7 +376,7 @@ mod tests {
         let mut cache = GlyphCache::new(4);
         for (i, ch) in "abcdefgh".chars().enumerate() {
             let gid = m0.font.glyph_id(ch);
-            cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, false, false);
+            cache.get_or_rasterize(m0.id, m0.font, gid, 48.0, 1.0, false, false);
             // The just-inserted glyph is always present
             let key = GlyphCacheKey {
                 font_id: m0.id,

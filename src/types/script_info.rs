@@ -81,6 +81,9 @@ pub struct ScriptInfo {
     pub layout_res_x: Option<u32>,
     pub layout_res_y: Option<u32>,
     pub scaled_border_and_shadow: bool,
+    /// libass `Kerning:` header (default off: `ass_new_track` uses
+    /// `calloc`, so `track->Kerning` is 0 unless the script enables it).
+    pub kerning: bool,
     pub y_cb_cr_matrix: YCbCrMatrix,
     pub wrap_style: u32,
     pub original_script: Option<String>,
@@ -104,6 +107,7 @@ impl Default for ScriptInfo {
             layout_res_x: None,
             layout_res_y: None,
             scaled_border_and_shadow: true,
+            kerning: false,
             y_cb_cr_matrix: YCbCrMatrix::None,
             wrap_style: 0,
             original_script: None,
@@ -167,6 +171,18 @@ impl ScriptInfo {
                     }
                 };
             }
+            "kerning" => {
+                self.kerning = match value.trim().to_lowercase().as_str() {
+                    "yes" | "true" | "1" => true,
+                    "no" | "false" | "0" => false,
+                    _ => {
+                        return Err(format!(
+                            "Invalid Kerning value (expected yes/no): {}",
+                            value
+                        ))
+                    }
+                };
+            }
             "y cbcr matrix" | "ycbcr matrix" => {
                 self.y_cb_cr_matrix = value.parse().map_err(|e: String| e)?;
             }
@@ -219,6 +235,23 @@ mod tests {
         assert_eq!(info.play_res_x, 1920);
         assert_eq!(info.play_res_y, 1080);
         assert!(info.scaled_border_and_shadow);
+        assert!(!info.kerning);
+    }
+
+    #[test]
+    fn test_kerning_header_parses_like_libass_bool() {
+        let mut info = ScriptInfo::default();
+        for (value, expected) in [
+            ("yes", true),
+            ("Yes", true),
+            ("1", true),
+            ("no", false),
+            ("0", false),
+        ] {
+            info.set_field("Kerning", value).unwrap();
+            assert_eq!(info.kerning, expected, "{value}");
+        }
+        assert!(info.set_field("Kerning", "maybe").is_err());
     }
 
     #[test]

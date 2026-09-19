@@ -26,8 +26,12 @@ impl AssDocument {
         }
     }
 
-    /// Parse an ASS file from a string
+    /// Parse an ASS file from a string. A leading UTF-8 BOM is
+    /// stripped: real-world files often carry one, and without the
+    /// strip the `[Script Info]` header (and its PlayRes) is lost
+    /// because the first section line no longer starts with `[`.
     pub fn parse(input: &str) -> Result<Self, ParseError> {
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
         let mut doc = AssDocument::new();
         let mut current_section: Option<Section> = None;
         let mut section_lines: Vec<&str> = Vec::new();
@@ -308,6 +312,25 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
         let doc = AssDocument::parse("").unwrap();
         assert!(doc.styles.is_empty());
         assert!(doc.events.is_empty());
+    }
+
+    /// A leading UTF-8 BOM must not hide `[Script Info]`: without the
+    /// strip, the first section line fails the `[` match and PlayRes
+    /// silently falls back to the 1920x1080 default.
+    #[test]
+    fn test_parse_bom_preserves_script_info() {
+        // Non-default PlayRes: without the strip the header is lost
+        // and these read back the 1920x1080 default.
+        let doc_text = TEST_ASS
+            .replace("PlayResX: 1920", "PlayResX: 384")
+            .replace("PlayResY: 1080", "PlayResY: 216");
+        let bom = format!("\u{feff}{doc_text}");
+        let doc = AssDocument::parse(&bom).unwrap();
+        assert_eq!(doc.script_info.title.as_deref(), Some("Test"));
+        assert_eq!(doc.script_info.play_res_x, 384);
+        assert_eq!(doc.script_info.play_res_y, 216);
+        assert_eq!(doc.styles.len(), 1);
+        assert_eq!(doc.events.len(), 2);
     }
 
     #[test]

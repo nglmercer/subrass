@@ -34,31 +34,38 @@ Gates: bbox IoU ≥ 0.70, ink-count ratio within [0.5, 2.0], block mean error
 (`tests/golden.rs`, byte-exact self-comparison) provide exact regression
 detection on top.
 
-## Latest reference results (all 67 gated fixtures pass, 0 pending)
+## Latest reference results (87 pass, 7 known-divergent measured, 3 open failures, 0 pending)
 
 | Fixture | IoU | Ink ratio | Mean | Hard |
 |---|---|---|---|---|
 | a-an | 0.950 | 0.95 | 11.25 | 0.0099 |
+| a-malformed-first | 0.878 | 0.91 | 11.17 | 0.0000 |
 | alignment | 0.949 | 0.93 | 8.87 | 0.0000 |
 | alignment-bare-first | 0.878 | 0.91 | 11.17 | 0.0000 |
-| a-malformed-first | 0.878 | 0.91 | 11.17 | 0.0000 |
 | an-a | 0.948 | 0.95 | 8.80 | 0.0000 |
 | an-an | 0.937 | 0.93 | 9.59 | 0.0000 |
 | an-malformed-first | 0.878 | 0.91 | 11.17 | 0.0000 |
+| arabic | 0.943 | 0.93 | 10.35 | 0.0104 |
 | border-shadow | 0.891 | 1.07 | 18.94 | 0.1100 |
-| clip | 0.814 | 1.55 | 21.80 | 0.1200 |
-| deco | 0.940 | 0.86 | 15.65 | 0.0208 |
-| deco-karaoke | 0.788 | 0.87 | 18.87 | 0.0000 |
-| deco-rotated | 0.964 | 0.96 | 12.40 | 0.0000 |
-| drawing | 0.828 | 0.83 | 11.94 | 0.0826 |
+| clip | 0.975 | 1.10 | 16.14 | 0.0625 |
+| deco | 0.895 | 0.85 | 15.61 | 0.0312 |
+| deco-karaoke | 0.788 | 0.86 | 19.95 | 0.0152 |
+| deco-rotated | 0.964 | 0.95 | 13.49 | 0.0000 |
+| drawing | 0.891 | 0.89 | 4.33 | 0.0000 |
+| effect-banner | 0.950 | 0.92 | 17.60 | 0.0526 |
+| effect-scroll | 0.990 | 0.91 | 7.44 | 0.0000 |
 | fad-2args | 0.945 | 0.91 | 6.23 | 0.0000 |
 | fad-7args | 0.945 | 0.91 | 6.23 | 0.0000 |
+| fad-fade | 0.929 | 0.90 | 8.67 | 0.0000 |
 | fade | 0.945 | 0.90 | 8.62 | 0.0000 |
 | fade-2args | 0.945 | 0.91 | 6.23 | 0.0000 |
 | fade-7args | 0.945 | 0.91 | 6.23 | 0.0000 |
 | fade-fad | 0.939 | 0.94 | 3.22 | 0.0000 |
 | fade-invalid-arity | 0.926 | 0.91 | 12.39 | 0.0000 |
-| fad-fade | 0.929 | 0.90 | 8.67 | 0.0000 |
+| fe-charset | 0.954 | 0.92 | 13.15 | 0.0089 |
+| font-fallback | 0.856 | 0.80 | 57.80 | 0.5043 |
+| hebrew | 0.900 | 0.94 | 7.85 | 0.0000 |
+| indic | 0.523 | 1.55 | 65.04 | 0.7079 |
 | karaoke | 0.939 | 0.94 | 12.04 | 0.0280 |
 | karaoke-early | 0.939 | 0.94 | 10.90 | 0.0132 |
 | karaoke-kf | 0.918 | 0.93 | 12.25 | 0.0000 |
@@ -72,7 +79,10 @@ detection on top.
 | karaoke-kf-late | 0.918 | 0.93 | 12.77 | 0.0093 |
 | karaoke-ko | 0.925 | 0.88 | 12.46 | 0.0000 |
 | karaoke-late | 0.939 | 0.94 | 11.59 | 0.0227 |
+| kerning | 0.966 | 0.94 | 11.06 | 0.0000 |
 | layers | 0.913 | 0.92 | 8.34 | 0.0091 |
+| ligature | 0.947 | 0.93 | 11.13 | 0.0000 |
+| mixed-bidi | 0.971 | 0.92 | 10.58 | 0.0041 |
 | mixed-sizes | 0.958 | 0.91 | 11.03 | 0.0000 |
 | move | 0.947 | 0.93 | 7.27 | 0.0000 |
 | move-before-pos | 0.877 | 0.94 | 9.52 | 0.0000 |
@@ -80,31 +90,59 @@ detection on top.
 | move-extra-args | 0.946 | 0.90 | 15.99 | 0.0122 |
 | move-move | 0.897 | 0.96 | 7.41 | 0.0000 |
 | move-reversed-times | 0.947 | 0.93 | 7.27 | 0.0000 |
-| opaque-box | 0.992 | 0.99 | 8.80 | 0.0000 |
-| opaque-box-multiline | 1.000 | 1.00 | 6.59 | 0.0000 |
+| numeric-prefix-tags | 0.946 | 0.92 | 16.91 | 0.0091 |
+| opaque-box | 0.932 | 0.99 | 9.82 | 0.0000 |
+| opaque-box-multiline | 0.982 | 1.01 | 6.50 | 0.0000 |
 | org-extra-args | 0.965 | 1.06 | 10.08 | 0.0000 |
 | org-org | 0.967 | 1.05 | 9.91 | 0.0000 |
+| pbo-mixed | 0.904 | 0.84 | 6.91 | 0.0000 |
+| pbo-negative | 0.821 | 0.83 | 0.92 | 0.0000 |
+| pbo-positive | 0.856 | 0.86 | 7.49 | 0.0000 |
 | plain | 0.951 | 0.90 | 10.64 | 0.0000 |
 | pos-before-move | 0.940 | 0.93 | 7.43 | 0.0000 |
 | pos-extra-args | 0.946 | 0.90 | 15.99 | 0.0122 |
-| position | 0.941 | 0.90 | 9.11 | 0.0000 |
 | pos-pos | 0.924 | 0.90 | 12.70 | 0.0135 |
-| rect-vector-clip | 0.849 | 0.89 | 11.35 | 0.0000 |
+| position | 0.941 | 0.90 | 9.11 | 0.0000 |
+| rect-vector-clip | 0.861 | 0.88 | 10.51 | 0.0000 |
 | relative-fs | 0.978 | 0.87 | 11.61 | 0.0000 |
 | relative-fs-early | 0.972 | 0.87 | 11.06 | 0.0000 |
 | relative-fs-late | 0.972 | 0.91 | 13.86 | 0.0053 |
 | reset | 0.941 | 0.93 | 13.28 | 0.0000 |
-| reset-drawing | 0.889 | 0.85 | 16.43 | 0.0870 |
+| reset-drawing | 0.934 | 0.90 | 5.95 | 0.0000 |
 | rotation | 0.965 | 1.06 | 10.08 | 0.0000 |
 | shear | 0.972 | 1.01 | 10.85 | 0.0000 |
 | shear-rotation | 0.988 | 1.04 | 13.06 | 0.0412 |
 | transform | 0.879 | 1.34 | 13.61 | 0.0226 |
+| transform-an | 0.924 | 0.91 | 11.62 | 0.0000 |
+| transform-clip | 0.975 | 0.98 | 10.53 | 0.0000 |
+| transform-discrete | 0.913 | 0.95 | 15.21 | 0.0000 |
+| transform-fade | 0.945 | 0.89 | 11.86 | 0.0130 |
+| transform-iclip | 0.649 | 0.61 | 11.51 | 0.0000 |
+| transform-karaoke | 0.939 | 0.95 | 12.38 | 0.0000 |
+| transform-nested | 0.887 | 1.00 | 9.60 | 0.0000 |
+| transform-nested-accel | 0.921 | 0.93 | 7.95 | 0.0000 |
+| transform-org | 0.967 | 1.03 | 8.05 | 0.0000 |
+| transform-pos | 0.945 | 0.93 | 10.97 | 0.0286 |
+| transform-q | 0.958 | 0.94 | 13.06 | 0.0042 |
 | vector-clip | 0.820 | 0.91 | 7.43 | 0.0000 |
-| vector-rect-clip | 0.851 | 0.91 | 9.94 | 0.0339 |
-| vector-vector-clip | 0.928 | 0.99 | 7.42 | 0.0000 |
+| vector-rect-clip | 0.863 | 0.89 | 8.98 | 0.0000 |
+| vector-vector-clip | 0.950 | 0.97 | 7.08 | 0.0000 |
 | wrap | 0.985 | 0.92 | 10.67 | 0.0000 |
-| wrap-combining | 0.978 | 0.97 | 9.37 | 0.0000 |
-| wrap-nbsp | 0.946 | 0.92 | 15.76 | 0.0253 |
+| wrap-cjk | 0.381 | 1.49 | 68.50 | 0.7402 |
+| wrap-cjk-punct | 0.420 | 1.57 | 57.07 | 0.5199 |
+| wrap-combining | 1.000 | 0.99 | 6.31 | 0.0000 |
+| wrap-mixed | 0.377 | 1.32 | 58.34 | 0.5165 |
+| wrap-nbsp | 0.946 | 0.91 | 12.64 | 0.0000 |
+| wrap-zwsp | 0.373 | 0.91 | 66.44 | 0.6212 |
+
+Open failures (not passing, not known-divergent): `indic` (reference used a
+fontconfig fallback Devanagari font, so it is environment-dependent; the fix
+is an embedded-Noto fixture plus a regenerated reference),
+`transform-iclip` (one faint AA-tail row: libass vector strokes leave levels
+1–5 where bitmap dilation cuts hard; bbox IoU on a 2-row sliver amplifies it),
+`transform-nondefault-playres` (both sides render blank; the fixture proves
+nothing and needs retargeting plus a regenerated reference). No
+`font-collection` reference fixture exists yet.
 
 Known-divergent (measured, not gated): `effect-banner`, `effect-scroll`
 (libass ignores legacy effects and renders static text), `font-fallback`
@@ -134,7 +172,10 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\fscx`, `\fscy` | ✓ | ✓ | mixed-sizes/transform G+L | Supported |
 | `\fax`, `\fay` pre-rotation shear + `\fay` baseline slant (per-run reset) | ✓ | `test_shear_applies_to_rotated_text_at_render`, `test_fay_baseline_shear_*` | shear G+L (IoU 0.972), shear-rotation G+L (IoU 0.988) | Supported |
 | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad`, `\be`, `\blur` | ✓ | `test_scaled_*` | border-shadow G+L | Supported |
-| `ScaledBorderAndShadow` yes/no | ✓ | `test_scaled_*` | — | Supported |
+| `ScaledBorderAndShadow` yes/no (unscaled = 1:1 video px: VSFilter/legacy-libass; current libass without storage size ignores the flag) | ✓ | `test_scaled_*` | — | Supported |
+| `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators; unset = video size) | ✓ | `test_layout_res_drives_unscaled_borders_like_libass` | — | Supported |
+| `Kerning:` header (default off, like libass `calloc` track); `liga`/`clig` off under non-zero `\fsp` | ✓ | `test_opentype_kerning_matches_libass_default_off`, `test_kerning_header_parses_like_libass_bool` | alignment G+L (mean_err 8.87) | Supported |
+| OpenType shaping (`harfrust` GSUB/GPOS + bidi visual runs; `.ttc`/`.otc` all faces; explicit native system fonts) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_system_font_discovery_is_explicit_and_idempotent` | — | Supported |
 | `\clip`, `\iclip` rect + vector (separate state: later rect replaces + flips mode, first vector retained, both render) | ✓ | `test_clip_libass_rect_vector_semantics` | clip/vector-clip/rect-vector-clip/vector-rect-clip/vector-vector-clip G+L | Supported |
 | Drawings `\pN`, `\pbo`, `m n l b s p c` (bbox min preserved: advance = width, ink at pen + min; `\kf` splits at ink-left + frac × advance) | ✓ | `test_drawing_preserves_min_*`, `test_pbo_shifts_drawing`, `test_kf_drawing_split_at_fractional_scale` | drawing G+L (IoU 0.828), reset-drawing G+L (IoU 0.889) | Supported (B-splines are subdivided; `\pbo` uses libass asc/desc line metrics) |
 | `\fad`, `\fade` (first fade tag wins, libass `PARSED_FADE`) | ✓ | `test_fad_fade_first_wins_both_orders` | fade/fad-fade/fade-fad G+L | Supported |
@@ -146,10 +187,10 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\an`, legacy `\a` (first tag wins, libass `PARSED_A`; `\a4`/`\a8` quirk; bare/out-of-range resets to style) | ✓ | `test_alignment_first_tag_applies_event_wide`, `test_parse_legacy_a_quirk_and_range` | alignment/an-an/a-an/an-a G+L | Supported |
 | `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
-| `\fe` (parsed/stored/reset, no charset remap; render-neutral by test) | ✓ | `test_fe_resolve_and_reset`, `test_fe_encoding_is_render_neutral` | — | Partial |
+| `\fe` (legacy-byte charset bridge; Unicode text render-neutral; parsed/stored/reset) | ✓ | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_fe_encoding_is_render_neutral`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Supported (byte decoding; no charset-based font linking) |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
-| Complex shaping (RTL, ligatures, Indic/Arabic) | — | — | — | Unsupported (LTR `ab_glyph` only; roadmap below) |
-| `.ttc`/`.otc` collections | — | `test_font_collections_rejected` | — | Rejected with message (by design) |
+| Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning G+L; indic G, L open (fallback-font reference) | Supported; Indic reference pending an embedded-Noto fixture |
+| `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_invalid_font_collections_rejected` | — | Supported (no reference fixture yet) |
 
 ## Known divergences (intentional)
 
@@ -171,9 +212,12 @@ the harness reports it as pending (never as a pass) in normal mode, and
    now match libass: per-glyph underline/strikeout bars follow shear and
    rotation, keep primary color under `\kf` swipes, and use post/OS/2
    metrics; only minor AA edge differences remain.
-6. No system-font discovery (by design for WASM determinism): only the
-   built-in fallback, `[Fonts]` auto-loads, and explicit `load_font`
-   faces participate, in deterministic load order.
+6. No implicit system-font discovery: WASM builds stay deterministic
+   (built-in fallback, `[Fonts]` auto-loads, and explicit `load_font`
+   faces in load order). Native builds may opt in with the
+   `system-fonts` feature, which loads each discovered family once
+   after explicit faces
+   (`test_system_font_discovery_is_explicit_and_idempotent`).
 7. Legacy `Banner`/`Scroll` render with VSFilter timing while libass
    ignores them (measured as known-divergent, never gated).
 8. CJK and U+200B line breaking: default libass builds (no unibreak)
@@ -187,25 +231,15 @@ the harness reports it as pending (never as a pass) in normal mode, and
    `desc = pbo`), so single-drawing lines keep their ink anchored while mixed
    text/drawing lines use the drawing's adjusted ascent.
 
-## Complex-shaping roadmap (deferred, not forgotten)
+## Complex shaping (landed)
 
-Full shaping (rustybuzz + a bidi algorithm) is the largest remaining
-compatibility gap and is deliberately deferred: it touches every
-consumer of glyph advances (layout, wrapping, karaoke spans, caches),
-and landing it safely needs its own reference-fixture pass. When it
-lands, the shape must be:
-
-- `rustybuzz` for glyph substitution/positioning (ligatures, kerning,
-  Arabic/Indic contextual forms, mark attachment) plus `unicode-bidi`
-  (or equivalent) for visual run order, replacing scalar `ab_glyph`
-  advances everywhere they are consumed today;
-- cluster-aware fallback extended from combining-mark clusters
-  (`cluster_font_picks`) to whole shaped runs;
-- layout, wrapping, karaoke, and rendering all consuming the same
-  shaped advances (the current invariant — measurement shares
-  shaping's fallback picks — must hold for shaped runs too);
-- new libass fixtures for Arabic joining, mixed LTR/RTL, Indic
-  reordering, ligatures, and kerned pairs, gated like the rest.
-
-Until then the renderer stays deterministically LTR/scalar (with an
-RTL warning in `warnings()`) rather than shipping half-shaped text.
+Shaping uses `harfrust` for GSUB/GPOS substitution/positioning plus
+`unicode-bidi` visual runs, with cluster-aware fallback
+(`cluster_font_picks`) extended to whole shaped runs. Measurement,
+wrapping, layout, karaoke, and rendering all consume the same shaped
+advances. Gated by `test_opentype_shaping_uses_gsub_bidi_and_marks`
+and the arabic/hebrew/mixed-bidi/ligature/kerning fixtures (G+L);
+`indic` renders real Devanagari through Noto (`fonts/`, OFL) with
+`test_noto_advances_use_win_divisor` pinning the FreeType Win-metrics
+scale, but its libass reference still needs an embedded-Noto fixture
+plus regeneration (see open failures above).

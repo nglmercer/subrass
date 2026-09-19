@@ -3,8 +3,10 @@ use encoding_rs::{
     Encoding, BIG5, EUC_KR, GBK, ISO_8859_2, ISO_8859_7, ISO_8859_8, SHIFT_JIS, WINDOWS_1251,
     WINDOWS_1252, WINDOWS_1254, WINDOWS_1256, WINDOWS_1257, WINDOWS_1258, WINDOWS_874,
 };
-use rustybuzz::{BufferClusterLevel, Direction, UnicodeBuffer};
-use unicode_bidi::BidiInfo;
+use harfrust::{
+    BufferClusterLevel, Direction, Feature, FontRef, ShapeOptions, ShaperData, Tag, UnicodeBuffer,
+};
+use unicode_bidi::{BidiInfo, Level};
 
 use crate::types::Color;
 
@@ -48,7 +50,7 @@ pub struct ShapedLine {
     pub missing_glyphs: u32,
 }
 
-/// A raster face paired with the original sfnt bytes used by rustybuzz.
+/// A raster face paired with the original sfnt bytes used by harfrust.
 /// `FontArc` remains the rasterizer source of truth; the byte slice and
 /// collection index are only used for OpenType substitutions/positioning.
 #[derive(Clone, Copy)]
@@ -57,6 +59,14 @@ pub struct ShapingFont<'a> {
     pub raster: &'a FontArc,
     pub data: &'a [u8],
     pub face_index: u32,
+    /// FreeType-compatible face metrics in font units (OS/2 Win
+    /// basis when the table parses; see
+    /// [`FontManager::ft_metrics`](crate::renderer::font::FontManager::ft_metrics)):
+    /// ascender, negative descender, and their difference. Advances
+    /// and baselines scale by `font_size / ft_height`.
+    pub ft_asc: f32,
+    pub ft_desc: f32,
+    pub ft_height: f32,
 }
 
 /// Map the numeric ASS/SSA `Encoding`/`\fe` value to the corresponding
@@ -540,7 +550,11 @@ impl TextShaper {
     /// fallback run is shaped as a real OpenType run.  The resulting
     /// glyphs, advances, offsets, and clusters are the same data used by
     /// rendering and measurement; no scalar-width approximation is used
-    /// on this path.
+    /// on this path. `kerning` mirrors libass `track->Kerning` (default
+    /// off); non-zero `spacing` additionally disables `liga`/`clig`,
+    /// matching libass `ass_shaper` behavior. `base_level` overrides
+    /// the per-line paragraph direction (`None` auto-detects): layout
+    /// passes the event direction so soft-wrapped lines keep it.
     #[allow(clippy::too_many_arguments)]
     pub fn shape_with_opentype(
         text: &str,
@@ -555,6 +569,8 @@ impl TextShaper {
         outline_color: Color,
         shadow_color: Color,
         rotation: f64,
+        kerning: bool,
+        base_level: Option<Level>,
     ) -> ShapedLine {
         let empty = ShapedLine {
             glyphs: Vec::new(),
@@ -576,10 +592,15 @@ impl TextShaper {
         };
         let scale_x = scale_x.max(0.0);
         let scale_y = scale_y.max(0.0);
-        let px_scale = PxScale::from(font_size as f32);
-        let primary_scaled = primary.raster.as_scaled(px_scale);
-        let baseline = primary_scaled.ascent() as f64 * scale_y;
-        let line_height = primary_scaled.height() as f64 * scale_y;
+        // Primary face defines the line box (libass takes the max
+        // over run faces; single-face lines are identical). The
+        // values AND the divisor are FreeType-basis: Noto's Win
+        // ascender (1348) differs from its hhea/typo one (896), so
+        // rescaling `ab_glyph` output would still misplace the pen.
+        let ft_height = f64::from(primary.ft_height.max(1.0));
+        let baseline = f64::from(primary.ft_asc) / ft_height * font_size * scale_y;
+        let line_height =
+            f64::from(primary.ft_asc - primary.ft_desc) / ft_height * font_size * scale_y;
         let mut glyphs = Vec::new();
         let mut width: f64 = 0.0;
         let mut y = 0.0;
@@ -599,6 +620,8 @@ impl TextShaper {
                 outline_color,
                 shadow_color,
                 rotation,
+                kerning,
+                base_level,
             );
             missing_glyphs = missing_glyphs.saturating_add(missing);
             width = width.max(line_width);
@@ -634,14 +657,28 @@ impl TextShaper {
     }
 
     /// Measure using the exact OpenType+bidi pipeline used by shaping.
+    /// Width is direction-independent, so measurement always
+    /// auto-detects (`base_level` is a shaping/layout concern only).
     pub fn measure_text_with_opentype(
         text: &str,
         fonts: &[ShapingFont<'_>],
         font_size: f64,
         scale_x: f64,
         spacing: f64,
+        kerning: bool,
     ) -> f64 {
-        shape_measure_opentype(text, fonts, font_size, scale_x, spacing)
+        shape_measure_opentype(text, fonts, font_size, scale_x, spacing, kerning)
+    }
+
+    /// Base paragraph level of a text span (first paragraph): the
+    /// event-level direction that soft-wrapped lines inherit instead
+    /// of re-detecting from their own first strong character.
+    pub fn paragraph_base_level(text: &str) -> Level {
+        let bidi = BidiInfo::new(text, None);
+        bidi.paragraphs
+            .first()
+            .map(|para| para.level)
+            .unwrap_or(Level::ltr())
     }
 
     /// Measure text width without creating glyphs. For multiline text,
@@ -750,7 +787,8 @@ impl TextShaper {
 
 /// Shape one logical line into visual-order OpenType runs.  This helper is
 /// deliberately bounded by the input line length and the caller's document
-/// caps; rustybuzz itself performs the GSUB/GPOS work.
+/// caps; harfrust itself performs the GSUB/GPOS work.
+#[allow(clippy::too_many_arguments)]
 fn shape_opentype_line(
     text: &str,
     fonts: &[ShapingFont<'_>],
@@ -764,6 +802,8 @@ fn shape_opentype_line(
     outline_color: Color,
     shadow_color: Color,
     rotation: f64,
+    kerning: bool,
+    base_level: Option<Level>,
 ) -> (Vec<ShapedGlyph>, f64, u32) {
     if text.is_empty() {
         return (Vec::new(), 0.0, 0);
@@ -775,7 +815,7 @@ fn shape_opentype_line(
             .is_some_and(|font| font.raster.glyph_id(ch).0 != 0)
     });
 
-    let bidi = BidiInfo::new(text, None);
+    let bidi = BidiInfo::new(text, base_level);
     let para = bidi.paragraphs.first();
     let levels = para
         .map(|p| bidi.reordered_levels_per_char(p, p.range.clone()))
@@ -829,14 +869,16 @@ fn shape_opentype_line(
         let Some(font) = fonts.get(pick.min(fonts.len().saturating_sub(1))) else {
             continue;
         };
-        let Some(face) = rustybuzz::Face::from_slice(font.data, font.face_index) else {
+        let Ok(font_ref) = FontRef::from_index(font.data, font.face_index) else {
             continue;
         };
-        // `ab_glyph::PxScale` treats ASS's font size as the requested
-        // em-height (`height_unscaled`), rather than as raw OpenType
-        // units-per-em.  Use the same raster scale for HarfBuzz positions
-        // or shaped advances will be wider than the bitmaps they place.
-        let font_scale = font_size / f64::from(font.raster.height_unscaled().max(1.0));
+        let shaper_data = ShaperData::new(&font_ref);
+        let shaper = shaper_data.shaper(&font_ref).build();
+        // HarfBuzz positions are font units; they scale by the
+        // FreeType divisor (OS/2 Win sum, not hhea and not upm),
+        // exactly like the raster px scale, or shaped advances will
+        // be wider than the bitmaps they place.
+        let font_scale = font_size / f64::from(font.ft_height.max(1.0));
         let mut buffer = UnicodeBuffer::new();
         buffer.set_direction(if rtl {
             Direction::RightToLeft
@@ -845,7 +887,22 @@ fn shape_opentype_line(
         });
         buffer.set_cluster_level(BufferClusterLevel::MonotoneCharacters);
         buffer.push_str(run_text);
-        let shaped = rustybuzz::shape(&face, &[], buffer);
+        // harfrust (unlike rustybuzz's free `shape`) does not guess
+        // segment properties itself: without the script, GSUB/GPOS
+        // never apply. Explicit direction survives (guess only fills
+        // unset properties).
+        buffer.guess_segment_properties();
+        // libass `ass_shaper`: `kern` follows the track `Kerning`
+        // flag (default off); `liga`/`clig` are on unless horizontal
+        // spacing is non-standard. HarfBuzz defaults differ (`kern`
+        // on), so the features are set explicitly.
+        let mut features = Vec::with_capacity(3);
+        features.push(Feature::new(Tag::new(b"kern"), u32::from(kerning), ..));
+        if spacing != 0.0 {
+            features.push(Feature::new(Tag::new(b"liga"), 0, ..));
+            features.push(Feature::new(Tag::new(b"clig"), 0, ..));
+        }
+        let shaped = shaper.shape(buffer, ShapeOptions::new().features(&features));
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
         if infos.is_empty() {
@@ -869,20 +926,16 @@ fn shape_opentype_line(
             .zip(&gaps)
             .map(|(advance, gap)| advance + gap)
             .sum();
-        let mut cursor = if rtl { run_width } else { 0.0 };
+        // HarfBuzz returns every run (including RTL runs) in visual
+        // order with positive advances, so all runs lay out left to
+        // right; laying RTL runs out right to left would reverse them
+        // a second time (libass reference: arabic/hebrew/mixed-bidi).
+        let mut cursor = 0.0;
         for (index, (info, position)) in infos.iter().zip(positions).enumerate() {
             let advance = advances[index];
             let gap = gaps[index];
-            let local_x = if rtl {
-                cursor -= advance;
-                let x = cursor;
-                cursor -= gap;
-                x
-            } else {
-                let x = cursor;
-                cursor += advance + gap;
-                x
-            };
+            let local_x = cursor;
+            cursor += advance + gap;
             let cluster_byte = usize::try_from(info.cluster).unwrap_or(0);
             let ch = run_text
                 .get(cluster_byte..)
@@ -921,6 +974,7 @@ fn shape_measure_opentype(
     font_size: f64,
     scale_x: f64,
     spacing: f64,
+    kerning: bool,
 ) -> f64 {
     let shaped = TextShaper::shape_with_opentype(
         text,
@@ -935,6 +989,8 @@ fn shape_measure_opentype(
         Color::black(),
         Color::black(),
         0.0,
+        kerning,
+        None,
     );
     shaped.width
 }
@@ -1109,11 +1165,15 @@ mod tests {
             .unwrap();
         let raster = manager.get_font(0).unwrap();
         let (data, face_index) = manager.shaping_data(0).unwrap();
+        let (ft_asc, ft_desc, ft_height) = manager.ft_metrics(0).unwrap();
         let ot = ShapingFont {
             id: 0,
             raster,
             data,
             face_index,
+            ft_asc,
+            ft_desc,
+            ft_height,
         };
         let shape = |text: &str| {
             TextShaper::shape_with_opentype(
@@ -1129,6 +1189,8 @@ mod tests {
                 Color::black(),
                 Color::black(),
                 0.0,
+                false,
+                None,
             )
         };
         // DejaVu Sans exposes an ffi ligature: GSUB must reduce six source
@@ -1136,17 +1198,214 @@ mod tests {
         let ligature = shape("office");
         assert_eq!(ligature.glyphs.len(), 4);
         assert!(ligature.width > 0.0);
-        // Arabic is emitted in visual order with joined glyph IDs rather
-        // than five isolated scalar glyphs.
+        // Arabic is emitted in visual order (last logical scalar
+        // first, ascending x) with joined glyph IDs rather than five
+        // isolated scalar glyphs.
         let arabic = shape("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
         assert_eq!(arabic.glyphs.len(), 5);
-        assert!(arabic.glyphs.windows(2).any(|pair| pair[0].x > pair[1].x));
+        assert!(
+            arabic.glyphs.windows(2).all(|pair| pair[0].x < pair[1].x),
+            "RTL runs lay out left to right in visual order"
+        );
+        assert_eq!(arabic.glyphs[0].ch, '\u{0627}');
         assert!(arabic.glyphs.iter().all(|glyph| glyph.glyph_id.0 != 0));
         // Combining marks stay in the base cluster and are positioned by
         // GPOS, so the mark does not create an independent advance.
         let mark = shape("A\u{301}");
         assert_eq!(mark.glyphs.len(), 1);
         assert!(mark.glyphs[0].glyph_id.0 != 0);
+    }
+
+    #[test]
+    fn test_noto_advances_use_win_divisor() {
+        // Isolated DEVANAGARI NA: hmtx advance 555u. FreeType sizes
+        // Noto by the OS/2 Win sum (1906), so @24 the advance is
+        // 555*24/1906 = 6.99px (libass na10: 7.00px pitch); the hhea
+        // divisor (1304) would give 10.22px. Baseline likewise uses
+        // the Win ascender (1348), not hhea/typo (896).
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("Debug", font::get_fallback_font(), false, false)
+            .unwrap();
+        let noto = std::fs::read("fonts/NotoSansDevanagari.ttf").unwrap();
+        manager.load_font("Noto", &noto, false, false).unwrap();
+        let raster = manager.get_font(1).unwrap();
+        let (data, face_index) = manager.shaping_data(1).unwrap();
+        let (ft_asc, ft_desc, ft_height) = manager.ft_metrics(1).unwrap();
+        let ot = ShapingFont {
+            id: 1,
+            raster,
+            data,
+            face_index,
+            ft_asc,
+            ft_desc,
+            ft_height,
+        };
+        let line = TextShaper::shape_with_opentype(
+            "\u{928}",
+            std::slice::from_ref(&ot),
+            24.0,
+            1.0,
+            1.0,
+            400,
+            false,
+            0.0,
+            Color::white(),
+            Color::black(),
+            Color::black(),
+            0.0,
+            false,
+            None,
+        );
+        assert_eq!(line.glyphs.len(), 1);
+        assert!(
+            (line.glyphs[0].advance - 555.0 * 24.0 / 1906.0).abs() < 1e-6,
+            "NA advance {}",
+            line.glyphs[0].advance
+        );
+        assert!(
+            (line.baseline - 1348.0 * 24.0 / 1906.0).abs() < 1e-6,
+            "baseline {}",
+            line.baseline
+        );
+        assert!(
+            (line.line_height - 24.0).abs() < 1e-6,
+            "line height {}",
+            line.line_height
+        );
+    }
+
+    #[test]
+    fn test_opentype_kerning_matches_libass_default_off() {
+        // libass leaves `kern` off unless the track enables `Kerning`
+        // (reference frames are unkerned): default shaping must match
+        // raw hmtx advances, while `kerning = true` tightens kerned
+        // pairs like "To". Measurement follows the same flag.
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("Debug", font::get_fallback_font(), false, false)
+            .unwrap();
+        let raster = manager.get_font(0).unwrap();
+        let (data, face_index) = manager.shaping_data(0).unwrap();
+        let (ft_asc, ft_desc, ft_height) = manager.ft_metrics(0).unwrap();
+        let ot = ShapingFont {
+            id: 0,
+            raster,
+            data,
+            face_index,
+            ft_asc,
+            ft_desc,
+            ft_height,
+        };
+        let shape = |kerning: bool| {
+            TextShaper::shape_with_opentype(
+                "Top-left",
+                &[ot],
+                24.0,
+                1.0,
+                1.0,
+                400,
+                false,
+                0.0,
+                Color::white(),
+                Color::black(),
+                Color::black(),
+                0.0,
+                kerning,
+                None,
+            )
+        };
+        let plain = shape(false);
+        let kerned = shape(true);
+        assert_eq!(plain.glyphs.len(), 8);
+        assert_eq!(kerned.glyphs.len(), 8);
+        // Unkerned: T advance equals the raw hmtx advance scaled by
+        // ab_glyph's height-relative factor.
+        let t = raster.glyph_id('T');
+        let expected =
+            f64::from(raster.h_advance_unscaled(t)) * 24.0 / f64::from(raster.height_unscaled());
+        assert!(
+            (plain.glyphs[0].advance - expected).abs() < 1e-6,
+            "T advance {} vs hmtx {expected}",
+            plain.glyphs[0].advance
+        );
+        // Kerned: strictly narrower overall ("To" tightens).
+        assert!(
+            kerned.width < plain.width - 1.0,
+            "kerned {} vs plain {}",
+            kerned.width,
+            plain.width
+        );
+        for kerning in [false, true] {
+            let measured =
+                TextShaper::measure_text_with_opentype("Top-left", &[ot], 24.0, 1.0, 0.0, kerning);
+            let width = shape(kerning).width;
+            assert!(
+                (measured - width).abs() < 1e-9,
+                "kerning={kerning}: measured {measured} vs shaped {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_opentype_base_level_overrides_line_direction() {
+        // A soft-wrapped line starting with RTL text keeps the event
+        // base direction instead of re-detecting: with an LTR base,
+        // "שלום world" lays the Hebrew run left of "world"; with the
+        // auto (RTL) base the runs swap (libass: mixed-bidi).
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("Debug", font::get_fallback_font(), false, false)
+            .unwrap();
+        let raster = manager.get_font(0).unwrap();
+        let (data, face_index) = manager.shaping_data(0).unwrap();
+        let (ft_asc, ft_desc, ft_height) = manager.ft_metrics(0).unwrap();
+        let ot = ShapingFont {
+            id: 0,
+            raster,
+            data,
+            face_index,
+            ft_asc,
+            ft_desc,
+            ft_height,
+        };
+        let shape = |base_level: Option<Level>| {
+            TextShaper::shape_with_opentype(
+                "שלום world",
+                &[ot],
+                24.0,
+                1.0,
+                1.0,
+                400,
+                false,
+                0.0,
+                Color::white(),
+                Color::black(),
+                Color::black(),
+                0.0,
+                false,
+                base_level,
+            )
+        };
+        let min_x = |line: &ShapedLine, ch: char| {
+            line.glyphs
+                .iter()
+                .filter(|g| g.ch == ch)
+                .map(|g| g.x)
+                .fold(f64::INFINITY, f64::min)
+        };
+        let ltr = shape(Some(Level::ltr()));
+        assert!(
+            min_x(&ltr, 'ש') < min_x(&ltr, 'w'),
+            "LTR base: Hebrew run must sit left of `world`"
+        );
+        let rtl = shape(None);
+        assert!(
+            min_x(&rtl, 'w') < min_x(&rtl, 'ש'),
+            "auto (RTL) base: runs must swap"
+        );
+        assert_eq!(TextShaper::paragraph_base_level("Hello שלום"), Level::ltr());
+        assert_eq!(TextShaper::paragraph_base_level("שלום world"), Level::rtl());
     }
 
     #[test]

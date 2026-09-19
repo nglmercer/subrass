@@ -9,7 +9,7 @@ use crate::types::color::Color;
 use crate::types::override_tag::{parse_text_segments, parse_text_segments_with_wrap, TextSegment};
 use crate::types::{Event, EventType, LegacyEffect, OverrideTag, Style};
 use crate::utils::Matrix3x3;
-use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc};
 use std::borrow::Cow;
 
 /// Resolved style with all overrides applied
@@ -80,7 +80,9 @@ pub struct ResolvedStyle {
     /// marker to avoid applying event-global transform targets twice.
     event_globals_applied: bool,
     /// ASS-2 layout resolution used for blur and unscaled border/shadow
-    /// metrics. Zero means the legacy PlayRes fallback.
+    /// metrics. Zero (either axis) means unset: the video size is used
+    /// (the libass storage-size role), so blur and unscaled borders are
+    /// 1:1 in video pixels.
     pub layout_res_x: u32,
     pub layout_res_y: u32,
     pub drawing_mode: i32,
@@ -89,6 +91,9 @@ pub struct ResolvedStyle {
     /// Script `ScaledBorderAndShadow` flag: when true (default), borders
     /// and shadows scale with the script-to-video resolution ratio.
     pub scaled_border_and_shadow: bool,
+    /// Script `Kerning:` flag (default off, like libass): enables the
+    /// OpenType `kern` feature during shaping.
+    pub kerning: bool,
 }
 
 /// Vector clip shape in script coordinates with a drawing scale.
@@ -1844,7 +1849,12 @@ fn drawing_unit_scale(scale_x: f64, scale_y: f64, mode: i32) -> f64 {
 /// Scale a script-coordinate clip rectangle to video pixels,
 /// saturating instead of overflowing on extreme coordinates.
 fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i32, i32, i32, i32) {
-    let conv = |v: i32, s: f64| -> i32 {
+    // libass converts ASS clip rects with round-half-up (`+ 0.5`
+    // then truncate toward zero) and treats the rect as half-open
+    // `[x0,x1) x [y0,y1)` (probe: an iclip y1 sweep keeps rows from
+    // `round(y1 * scale)`). Our pixel clips are inclusive, so upper
+    // bounds convert with a saturating `- 1`.
+    let conv = |v: i32, s: f64, hi: bool| -> i32 {
         if !s.is_finite() {
             return v;
         }
@@ -1852,13 +1862,18 @@ fn scale_clip_rect(rect: (i32, i32, i32, i32), scale_x: f64, scale_y: f64) -> (i
         if !p.is_finite() {
             return v;
         }
-        finite_to_i32(p.clamp(f64::from(i32::MIN), f64::from(i32::MAX))).unwrap_or(v)
+        let rounded = (p + 0.5) as i32;
+        if hi {
+            rounded.saturating_sub(1)
+        } else {
+            rounded
+        }
     };
     (
-        conv(rect.0, scale_x),
-        conv(rect.1, scale_y),
-        conv(rect.2, scale_x),
-        conv(rect.3, scale_y),
+        conv(rect.0, scale_x, false),
+        conv(rect.1, scale_y, false),
+        conv(rect.2, scale_x, true),
+        conv(rect.3, scale_y, true),
     )
 }
 
@@ -1876,14 +1891,16 @@ fn deco_bar_rows(
     em_px: f64,
 ) -> Vec<(f64, f64)> {
     let mut rows = Vec::new();
-    let upm = f64::from(metrics.units_per_em);
-    if upm <= 0.0 || !em_px.is_finite() || em_px <= 0.0 || !pen_y.is_finite() {
+    // libass scales bar positions by the FreeType `y_scale`
+    // (Win-basis size divisor), not units-per-em.
+    let div = f64::from(metrics.scale_height);
+    if div <= 0.0 || !em_px.is_finite() || em_px <= 0.0 || !pen_y.is_finite() {
         return rows;
     }
     if underline {
         if let Some((pos, thick)) = metrics.underline {
-            let center = pen_y + f64::from(pos.unsigned_abs()) / upm * em_px;
-            let half = f64::from(thick) / upm * em_px / 2.0;
+            let center = pen_y + f64::from(pos.unsigned_abs()) / div * em_px;
+            let half = f64::from(thick) / div * em_px / 2.0;
             if half.is_finite() && half > 0.0 && center.is_finite() {
                 rows.push((center - half, center + half));
             }
@@ -1891,8 +1908,8 @@ fn deco_bar_rows(
     }
     if strikeout {
         if let Some((pos, size)) = metrics.strikeout {
-            let center = pen_y - f64::from(pos) / upm * em_px;
-            let half = f64::from(size) / upm * em_px / 2.0;
+            let center = pen_y - f64::from(pos) / div * em_px;
+            let half = f64::from(size) / div * em_px / 2.0;
             if half.is_finite() && half > 0.0 && center.is_finite() {
                 rows.push((center - half, center + half));
             }
@@ -2489,6 +2506,7 @@ impl Compositor {
             drawing_baseline_offset: 0.0,
             blur: 0.0,
             scaled_border_and_shadow: true,
+            kerning: false,
         };
 
         // Apply override tags (skip Transform tags - they're handled separately)
@@ -2936,6 +2954,7 @@ impl Compositor {
                 let keep = LineGlobalKeep::capture(&segment_resolved);
                 segment_resolved = Self::resolve_base_style(&base, &[]);
                 segment_resolved.scaled_border_and_shadow = resolved.scaled_border_and_shadow;
+                segment_resolved.kerning = resolved.kerning;
                 keep.restore(&mut segment_resolved);
                 continue;
             }
@@ -2977,6 +2996,20 @@ impl Compositor {
         let scale_y = video_height as f64 / play_res_y.max(1) as f64;
         let mut items = Vec::with_capacity(segments.len());
 
+        // Event paragraph direction (drawings excluded: their command
+        // letters would poison first-strong detection). Soft-wrapped
+        // lines inherit it instead of re-detecting from their own
+        // first strong character (libass reference: mixed-bidi).
+        let mut drawing_mode = 0;
+        let mut para_text = String::new();
+        for segment in segments {
+            drawing_mode = segment_drawing_mode(&segment.tags, drawing_mode);
+            if drawing_mode == 0 {
+                para_text.push_str(&segment.text);
+            }
+        }
+        let event_base_level = TextShaper::paragraph_base_level(&para_text);
+
         for segment in segments {
             let skipped = segment.text.is_empty();
             let seg_resolved = Self::resolve_segment_style(
@@ -3006,11 +3039,19 @@ impl Compositor {
                 if let Some(face) = font_manager.get_font(id) {
                     shape_fonts.push((id, face));
                     if let Some((data, face_index)) = font_manager.shaping_data(id) {
+                        let (ft_asc, ft_desc, ft_height) = font_manager.ft_metrics(id).unwrap_or((
+                            face.ascent_unscaled(),
+                            face.descent_unscaled(),
+                            face.height_unscaled().max(1.0),
+                        ));
                         opentype_fonts.push(ShapingFont {
                             id,
                             raster: face,
                             data,
                             face_index,
+                            ft_asc,
+                            ft_desc,
+                            ft_height,
                         });
                     }
                 }
@@ -3046,6 +3087,8 @@ impl Compositor {
                     seg_resolved.outline_color,
                     seg_resolved.shadow_color,
                     seg_resolved.angle,
+                    seg_resolved.kerning,
+                    Some(event_base_level),
                 )
             };
             // Per-segment drawing state (mixed drawing/text supported).
@@ -3058,10 +3101,14 @@ impl Compositor {
                         min_x: min_x * unit,
                         width: w * unit,
                         height: h * unit,
-                        // `\\pbo` is an authored baseline offset.  Keep
-                        // negative and oversized values: libass lets
-                        // the drawing move outside its nominal ink box.
-                        baseline: h - seg_resolved.drawing_baseline_offset * unit,
+                        // libass `get_outline_glyph`: a drawing glyph
+                        // takes `desc = pbo` and `asc = (y_max -
+                        // y_min) - pbo` in drawing units, scaled to
+                        // video pixels. Negative and oversized pbo
+                        // values move the drawing outside its nominal
+                        // ink box; the line pass clamps the descent
+                        // contribution at zero like libass `max_desc`.
+                        baseline: (h - seg_resolved.drawing_baseline_offset) * unit,
                     }
                 })
             } else {
@@ -3085,6 +3132,14 @@ impl Compositor {
         let mut line_width = 0.0_f64;
         let mut line_height = 0.0_f64;
         let mut line_baseline = 0.0_f64;
+        // libass `measure_text` tracks max descent beside max ascent
+        // (`max_desc` from 0, so negative drawing descents never
+        // shrink the line). Text-only lines keep the legacy max(h)
+        // accumulation bit-for-bit (equal to max_asc + max_desc for
+        // same-metric runs); lines with drawings extend to max_asc +
+        // max_desc so positive `\pbo` grows the box downward.
+        let mut line_desc = 0.0_f64;
+        let mut line_has_drawing = false;
         let mut first_line = true;
         let mut any_content = false;
 
@@ -3094,15 +3149,26 @@ impl Compositor {
             }
             any_content = true;
             let (w, h, b) = match &item.drawing {
-                Some(d) => (d.width, d.height, d.baseline),
+                Some(d) => {
+                    line_has_drawing = true;
+                    (d.width, d.height, d.baseline)
+                }
                 None => (item.shaped.width, item.shaped.height, item.shaped.baseline),
             };
             line_width += w;
             line_height = line_height.max(h);
             line_baseline = line_baseline.max(b);
+            line_desc = line_desc.max(h - b);
             if segment.text.ends_with('\n') {
                 block_width = block_width.max(line_width);
-                block_height += line_height;
+                // Drawing lines close at max_asc + max_desc (libass
+                // `measure_text`); text-only lines keep max(h).
+                let close_h = if line_has_drawing {
+                    line_height.max(line_baseline + line_desc)
+                } else {
+                    line_height
+                };
+                block_height += close_h;
                 if first_line {
                     baseline = line_baseline;
                     first_line = false;
@@ -3110,11 +3176,18 @@ impl Compositor {
                 line_width = 0.0;
                 line_height = 0.0;
                 line_baseline = 0.0;
+                line_desc = 0.0;
+                line_has_drawing = false;
             }
         }
         if line_width > 0.0 || line_height > 0.0 || !any_content {
             block_width = block_width.max(line_width);
-            block_height += line_height;
+            let close_h = if line_has_drawing {
+                line_height.max(line_baseline + line_desc)
+            } else {
+                line_height
+            };
+            block_height += close_h;
             if first_line {
                 baseline = line_baseline;
             }
@@ -3296,26 +3369,38 @@ impl Compositor {
             if let (Some(raster), Some((data, face_index))) =
                 (font_manager.get_font(id), font_manager.shaping_data(id))
             {
+                let (ft_asc, ft_desc, ft_height) = font_manager.ft_metrics(id).unwrap_or((
+                    raster.ascent_unscaled(),
+                    raster.descent_unscaled(),
+                    raster.height_unscaled().max(1.0),
+                ));
                 opentype_measure_fonts.push(ShapingFont {
                     id,
                     raster,
                     data,
                     face_index,
+                    ft_asc,
+                    ft_desc,
+                    ft_height,
                 });
             }
         }
 
         let scale_x = video_width as f64 / play_res_x as f64;
         let scale_y = video_height as f64 / play_res_y as f64;
-        let layout_res_x = if resolved.layout_res_x == 0 {
-            play_res_x.max(1)
+        // libass `ass_layout_res` + `init_font_scale`: the blur and
+        // unscaled-border denominators come from LayoutRes, but only
+        // when BOTH axes are set. subrass has square pixels and renders
+        // straight into the video frame, so unset LayoutRes maps to the
+        // video size (the libass storage-size role): blur radii and
+        // unscaled borders/shadows are then 1:1 in video pixels, which
+        // is also the documented VSFilter/legacy-libass contract for
+        // `ScaledBorderAndShadow: no`.
+        let (layout_res_x, layout_res_y) = if resolved.layout_res_x > 0 && resolved.layout_res_y > 0
+        {
+            (resolved.layout_res_x, resolved.layout_res_y)
         } else {
-            resolved.layout_res_x
-        };
-        let layout_res_y = if resolved.layout_res_y == 0 {
-            play_res_y.max(1)
-        } else {
-            resolved.layout_res_y
+            (video_width.max(1), video_height.max(1))
         };
         let blur_scale_x = video_width as f64 / layout_res_x as f64;
         let blur_scale_y = video_height as f64 / layout_res_y as f64;
@@ -3357,6 +3442,7 @@ impl Compositor {
                     font_size,
                     resolved.scale_x / 100.0,
                     resolved.spacing,
+                    resolved.kerning,
                 )
             };
             wrap_event_text_with_measure(&wrap_input, wrap_style, wrap_width, &measure)
@@ -3660,7 +3746,11 @@ impl Compositor {
                     resolved.alignment,
                 );
                 let draw_x = base_x + x_offset + draw_inset;
-                // Known divergence: libass models `\pbo` as
+                // libass `get_outline_glyph` hangs the drawing origin
+                // one ascent above the pen (`offset.y = -asc` with
+                // `asc = height - pbo`); `drawing.baseline` carries
+                // that ascent, so positive `\pbo` sinks the drawing
+                // toward the baseline and negative `\pbo` lifts it.
                 let draw_y = base_y + line_y_offset - drawing.baseline + fay_line_shear;
                 // Karaoke for drawings (libass splits drawing runs
                 // exactly like text runs: verified by probe).
@@ -3690,6 +3780,59 @@ impl Compositor {
                     }
                     None
                 });
+                // Outline + shadow (libass BorderStyle 1 draws both
+                // under the fill): painted once for the whole drawing
+                // — karaoke sweeps split only the fill, exactly like
+                // the text sweep path whose outline/shadow never split.
+                let (res_x, res_y) = if segment_resolved.scaled_border_and_shadow {
+                    (scale_x, scale_y)
+                } else {
+                    (blur_scale_x, blur_scale_y)
+                };
+                let draw_outline = if segment_resolved.border_style == 1
+                    && (segment_resolved.outline_x > 0.0 || segment_resolved.outline_y > 0.0)
+                {
+                    let oc = segment_resolved.outline_color.to_ass_components();
+                    Some((
+                        [
+                            oc[0],
+                            oc[1],
+                            oc[2],
+                            (f64::from(segment_resolved.outline_color.opacity()) * alpha_mult)
+                                as u8,
+                        ],
+                        segment_resolved.outline_x * res_x * segment_resolved.scale_x / 100.0,
+                        segment_resolved.outline_y * res_y * segment_resolved.scale_y / 100.0,
+                    ))
+                } else {
+                    None
+                };
+                let draw_shadow = if segment_resolved.shadow_x != 0.0
+                    || segment_resolved.shadow_y != 0.0
+                {
+                    let sc = segment_resolved.shadow_color.to_ass_components();
+                    Some((
+                        [
+                            sc[0],
+                            sc[1],
+                            sc[2],
+                            (f64::from(segment_resolved.shadow_color.opacity()) * alpha_mult) as u8,
+                        ],
+                        segment_resolved.shadow_x * res_x * segment_resolved.scale_x / 100.0,
+                        segment_resolved.shadow_y * res_y * segment_resolved.scale_y / 100.0,
+                    ))
+                } else {
+                    None
+                };
+                super::drawing::DrawingParser::render_drawing_effects(
+                    buffer,
+                    &segment.text,
+                    draw_x,
+                    draw_y,
+                    unit,
+                    draw_outline,
+                    draw_shadow,
+                );
                 match (run, sweep_split) {
                     (Some(_), Some(brk)) => {
                         // Two non-overlapping clipped passes with a hard
@@ -3772,9 +3915,10 @@ impl Compositor {
                 segment_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
             let shaped = &item.shaped;
 
-            // Pre-compute effect parameters. With ScaledBorderAndShadow,
-            // borders/shadows scale with the resolution ratio; otherwise
-            // script units map 1:1 to video pixels.
+            // Pre-compute effect parameters (libass `init_font_scale`):
+            // with ScaledBorderAndShadow, borders/shadows scale with
+            // the video/PlayRes ratio; otherwise with the blur scale
+            // (video/LayoutRes, 1:1 when LayoutRes is unset).
             let (res_x, res_y) = if segment_resolved.scaled_border_and_shadow {
                 (scale_x, scale_y)
             } else {
@@ -3894,6 +4038,7 @@ impl Compositor {
                     face_font,
                     glyph.glyph_id,
                     segment_font_size,
+                    font_manager.px_ratio(face.id),
                     face.faux_bold,
                     face.faux_italic,
                 );
@@ -3905,7 +4050,7 @@ impl Compositor {
                 // gated font metrics, else the glyph is undecorated.
                 let deco = if segment_resolved.underline || segment_resolved.strike_out {
                     font_manager.decoration_metrics(face.id).filter(|m| {
-                        m.units_per_em != 0
+                        m.scale_height > 0.0
                             && ((segment_resolved.underline && m.underline.is_some())
                                 || (segment_resolved.strike_out && m.strikeout.is_some()))
                             && glyph.advance > 0.0
@@ -4132,9 +4277,14 @@ impl Compositor {
                 // above the pen). Pen sits at (-bearing) in bitmap
                 // pixels. Non-uniform `\fsc` adjusts the factors
                 // exactly as the references' pre-scale shear does.
-                let ascent = face_font
-                    .as_scaled(PxScale::from(segment_font_size as f32))
-                    .ascent() as f64;
+                // The ascender is FreeType-basis (OS/2 Win value and
+                // divisor), matching the shaped baseline.
+                let (ft_asc, _, ft_height) = font_manager.ft_metrics(face.id).unwrap_or((
+                    face_font.ascent_unscaled(),
+                    face_font.descent_unscaled(),
+                    face_font.height_unscaled().max(1.0),
+                ));
+                let ascent = f64::from(ft_asc) / f64::from(ft_height.max(1.0)) * segment_font_size;
                 let pivot = (
                     f64::from(-eff_bearing_x) * eff_scale_x,
                     (f64::from(-eff_bearing_y) - ascent) * eff_scale_y,
@@ -4700,6 +4850,24 @@ mod tests {
         vid_h: u32,
         scaled: bool,
     ) -> RenderBuffer {
+        render_sized_layout(
+            text, style, time_ms, play_w, play_h, vid_w, vid_h, scaled, 0, 0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_sized_layout(
+        text: &str,
+        style: &Style,
+        time_ms: u64,
+        play_w: u32,
+        play_h: u32,
+        vid_w: u32,
+        vid_h: u32,
+        scaled: bool,
+        layout_w: u32,
+        layout_h: u32,
+    ) -> RenderBuffer {
         let mut comp = Compositor::new();
         let mut fm = FontManager::new();
         fm.load_font("DejaVu Sans", font::get_fallback_font(), false, false)
@@ -4708,6 +4876,8 @@ mod tests {
         let event = Event::parse_from_line(&line).unwrap();
         let mut resolved = Compositor::resolve_style(style, &event);
         resolved.scaled_border_and_shadow = scaled;
+        resolved.layout_res_x = layout_w;
+        resolved.layout_res_y = layout_h;
         let mut buf = RenderBuffer::new(vid_w, vid_h).unwrap();
         comp.composite_event(
             &mut buf,
@@ -5269,26 +5439,38 @@ mod tests {
         );
     }
 
-    /// Plan #28: `\pbo` contributes to line ascent/descent like libass.
+    /// Plan #28: `\pbo` contributes to line ascent/descent like libass
+    /// (`desc = pbo`, `asc = height - pbo`, line box from max_asc /
+    /// max_desc): negative pbo lifts a lone drawing above its nominal
+    /// box, while positive pbo grows the box downward so a
+    /// bottom-anchored drawing holds its ink rows.
     #[test]
     fn test_pbo_shifts_drawing() {
-        fn min_row(buf: &RenderBuffer) -> u32 {
-            buf.as_bytes()
+        fn ink_rows(buf: &RenderBuffer) -> (u32, u32) {
+            let rows: Vec<u32> = buf
+                .as_bytes()
                 .chunks_exact(4)
                 .enumerate()
                 .filter(|(_, p)| p[3] > 0)
                 .map(|(i, _)| (i as u32) / buf.width)
-                .min()
-                .unwrap_or(u32::MAX)
+                .collect();
+            let min = rows.iter().copied().min().unwrap_or(u32::MAX);
+            let max = rows.iter().copied().max().unwrap_or(0);
+            (min, max)
         }
+        // 40u square at unit 0.5 (320x100 over PlayRes 640x200):
+        // pbo -20 lifts the drawing 10px; pbo +20 extends the line
+        // box instead, holding bottom-anchored ink rows exactly.
         let square = "m 0 0 l 40 0 l 40 40 l 0 40";
         let plain = render_event_text(&format!("{{\\p1}}{square}"), true);
-        let shifted = render_event_text(&format!("{{\\p1\\pbo-20}}{square}"), true);
-        assert_eq!(
-            min_row(&shifted),
-            min_row(&plain),
-            "single drawings keep their ink row"
-        );
+        let up = render_event_text(&format!("{{\\p1\\pbo-20}}{square}"), true);
+        let down = render_event_text(&format!("{{\\p1\\pbo20}}{square}"), true);
+        let oversized = render_event_text(&format!("{{\\p1\\pbo60}}{square}"), true);
+        let (p0, p1) = ink_rows(&plain);
+        let (u0, u1) = ink_rows(&up);
+        assert_eq!((u0, u1), (p0 - 10, p1 - 10), "pbo-20 lifts 10px");
+        assert_eq!(ink_rows(&down), (p0, p1), "pbo+20 holds ink rows");
+        assert_eq!(ink_rows(&oversized), (p0, p1), "oversized pbo holds rows");
     }
 
     #[test]
@@ -5389,10 +5571,22 @@ mod tests {
             .filter(|y| (*y as usize * w..(*y as usize + 1) * w).any(|i| ink[i] && !plain[i]))
             .collect();
         assert!(!bar_rows.is_empty(), "underline adds rows");
-        for y in bar_rows {
+        for &y in &bar_rows {
             let row: Vec<bool> = (0..w).map(|x| ink[y as usize * w + x]).collect();
             let first = row.iter().position(|b| *b).expect("bar ink");
             let last = row.iter().rposition(|b| *b).expect("bar ink");
+            // Edge-AA rows are exempt: each glyph box snaps to integer
+            // frame rows independently, so a fractional bar edge can
+            // land one row apart between boxes (libass shares outline
+            // coords instead; the 4x4-block reference gates absorb the
+            // difference). Solid bar rows must still span the space.
+            let solid = (0..w).any(|x| {
+                let i = y as usize * w + x;
+                ink[i] && !plain[i] && deco.as_bytes()[i * 4 + 3] >= 128
+            });
+            if !solid {
+                continue;
+            }
             assert!(
                 row[first..=last].iter().all(|b| *b),
                 "bar row {y} has a gap (space not spanned)"
@@ -5955,6 +6149,26 @@ mod tests {
     /// separate state — later rect coordinates replace earlier ones,
     /// `\clip` vs `\iclip` flips the rect mode, the first vector clip
     /// is retained, and rect + vector clips coexist in rendering.
+    #[test]
+    fn test_scale_clip_rect_rounds_half_open() {
+        // libass converts ASS clip bounds with round-half-up and
+        // treats the rect as half-open `[x0,x1) x [y0,y1)` (probe: an
+        // iclip y1 sweep keeps rows from `round(y1 * scale)`); our
+        // inclusive pixel clips therefore take upper bounds minus one.
+        let sx = 256.0 / 384.0;
+        let sy = 144.0 / 216.0;
+        assert_eq!(
+            scale_clip_rect((60, 40, 342, 198), sx, sy),
+            (40, 27, 227, 131)
+        );
+        // Exact-boundary upper edge keeps from the boundary row.
+        assert_eq!(scale_clip_rect((0, 0, 384, 198), sx, sy).3, 131);
+        // Fractional upper edge rounds up (132.67 -> keep from 133).
+        assert_eq!(scale_clip_rect((0, 0, 384, 199), sx, sy).3, 132);
+        // Full-canvas rect keeps the whole frame.
+        assert_eq!(scale_clip_rect((0, 0, 384, 216), sx, sy), (0, 0, 255, 143));
+    }
+
     #[test]
     fn test_clip_libass_rect_vector_semantics() {
         let base = Style::new("Default");
@@ -7478,6 +7692,58 @@ mod tests {
             (n3 as i32 - n1 as i32).abs() <= 4,
             "unscaled shadow reach must stay flat: {n1} -> {n3}"
         );
+    }
+
+    #[test]
+    fn test_layout_res_drives_unscaled_borders_like_libass() {
+        // libass `ass_layout_res`: with LayoutRes set, unscaled
+        // borders/shadows divide by LayoutRes instead of staying 1:1;
+        // the scaled flag keeps dividing by PlayRes. Only both axes
+        // set counts; a half-set LayoutRes falls back to 1:1.
+        let mut shadowed = Style::new("Default");
+        shadowed.shadow = 12.0;
+        shadowed.outline = 0.0;
+        let mut plain = Style::new("Default");
+        plain.shadow = 0.0;
+        plain.outline = 0.0;
+        let ink_w = |style: &Style, scaled: bool, lw: u32, lh: u32| {
+            ink_bbox(&render_sized_layout(
+                r"{\pos(100,100)}H",
+                style,
+                1000,
+                640,
+                360,
+                1920,
+                1080,
+                scaled,
+                lw,
+                lh,
+            ))
+            .map(|b| b.0)
+            .unwrap_or(0)
+        };
+        let reach = |scaled: bool, lw: u32, lh: u32| {
+            ink_w(&shadowed, scaled, lw, lh).saturating_sub(ink_w(&plain, scaled, lw, lh))
+        };
+        let flat = reach(false, 0, 0);
+        assert!(flat > 0, "shadow must extend ink");
+        // LayoutRes == PlayRes: unscaled triples like the scaled flag.
+        let via_layout = reach(false, 640, 360);
+        let via_scaled = reach(true, 640, 360);
+        assert!(
+            (via_layout as i32 - 3 * flat as i32).abs() <= 4,
+            "LayoutRes unscaled must triple: {flat} -> {via_layout}"
+        );
+        // Scaled flag ignores LayoutRes (still PlayRes-based).
+        assert!(
+            (via_scaled as i32 - via_layout as i32).abs() <= 4,
+            "scaled flag must match LayoutRes==PlayRes: {via_scaled} vs {via_layout}"
+        );
+        // Half-set LayoutRes falls back to 1:1.
+        assert_eq!(reach(false, 640, 0), flat);
+        assert_eq!(reach(false, 0, 360), flat);
+        // Explicit LayoutRes == video size also means 1:1.
+        assert_eq!(reach(false, 1920, 1080), flat);
     }
 
     #[test]

@@ -493,7 +493,7 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
 3. Rotation uses libass's perspective distance (312.5 × vertical
    resolution ratio); extreme angles degrade to empty glyphs instead of
    over-allocating. (`frx`/`fry` inverse-map and `\fay` per-run shear
-   reset verified against libass references; all 48 gated fixtures pass.)
+   reset verified against libass references; all 67 gated fixtures pass.)
 4. No complex shaping (LTR `ab_glyph` only: no HarfBuzz, RTL, ligatures, or
    Indic/Arabic contextual forms); no system-font lookup. Cluster-aware
    deterministic fallback covers already-loaded faces.

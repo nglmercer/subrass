@@ -1098,7 +1098,7 @@ fn build_karaoke_runs(segments: &[TextSegment], items: &[LayoutItem]) -> Karaoke
 
     for (seg_idx, segment) in segments.iter().enumerate() {
         let from = prev_tag_count.min(segment.tags.len());
-        for tag in &segment.tags[from..] {
+        fn consume(tag: &OverrideTag, pending: &mut KaraokeLead) {
             match tag {
                 // `\kt` assigns (wiping stacked durations) and resets.
                 OverrideTag::KaraokeStart(t) => {
@@ -1132,8 +1132,16 @@ fn build_karaoke_runs(segments: &[TextSegment], items: &[LayoutItem]) -> Karaoke
                         _ => KaraokeKind::Hard,
                     });
                 }
+                OverrideTag::Transform { tags, .. } => {
+                    for nested in tags {
+                        consume(nested, pending);
+                    }
+                }
                 _ => {}
             }
+        }
+        for tag in &segment.tags[from..] {
+            consume(tag, &mut pending);
         }
         prev_tag_count = segment.tags.len();
 
@@ -1955,6 +1963,34 @@ impl Compositor {
         }
     }
 
+    /// Compute a `\t(...)` progress value against the event clock. A zero
+    /// `t2` means the event end, matching libass's transform timing rules.
+    fn transform_progress(
+        t1: i32,
+        t2: i32,
+        accel: f64,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> f64 {
+        let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+        let t1 = i64::from(t1);
+        let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+        let t2_eff = if t2 == 0 { duration } else { i64::from(t2) };
+        let raw_progress = if elapsed < t1 {
+            0.0
+        } else if elapsed >= t2_eff || t2_eff <= t1 {
+            1.0
+        } else {
+            (elapsed - t1) as f64 / (t2_eff - t1) as f64
+        };
+        if elapsed < t1 {
+            0.0
+        } else {
+            Self::apply_accel(raw_progress, accel)
+        }
+    }
+
     /// Apply `\t(...)` inner tags with a given progress (0.0 to 1.0).
     ///
     /// Transformability matrix (per Aegisub/VSFilter: `\t` animates
@@ -1967,19 +2003,34 @@ impl Compositor {
     ///            \fr \frx \fry \frz \fax \fay
     ///            \bord \xbord \ybord \shad \xshad \yshad
     ///            \be \blur
-    /// ignored:   \pos \move \org (position animates via \move only)
-    ///            \clip \iclip incl. vector forms (not animatable)
-    ///            \an \q (whole-line layout, decided once)
-    ///            \p \pbo (drawing geometry is discrete)
-    ///            \fad \fade (own timing model)
-    ///            \b \i \u \s \fn \fe (discrete switches, not animated)
-    ///            karaoke \k \K \kf \ko \kt, \r, nested \t
+    ///            rectangular \clip/\iclip coordinates
+    /// consumed inside the transform. Discrete switches, positioning,
+    /// fades, drawing state, karaoke, resets, and nested transforms are
+    /// handled with libass's non-interpolated semantics.
     /// ```
     ///
-    /// Ignored tags are skipped silently inside `\t` (matching
-    /// reference behavior of animating only the supported set);
-    /// outside `\t` they apply normally.
-    fn apply_transform_tags(resolved: &mut ResolvedStyle, tags: &[OverrideTag], progress: f64) {
+    /// Tags without continuous fields still apply their libass discrete
+    /// behavior inside `\t`; unsupported tags remain ignored.
+    fn apply_transform_tags(
+        resolved: &mut ResolvedStyle,
+        tags: &[OverrideTag],
+        progress: f64,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) {
+        Self::apply_transform_tags_depth(resolved, tags, progress, 0, time_ms, start_ms, end_ms);
+    }
+
+    fn apply_transform_tags_depth(
+        resolved: &mut ResolvedStyle,
+        tags: &[OverrideTag],
+        progress: f64,
+        depth: u32,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+    ) {
         for target in tags {
             match target {
                 OverrideTag::Blur(b) => {
@@ -2158,10 +2209,27 @@ impl Compositor {
                         resolved.clip = None;
                     }
                 }
-                OverrideTag::Transform { tags: nested, .. } => {
+                OverrideTag::Transform {
+                    t1,
+                    t2,
+                    accel,
+                    tags: nested,
+                } => {
                     // Nested transforms are recursively applied, with the
-                    // parser's depth cap preventing unbounded work.
-                    Self::apply_transform_tags(resolved, nested, progress);
+                    // parser/runtime depth caps preventing unbounded work.
+                    if depth < 32 {
+                        let nested_progress =
+                            Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
+                        Self::apply_transform_tags_depth(
+                            resolved,
+                            nested,
+                            nested_progress,
+                            depth + 1,
+                            time_ms,
+                            start_ms,
+                            end_ms,
+                        );
+                    }
                 }
                 // Discrete and event-global tags are consumed inside `\t`.
                 _ => Self::apply_single_tag(resolved, target),
@@ -2623,11 +2691,27 @@ impl Compositor {
         end_ms: u64,
     ) -> ResolvedStyle {
         let mut segment_resolved = resolved.clone();
+        // Tags are evaluated in source order. This matters for libass's
+        // first-wins position/origin slots when a tag is inside `\t`.
         for tag in &segment.tags {
-            if let OverrideTag::Transform { .. } = tag {
-                continue;
-            }
-            if let OverrideTag::Reset(style_name) = tag {
+            if let OverrideTag::Transform {
+                t1,
+                t2,
+                accel,
+                tags,
+            } = tag
+            {
+                let progress =
+                    Self::transform_progress(*t1, *t2, *accel, time_ms, start_ms, end_ms);
+                Self::apply_transform_tags(
+                    &mut segment_resolved,
+                    tags,
+                    progress,
+                    time_ms,
+                    start_ms,
+                    end_ms,
+                );
+            } else if let OverrideTag::Reset(style_name) = tag {
                 let base = match style_name {
                     Some(name) => styles
                         .iter()
@@ -2653,41 +2737,6 @@ impl Compositor {
         }
         if event.margin_v != 0 {
             segment_resolved.margin_v = event.margin_v;
-        }
-
-        for tag in &segment.tags {
-            if let OverrideTag::Transform {
-                t1,
-                t2,
-                accel,
-                tags,
-            } = tag
-            {
-                // libass `complex_tag("t")` timing: `t2 == 0` means
-                // "until the end of the event", progress is 0 before
-                // `t1` and 1 from `t2` on (note the strict `<` on the
-                // left: at exactly `t1 == t2` the tag fully applies,
-                // unlike `\move`'s step which belongs to the start).
-                // The lerp runs only when `t1 < t2_eff` is proven, so
-                // this cannot divide by zero or underflow.
-                let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
-                let t1 = i64::from(*t1);
-                let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
-                let t2_eff = if *t2 == 0 { duration } else { i64::from(*t2) };
-                let raw_progress = if elapsed < t1 {
-                    0.0
-                } else if elapsed >= t2_eff || t2_eff <= t1 {
-                    1.0
-                } else {
-                    (elapsed - t1) as f64 / (t2_eff - t1) as f64
-                };
-                let progress = if elapsed < t1 {
-                    0.0
-                } else {
-                    Self::apply_accel(raw_progress, *accel)
-                };
-                Self::apply_transform_tags(&mut segment_resolved, tags, progress);
-            }
         }
 
         segment_resolved
@@ -6144,6 +6193,27 @@ mod tests {
         assert!(seg.italic);
         assert_eq!(seg.font_name, "Other");
         assert_eq!(seg.font_encoding, 2);
+    }
+
+    #[test]
+    fn test_nested_transform_uses_own_timing() {
+        let base = Style::new("Default");
+        let event =
+            Event::parse_from_line("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,x").unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segments = parse_text_segments(r"{\t(0,1000,\fs40\t(500,1000,\fs60))}x");
+
+        let early =
+            Compositor::resolve_segment_style(&resolved, &segments[0], &event, &[], 250, 0, 1000);
+        let outer_early = base.font_size + (40.0 - base.font_size) * 0.25;
+        assert!((early.font_size - outer_early).abs() < 1e-9);
+
+        let late =
+            Compositor::resolve_segment_style(&resolved, &segments[0], &event, &[], 750, 0, 1000);
+        // Outer progress is .75, nested progress is .5 toward 60pt.
+        let outer_late = base.font_size + (40.0 - base.font_size) * 0.75;
+        let nested_late = outer_late + (60.0 - outer_late) * 0.5;
+        assert!((late.font_size - nested_late).abs() < 1e-9);
     }
 
     #[test]

@@ -376,9 +376,10 @@ proofs, doc sync).
   `CONFORMANCE.md` claim that `\t` ignores libass's recursive discrete and
   rectangular clip handling; those tags are now consumed by the bounded
   transform evaluator.
-- **Robustness re-audit**: production code has no `unwrap`/`expect`/
-  `panic!`/`todo!`/`unsafe` except one guard-adjacent `expect` in
-  `smart_wrap_lines` (safe by construction); all 171 pedantic cast
+- **Robustness re-audit**: production runtime paths have no panicking
+  `unwrap`/`expect`/`panic!`/`todo!`/`unsafe`; the guard-adjacent `expect` in
+  `smart_wrap_lines` was replaced with an explicit empty-pop fallback. All
+  171 pedantic cast
   sites triaged — one real bug found and fixed (`blend_pixel` color
   channels could wrap mod 256 for tiny `out_a`, e.g. 763/2=381 →
   125 instead of 255; now saturates like `blend_pixel_premul`,
@@ -473,19 +474,19 @@ proofs, doc sync).
 
 | Command | Result |
 |---|---|
-| `cargo test --locked --all-features` | 415 passed, 0 failed (398 lib + 2 corpus + 1 golden + 3 reference + 11 robustness) |
-| `cargo test --locked --no-default-features` | 415 passed, 0 failed (same breakdown as above) |
+| `cargo test --locked --all-features` | 445 passed, 0 failed (424 lib + 2 corpus + 1 golden + 7 reference + 11 robustness) |
+| `cargo test --locked --no-default-features` | 444 passed, 0 failed (423 lib + 2 corpus + 1 golden + 7 reference + 11 robustness) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo check --target wasm32-unknown-unknown --tests --locked` | ok |
-| `SUBRASS_STRICT_REFERENCES=1 cargo test --locked --test reference -- --nocapture` | 67/67 gated pass, 0 pending, 7 known-divergent (see report) |
-| `cargo test --locked --test golden` | 74/74 byte-exact pass |
+| `SUBRASS_STRICT_REFERENCES=1 cargo test --locked --test reference -- --nocapture` | 98 gated libass references, 7 intentional divergences, 0 open failures, 0 pending |
+| `cargo test --locked --test golden` | pass (golden image test) |
 | `wasm-pack build --target web --out-dir pkg` | ok |
 | `bun install --frozen-lockfile` + `bun run typecheck` | clean |
 | `bun test` | 41 passed, 0 failed (13 demo/paths + 17 server HTTP + 11 worker-backend) |
-| `cargo audit --deny warnings` | 0 vulnerabilities (1251 advisories loaded); known unmaintained-`ttf-parser` advisory explicitly ignored in `.cargo/audit.toml` with rationale (transitive via `ab_glyph`, `patched = []`, skrifa migration out of scope) |
-| `wasm-pack test --headless --chrome` | runs in CI (browser); cannot run locally — no Chrome binary installed (ChromeDriver starts, session creation 404s). `cargo check` covers the wasm target locally |
-| fuzz smoke (`parse_ass`, `drawing`, `render`) | CI-gated on Linux (`fuzz-smoke` job); cannot link locally (Windows MSVC `LNK2001`, no C toolchain in WSL). Stable-toolchain hostile-value coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
+| `cargo audit --deny warnings` | Environment gap: advisory database loaded, but the registry yanked-check request timed out before audit completed |
+| `wasm-pack test --headless --chrome` | Environment gap: ChromeDriver starts, but its WebDriver session request returns HTTP 404 for `tests/web.rs`; `cargo check` and `wasm-pack build` pass locally |
+| fuzz smoke (`parse_ass`, `drawing`, `render`, `parse_ass_bytes`) | Environment gap: Windows stable/MSVC cargo-fuzz invokes nightly sanitizer flags; the pinned nightly invocation cannot produce a clean binary in this environment. Stable hostile-input coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
 
 Note: CI status for a given HEAD cannot be confirmed from local data alone;
 the rows above are local runs. The listed GitHub Actions jobs exist in

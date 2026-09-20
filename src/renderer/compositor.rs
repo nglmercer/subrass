@@ -217,14 +217,14 @@ impl Compositor {
         );
         let font = font_match.font;
         let measure_chain: Vec<&FontArc> = font_manager
-            .fallback_chain(font_match.id)
+            .fallback_chain_for_encoding(font_match.id, resolved.font_encoding)
             .iter()
             .filter_map(|id| font_manager.get_font(*id))
             .collect();
         let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
 
         let mut opentype_measure_fonts = Vec::with_capacity(measure_chain.len());
-        for id in font_manager.fallback_chain(font_match.id) {
+        for id in font_manager.fallback_chain_for_encoding(font_match.id, resolved.font_encoding) {
             if let (Some(raster), Some((data, face_index))) =
                 (font_manager.get_font(id), font_manager.shaping_data(id))
             {

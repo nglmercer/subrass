@@ -213,7 +213,8 @@ impl Compositor {
                 seg_resolved.font_size * (video_height as f64 / play_res_y.max(1) as f64);
             // Per-glyph fallback chain (primary first): characters the
             // primary lacks cascade to the next loaded face.
-            let chain = font_manager.fallback_chain(font_match.id);
+            let chain =
+                font_manager.fallback_chain_for_encoding(font_match.id, seg_resolved.font_encoding);
             let mut faces = Vec::with_capacity(chain.len());
             let mut shape_fonts: Vec<(usize, &FontArc)> = Vec::with_capacity(chain.len());
             let mut opentype_fonts: Vec<ShapingFont<'_>> = Vec::with_capacity(chain.len());

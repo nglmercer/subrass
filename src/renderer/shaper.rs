@@ -961,6 +961,103 @@ mod tests {
     }
 
     #[test]
+    fn test_edge_script_shaping_and_fallback_share_advances() {
+        let mut manager = crate::renderer::font::FontManager::new();
+        manager
+            .load_font("DejaVu Sans", font::get_fallback_font(), false, false)
+            .unwrap();
+        let collection = include_bytes!("../../fonts/SubrassTestCollection.ttc");
+        manager
+            .load_font_auto("SubrassTestCollection.ttc", collection)
+            .unwrap();
+
+        let mut fonts = Vec::new();
+        for id in 0..manager.font_count() {
+            let raster = manager.get_font(id).unwrap();
+            let (data, face_index) = manager.shaping_data(id).unwrap();
+            let (ft_asc, ft_desc, ft_height) = manager.ft_metrics(id).unwrap();
+            fonts.push(ShapingFont {
+                id,
+                raster,
+                data,
+                face_index,
+                ft_asc,
+                ft_desc,
+                ft_height,
+            });
+        }
+
+        // These runs intentionally include scripts not covered by every
+        // bundled face. They exercise HarfRust's run partitioning, mark
+        // handling, bidi ordering, and the missing-glyph path without relying
+        // on whatever native fonts happen to be installed on the host.
+        for text in [
+            "বাংলা",
+            "தமிழ்",
+            "తెలుగు",
+            "ગુજરાતી",
+            "ਪੰਜਾਬੀ",
+            "മലയാളം",
+            "ภาษาไทย",
+            "مَرْحَبًا",
+            "שָׁלוֹם",
+            "abc שלום, (123) مرحبا!",
+            "e\u{301}\u{308} A\u{301}",
+        ] {
+            let shaped = TextShaper::shape_with_opentype(
+                text,
+                &fonts,
+                32.0,
+                1.0,
+                1.0,
+                400,
+                false,
+                0.0,
+                Color::white(),
+                Color::black(),
+                Color::black(),
+                0.0,
+                false,
+                None,
+            );
+            let measured =
+                TextShaper::measure_text_with_opentype(text, &fonts, 32.0, 1.0, 0.0, false);
+            assert!(
+                shaped.width.is_finite() && shaped.height.is_finite(),
+                "{text:?}"
+            );
+            assert!((shaped.width - measured).abs() < 1e-9, "{text:?}");
+            assert!(shaped.glyphs.iter().all(|glyph| {
+                glyph.x.is_finite() && glyph.y.is_finite() && glyph.advance.is_finite()
+            }));
+        }
+
+        // The Indic face in the collection must be selected only for the
+        // unsupported scalar, while the surrounding Latin stays primary.
+        let mixed = TextShaper::shape_with_opentype(
+            "AनB",
+            &fonts,
+            32.0,
+            1.0,
+            1.0,
+            400,
+            false,
+            0.0,
+            Color::white(),
+            Color::black(),
+            Color::black(),
+            0.0,
+            false,
+            None,
+        );
+        assert_eq!(mixed.glyphs.len(), 3);
+        assert_eq!(mixed.glyphs[0].font_id, 0);
+        assert_eq!(mixed.glyphs[1].font_id, 3);
+        assert_eq!(mixed.glyphs[1].ch, 'न');
+        assert_eq!(mixed.glyphs[2].font_id, 0);
+    }
+
+    #[test]
     fn test_measure_matches_shape_width_with_fallback() {
         let font = fallback_font();
         let fonts = [&font, &font];

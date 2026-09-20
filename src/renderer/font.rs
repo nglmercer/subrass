@@ -46,6 +46,7 @@ struct LoadedFont {
     /// by their sum, so these drive the face's pixel scale.
     win_ascent: Option<u16>,
     win_descent: Option<u16>,
+    code_page_ranges: [u32; 2],
     is_italic: bool,
     /// Underline/strikeout metrics for decorations.
     decorations: DecorationMetrics,
@@ -254,6 +255,7 @@ impl FontManager {
             weight: weight.clamp(1, 1000),
             win_ascent: meta.as_ref().and_then(|m| m.win_ascent),
             win_descent: meta.as_ref().and_then(|m| m.win_descent),
+            code_page_ranges: meta.as_ref().map(|m| m.code_page_ranges).unwrap_or([0, 0]),
             is_italic,
             decorations,
             data: Arc::new(data.to_vec()),
@@ -385,6 +387,32 @@ impl FontManager {
         chain
     }
 
+    /// Charset-aware fallback order. The requested face remains first;
+    /// among fallback faces, OS/2 code-page declarations are a soft
+    /// preference for the active ASS `Encoding`. Glyph coverage still makes
+    /// the final choice, so stale or missing font metadata cannot make text
+    /// disappear. Unknown encodings preserve ordinary load-order fallback.
+    pub fn fallback_chain_for_encoding(&self, primary: usize, encoding: i32) -> Vec<usize> {
+        let mut chain = self.fallback_chain(primary);
+        let Some((word, bit)) = ass_code_page_bit(encoding) else {
+            return chain;
+        };
+        if chain.len() <= 1 {
+            return chain;
+        }
+        let mut rest = chain.split_off(1);
+        rest.sort_by_key(|&index| {
+            (
+                self.fonts
+                    .get(index)
+                    .is_none_or(|font| font.code_page_ranges[word] & (1 << bit) == 0),
+                index,
+            )
+        });
+        chain.extend(rest);
+        chain
+    }
+
     /// Faux-style requirements for rendering a glyph from font `index`
     /// under the requested weight/italic: `(faux_bold, faux_italic)`.
     /// Unknown indices conservatively require both syntheses.
@@ -494,6 +522,29 @@ impl FontManager {
 /// Absolute distance between a face weight and the requested weight.
 fn weight_dist(face: u16, requested: u16) -> u16 {
     face.abs_diff(requested)
+}
+
+/// OS/2 code-page range bits corresponding to ASS/SSA Encoding values.
+/// This is intentionally only a hint: the glyph cmap remains authoritative.
+fn ass_code_page_bit(encoding: i32) -> Option<(usize, u32)> {
+    match encoding {
+        0 | 1 | 77 => Some((0, 0)), // Windows-1252
+        238 => Some((0, 1)),        // Windows-1250
+        204 => Some((0, 2)),        // Windows-1251
+        161 => Some((0, 3)),        // Windows-1253
+        162 => Some((0, 4)),        // Windows-1254
+        177 => Some((0, 5)),        // Windows-1255
+        178 => Some((0, 6)),        // Windows-1256
+        186 => Some((0, 7)),        // Windows-1257
+        163 => Some((0, 8)),        // Windows-1258
+        222 => Some((0, 16)),       // Windows-874
+        128 => Some((0, 17)),       // Shift-JIS / Windows-932
+        134 => Some((0, 18)),       // GBK / Windows-936
+        129 => Some((0, 19)),       // EUC-KR / Windows-949
+        136 => Some((0, 20)),       // Big5 / Windows-950
+        130 => Some((0, 21)),       // Johab / Windows-1361
+        _ => None,
+    }
 }
 
 /// Filename-based style guess, used only when font metadata is absent.
@@ -742,6 +793,24 @@ mod tests {
         assert_eq!(fm.faux_for(2, 700, true), (true, false));
         assert_eq!(fm.faux_for(2, 400, false), (false, false));
         assert_eq!(fm.faux_for(99, 700, true), (true, true));
+    }
+
+    #[test]
+    fn test_charset_aware_fallback_prefers_declared_codepage() {
+        let mut fm = FontManager::new();
+        for name in ["Primary", "Generic", "Japanese"] {
+            fm.load_font(name, get_fallback_font(), false, false)
+                .unwrap();
+        }
+        // Simulate metadata from a face whose OS/2 code-page range declares
+        // Shift-JIS. The requested face remains first; the charset hint only
+        // reorders the fallback candidates.
+        fm.fonts[2].code_page_ranges[0] = 1 << 17;
+        assert_eq!(fm.fallback_chain_for_encoding(0, 128), vec![0, 2, 1]);
+        assert_eq!(fm.fallback_chain_for_encoding(0, 999), vec![0, 1, 2]);
+        // A non-primary requested face must stay first even when another
+        // candidate advertises the active code page.
+        assert_eq!(fm.fallback_chain_for_encoding(1, 128), vec![1, 2, 0]);
     }
 
     #[test]

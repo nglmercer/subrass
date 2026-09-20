@@ -31,6 +31,9 @@ pub(super) struct FontMetadata {
     /// table parses: FreeType sizes SFNT faces by their sum.
     pub(super) win_ascent: Option<u16>,
     pub(super) win_descent: Option<u16>,
+    /// OS/2 `ulCodePageRange1/2` (offsets 78/82), used as a soft
+    /// charset hint when ordering fallback faces.
+    pub(super) code_page_ranges: [u32; 2],
     /// `head` unitsPerEm when nonzero.
     pub(super) units_per_em: Option<u16>,
 }
@@ -86,6 +89,12 @@ pub(super) fn inspect_font_metadata_at(data: &[u8], face_index: u32) -> Option<F
         if let (Some(win_asc), Some(win_desc)) = (read_u16(os2, 74), read_u16(os2, 76)) {
             meta.win_ascent = Some(win_asc);
             meta.win_descent = Some(win_desc);
+        }
+        if let Some(range1) = read_u32(os2, 78) {
+            meta.code_page_ranges[0] = range1;
+        }
+        if let Some(range2) = read_u32(os2, 82) {
+            meta.code_page_ranges[1] = range2;
         }
     }
 

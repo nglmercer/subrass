@@ -566,6 +566,10 @@ mod tests {
             TextShaper::decode_ass_bytes("日本語".as_bytes(), 128),
             "日本語"
         );
+        // Malformed legacy sequences have deterministic replacement behavior
+        // and do not consume a following ASCII/Unicode scalar.
+        assert_eq!(TextShaper::decode_ass_bytes(b"\x82", 128), "�");
+        assert_eq!(TextShaper::decode_ass_bytes(b"\x84A", 130), "�A");
     }
 
     #[test]

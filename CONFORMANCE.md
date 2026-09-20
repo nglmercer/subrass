@@ -195,7 +195,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\an`, legacy `\a` (first tag wins, libass `PARSED_A`; `\a4`/`\a8` quirk; bare/out-of-range resets to style) | ✓ | `test_alignment_first_tag_applies_event_wide`, `test_parse_legacy_a_quirk_and_range` | alignment/an-an/a-an/an-a G+L | Supported |
 | `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
-| `\fe` (legacy-byte charset bridge; Unicode text preserved; parsed/stored/reset) | ✓ | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_fe_encoding_is_render_neutral`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Supported for Windows-125x, Shift-JIS, CP949, GBK, Big5, Thai; invalid bytes become U+FFFD. Johab/font linking unsupported |
+| `\fe` (legacy-byte charset bridge; Unicode text preserved; parsed/stored/reset) | Partial | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_symbol_bytes_use_private_use_cmap_and_preserve_ass_breaks`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Windows-125x, Shift-JIS, CP949, GBK, Big5, Thai, and Symbol PUA mapping are supported; malformed bytes are deterministic. Johab codec and charset-based font linking remain unsupported |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
 | Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning/indic G+L | Supported |
 | `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_committed_collection_matches_styles_and_preserves_face_indices` | font-collection G+L | Supported; regular/bold-italic/Indic face indices gated |
@@ -216,6 +216,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
    so minor accumulation differences remain at glyph overlaps; inside
    gate thresholds: border-shadow IoU 0.891).
 5. `\fe` has no charset-based font linking and Johab remains Unicode-neutral;
+   Symbol bytes are mapped to U+F000..U+F0FF and require a loaded Symbol-compatible face;
    supported byte streams decode before shaping, invalid sequences become
    U+FFFD, and already-valid Unicode is never re-encoded.
 6. No implicit system-font discovery: WASM builds stay deterministic

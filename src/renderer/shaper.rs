@@ -12,7 +12,7 @@ mod line_break;
 #[path = "shaper/opentype.rs"]
 mod opentype;
 
-use self::encoding::{ass_encoding, decode_ass_bytes};
+use self::encoding::{decode_ass_bytes, decode_ass_text};
 pub use self::fallback::cluster_font_picks;
 pub use self::line_break::{
     cjk_break_between, is_cjk_breakable, is_cjk_nobreak_before, is_cjk_open, is_combining_mark,
@@ -85,34 +85,13 @@ pub struct TextShaper;
 
 impl TextShaper {
     /// Apply an ASS charset to the legacy byte-like portion of subtitle text.
-    /// ASCII and non-legacy Unicode scalars are preserved. Unknown, Symbol,
-    /// and Johab encodings intentionally remain Unicode-neutral. Invalid
+    /// ASCII and non-legacy Unicode scalars are preserved. Symbol bytes map
+    /// to the Windows Symbol private-use cmap range; Johab remains explicit
+    /// Unicode-neutral because no portable Johab codec is bundled. Invalid
     /// byte sequences decode with the WHATWG replacement character, while a
     /// following real Unicode scalar starts a fresh, unaffected run.
     pub fn decode_font_encoding(text: &str, encoding: i32) -> String {
-        let Some(codec) = ass_encoding(encoding) else {
-            return text.to_string();
-        };
-        let mut output = String::with_capacity(text.len());
-        let mut bytes = Vec::new();
-        let flush = |output: &mut String, bytes: &mut Vec<u8>| {
-            if bytes.is_empty() {
-                return;
-            }
-            let (decoded, _) = codec.decode_without_bom_handling(bytes);
-            output.push_str(&decoded);
-            bytes.clear();
-        };
-        for ch in text.chars() {
-            if (ch as u32) <= u32::from(u8::MAX) {
-                bytes.push(ch as u8);
-            } else {
-                flush(&mut output, &mut bytes);
-                output.push(ch);
-            }
-        }
-        flush(&mut output, &mut bytes);
-        output
+        decode_ass_text(text, encoding)
     }
 
     /// Decode byte-preserving event text, including mid-event `\fe` changes.
@@ -559,8 +538,12 @@ mod tests {
         // U+FFFD and never consume or corrupt later genuine Unicode.
         assert_eq!(TextShaper::decode_font_encoding("\u{a4}\u{40}", 136), "一");
         assert_eq!(TextShaper::decode_font_encoding("\u{82}α", 128), "�α");
-        // Symbol/unknown values have no portable code-page mapping here.
-        assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 2), "ð");
+        // Symbol bytes use the Windows Symbol private-use cmap range.
+        assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 2), "\u{f0f0}");
+        assert_eq!(
+            TextShaper::decode_font_encoding(r"{\fe2}A{\fe0}B", 0),
+            "{\\fe2}\u{f041}{\\fe0}B"
+        );
         // Johab is not provided by encoding_rs and remains explicitly neutral.
         assert_eq!(
             TextShaper::decode_font_encoding("\u{84}\u{41}", 130),
@@ -583,6 +566,15 @@ mod tests {
             TextShaper::decode_ass_bytes("日本語".as_bytes(), 128),
             "日本語"
         );
+    }
+
+    #[test]
+    fn test_symbol_bytes_use_private_use_cmap_and_preserve_ass_breaks() {
+        assert_eq!(
+            TextShaper::decode_ass_bytes(b"A\\N B", 2),
+            "\u{f041}\\N\u{f020}\u{f042}"
+        );
+        assert_eq!(TextShaper::decode_ass_bytes(b"{\\fe0}A", 2), "{\\fe0}A");
     }
 
     #[test]

@@ -30,6 +30,100 @@ pub(super) fn ass_encoding(value: i32) -> Option<&'static Encoding> {
     }
 }
 
+/// Windows Symbol fonts expose their byte slots through the private-use
+/// cmap range U+F000..U+F0FF. This is a font mapping, not a normal text
+/// encoding; the caller must still select a Symbol-compatible face.
+pub(super) fn decode_symbol_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| char::from_u32(0xF000 + u32::from(*byte)).unwrap_or('\u{FFFD}'))
+        .collect()
+}
+
+/// Decode a Unicode event string while preserving ASS tags and applying
+/// mid-event `\fe` changes. This is the compatibility path for the existing
+/// `parse(&str)` API; raw legacy files use [`decode_ass_bytes`] instead.
+pub(super) fn decode_ass_text(text: &str, default_encoding: i32) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut encoding = default_encoding;
+    let mut offset = 0;
+
+    while offset < text.len() {
+        if text.as_bytes()[offset] == b'{' {
+            if let Some(relative_end) = text[offset..].find('}') {
+                let end = offset + relative_end + 1;
+                let tag_text = &text[offset..end];
+                output.push_str(tag_text);
+                if let Some(segment) = parse_text_segments(tag_text).first() {
+                    for tag in &segment.tags {
+                        if let OverrideTag::FontEncoding(value) = tag {
+                            encoding = *value;
+                        }
+                    }
+                }
+                offset = end;
+                continue;
+            }
+        }
+
+        let end = text[offset..]
+            .find('{')
+            .map_or(text.len(), |relative| offset + relative);
+        output.push_str(&decode_text_run(&text[offset..end], encoding));
+        offset = end;
+    }
+
+    output
+}
+
+fn decode_text_run(text: &str, encoding: i32) -> String {
+    if encoding == 2 {
+        let mut output = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\\'
+                && chars
+                    .peek()
+                    .is_some_and(|next| matches!(next, 'N' | 'n' | 'h'))
+            {
+                output.push(ch);
+                if let Some(next) = chars.next() {
+                    output.push(next);
+                }
+            } else if (ch as u32) <= u32::from(u8::MAX) {
+                output.push_str(&decode_symbol_bytes(&[ch as u8]));
+            } else {
+                output.push(ch);
+            }
+        }
+        return output;
+    }
+
+    let Some(codec) = ass_encoding(encoding) else {
+        return text.to_string();
+    };
+    let mut output = String::with_capacity(text.len());
+    let mut bytes = Vec::new();
+    let flush = |output: &mut String, bytes: &mut Vec<u8>| {
+        if bytes.is_empty() {
+            return;
+        }
+        let (decoded, _) = codec.decode_without_bom_handling(bytes);
+        output.push_str(&decoded);
+        bytes.clear();
+    };
+    for ch in text.chars() {
+        if (ch as u32) <= u32::from(u8::MAX) {
+            bytes.push(ch as u8);
+        } else {
+            flush(&mut output, &mut bytes);
+            output.push(ch);
+        }
+    }
+    flush(&mut output, &mut bytes);
+    output
+}
+
 /// Decode raw ASS event bytes while honoring ASCII `\fe` tags encountered
 /// between text runs. Valid UTF-8 scalars are preserved as Unicode; other
 /// bytes are decoded as one deterministic legacy run under the current ASS
@@ -58,8 +152,21 @@ pub(super) fn decode_ass_bytes(bytes: &[u8], default_encoding: i32) -> String {
             }
         }
 
-        let start = offset;
+        let mut start = offset;
         while offset < bytes.len() && bytes[offset] != b'{' {
+            if bytes[offset] == b'\\'
+                && bytes
+                    .get(offset + 1)
+                    .is_some_and(|next| matches!(next, b'N' | b'n' | b'h'))
+            {
+                if start < offset {
+                    output.push_str(&decode_mixed_bytes(&bytes[start..offset], encoding));
+                }
+                output.extend([b'\\', bytes[offset + 1]].map(char::from));
+                offset += 2;
+                start = offset;
+                continue;
+            }
             offset += 1;
         }
         output.push_str(&decode_mixed_bytes(&bytes[start..offset], encoding));
@@ -69,6 +176,10 @@ pub(super) fn decode_ass_bytes(bytes: &[u8], default_encoding: i32) -> String {
 }
 
 fn decode_mixed_bytes(bytes: &[u8], encoding: i32) -> String {
+    if encoding == 2 {
+        return decode_symbol_bytes(bytes);
+    }
+
     let mut output = String::with_capacity(bytes.len());
     let mut legacy = Vec::new();
     let mut offset = 0;

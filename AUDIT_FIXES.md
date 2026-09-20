@@ -580,7 +580,9 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
   are host/video-conversion artifacts and are not used to claim raw libass
   subtitle-color parity. Direct RGBA tests cover metadata pass-through; the
   explicit converter covers downstream matrix/range handling.
-- **Legacy charsets**: Windows-1250/51/52/53/54/55/56/57/58, Thai,
-  Shift-JIS, CP949, GBK, and Big5 byte-like runs decode before shaping;
-  Unicode is preserved and invalid sequences use U+FFFD. Johab and
-  charset-based font linking remain explicitly unsupported.
+- **Legacy charsets**: `AssDocument::parse_bytes` retains actual event bytes;
+  Windows-1250/51/52/53/54/55/56/57/58, Thai, Shift-JIS, CP949, GBK, and
+  Big5 runs decode before shaping. Symbol bytes map to U+F000..U+F0FF when a
+  compatible face is explicitly loaded. Unicode is preserved and malformed
+  sequences are deterministic. Johab and charset-based font linking remain
+  explicitly unsupported.

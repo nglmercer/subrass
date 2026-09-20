@@ -1,5 +1,7 @@
 use crate::types::color::Color;
 
+use super::OverrideTag;
+
 pub(super) fn parse_ass_color_tag(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('&').trim_end_matches('&');
     let s = s
@@ -39,6 +41,22 @@ pub(super) fn parse_ass_alpha(s: &str) -> Option<u8> {
 
     match s.len() {
         2 => u8::from_str_radix(s, 16).ok(),
+        _ => None,
+    }
+}
+
+/// Parse primary/secondary/outline/shadow colors and alpha overrides.
+pub(super) fn parse(name: &str, params: Option<&str>) -> Option<OverrideTag> {
+    match name {
+        "c" | "1c" => Some(OverrideTag::PrimaryColor(parse_ass_color_tag(params?)?)),
+        "2c" => Some(OverrideTag::SecondaryColor(parse_ass_color_tag(params?)?)),
+        "3c" => Some(OverrideTag::OutlineColor(parse_ass_color_tag(params?)?)),
+        "4c" => Some(OverrideTag::ShadowColor(parse_ass_color_tag(params?)?)),
+        "alpha" => Some(OverrideTag::Alpha(parse_ass_alpha(params?)?)),
+        "1a" => Some(OverrideTag::PrimaryAlpha(parse_ass_alpha(params?)?)),
+        "2a" => Some(OverrideTag::SecondaryAlpha(parse_ass_alpha(params?)?)),
+        "3a" => Some(OverrideTag::OutlineAlpha(parse_ass_alpha(params?)?)),
+        "4a" => Some(OverrideTag::ShadowAlpha(parse_ass_alpha(params?)?)),
         _ => None,
     }
 }

@@ -37,3 +37,11 @@ pub(super) fn parse_clip_params(params: Option<&str>, inverse: bool) -> Option<O
         OverrideTag::ClipVector { scale, drawing }
     })
 }
+
+pub(super) fn parse(name: &str, params: Option<&str>) -> Option<OverrideTag> {
+    match name {
+        "clip" => parse_clip_params(params, false),
+        "iclip" => parse_clip_params(params, true),
+        _ => None,
+    }
+}

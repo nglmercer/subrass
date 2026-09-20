@@ -24,3 +24,13 @@ pub(super) fn parse_karaoke_param(params: Option<&str>, mode: u8) -> Option<Over
     }
     .into()
 }
+
+pub(super) fn parse(name: &str, params: Option<&str>) -> Option<OverrideTag> {
+    match name {
+        "k" => parse_karaoke_param(params, 0),
+        "K" | "kf" => parse_karaoke_param(params, 1),
+        "ko" => parse_karaoke_param(params, 2),
+        "kt" => parse_karaoke_param(params, 3),
+        _ => None,
+    }
+}

@@ -5,15 +5,17 @@ use super::color::Color;
 mod clip;
 mod color;
 mod drawing;
+mod effects;
 mod karaoke;
 mod lexer;
 mod model;
+mod positioning;
+mod reset;
 mod scalar;
+mod transform;
+mod typography;
 
-use self::clip::parse_clip_params;
-use self::color::{parse_ass_alpha, parse_ass_color_tag};
 use self::drawing::drawing_contains_command;
-use self::karaoke::parse_karaoke_param;
 use self::lexer::{complex_tag_keyword, is_complex_tag_name, split_tag_args, split_tag_name};
 pub use self::model::{ass_bold_weight, TextSegment};
 use self::scalar::{libass_dtoi32, parse_libass_f64, parse_libass_i32, sanitize_coord};
@@ -573,410 +575,34 @@ fn parse_tag_with_params(name: &str, params: Option<&str>, depth: u32) -> Option
             return None;
         }
     }
-    if params.is_none()
-        && matches!(
-            name,
-            "b" | "i"
-                | "u"
-                | "s"
-                | "fn"
-                | "fe"
-                | "fsp"
-                | "fr"
-                | "frx"
-                | "fry"
-                | "frz"
-                | "fscx"
-                | "fscy"
-                | "fax"
-                | "fay"
-                | "bord"
-                | "xbord"
-                | "ybord"
-                | "shad"
-                | "xshad"
-                | "yshad"
-                | "be"
-                | "blur"
-        )
-    {
+    if params.is_none() && reset::is_property_reset_name(name) {
         return Some(OverrideTag::PropertyReset(name.to_string()));
     }
-    match name {
-        "b" => {
-            let val = parse_libass_i32(params?);
-            if !(val == 0 || val == 1 || val >= 100) {
-                return Some(OverrideTag::PropertyReset(name.to_string()));
-            }
-            Some(OverrideTag::Bold(ass_bold_weight(val)))
-        }
-        "i" => {
-            let val = parse_libass_i32(params?);
-            if !(0..=1).contains(&val) {
-                return Some(OverrideTag::PropertyReset(name.to_string()));
-            }
-            Some(OverrideTag::Italic(val != 0))
-        }
-        "u" => {
-            let val = parse_libass_i32(params?);
-            if !(0..=1).contains(&val) {
-                return Some(OverrideTag::PropertyReset(name.to_string()));
-            }
-            Some(OverrideTag::Underline(val != 0))
-        }
-        "s" => {
-            let val = parse_libass_i32(params?);
-            if !(0..=1).contains(&val) {
-                return Some(OverrideTag::PropertyReset(name.to_string()));
-            }
-            Some(OverrideTag::StrikeOut(val != 0))
-        }
-        "fn" => Some(OverrideTag::FontName(params?.trim().to_string())),
-        "fs" => {
-            // libass `ass_parse.c`: a leading `+`/`-` makes the size
-            // relative to the current size; otherwise it is absolute.
-            // Bare `\fs` resets to the event style size.
-            let raw = params.unwrap_or("").trim();
-            if raw.is_empty() {
-                return Some(OverrideTag::FontSizeReset);
-            }
-            if !raw.chars().any(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            let val = parse_libass_f64(raw);
-            if raw.starts_with('+') || raw.starts_with('-') {
-                Some(OverrideTag::FontSizeRelative(val))
-            } else {
-                Some(OverrideTag::FontSize(val))
-            }
-        }
-        "fe" => {
-            if !params?.chars().any(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            let val = parse_libass_i32(params?);
-            Some(OverrideTag::FontEncoding(val))
-        }
-        "fsp" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::LetterSpacing(val))
-        }
-        "r" => {
-            let name = params
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            Some(OverrideTag::Reset(name))
-        }
-        "c" | "1c" => {
-            let color_str = params?;
-            let color = parse_ass_color_tag(color_str)?;
-            Some(OverrideTag::PrimaryColor(color))
-        }
-        "2c" => {
-            let color_str = params?;
-            let color = parse_ass_color_tag(color_str)?;
-            Some(OverrideTag::SecondaryColor(color))
-        }
-        "3c" => {
-            let color_str = params?;
-            let color = parse_ass_color_tag(color_str)?;
-            Some(OverrideTag::OutlineColor(color))
-        }
-        "4c" => {
-            let color_str = params?;
-            let color = parse_ass_color_tag(color_str)?;
-            Some(OverrideTag::ShadowColor(color))
-        }
-        "alpha" => {
-            let alpha_str = params?;
-            let alpha = parse_ass_alpha(alpha_str)?;
-            Some(OverrideTag::Alpha(alpha))
-        }
-        "1a" => {
-            let alpha_str = params?;
-            let alpha = parse_ass_alpha(alpha_str)?;
-            Some(OverrideTag::PrimaryAlpha(alpha))
-        }
-        "2a" => {
-            let alpha_str = params?;
-            let alpha = parse_ass_alpha(alpha_str)?;
-            Some(OverrideTag::SecondaryAlpha(alpha))
-        }
-        "3a" => {
-            let alpha_str = params?;
-            let alpha = parse_ass_alpha(alpha_str)?;
-            Some(OverrideTag::OutlineAlpha(alpha))
-        }
-        "4a" => {
-            let alpha_str = params?;
-            let alpha = parse_ass_alpha(alpha_str)?;
-            Some(OverrideTag::ShadowAlpha(alpha))
-        }
-        "pos" => {
-            // Exactly 2 arguments (libass `nargs == 2`); extra or
-            // missing arguments ignore the whole tag. Values are
-            // prefix-parsed and never fail (`\pos(x,20)` is (0,20)).
-            let parts = split_tag_args(params?);
-            if parts.len() == 2 {
-                Some(OverrideTag::Position(
-                    sanitize_coord(parse_libass_f64(parts[0])),
-                    sanitize_coord(parse_libass_f64(parts[1])),
+    typography::parse(name, params)
+        .or_else(|| reset::parse(name, params))
+        .or_else(|| color::parse(name, params))
+        .or_else(|| positioning::parse(name, params))
+        .or_else(|| transform::parse(name, params, depth))
+        .or_else(|| effects::parse(name, params))
+        .or_else(|| clip::parse(name, params))
+        .or_else(|| drawing::parse(name, params))
+        .or_else(|| karaoke::parse(name, params))
+        .or_else(|| {
+            if name == "q" {
+                Some(OverrideTag::WrapStyle(
+                    params.map(parse_libass_i32).unwrap_or(-1),
                 ))
             } else {
                 None
             }
-        }
-        "move" => {
-            // Exactly 4 (untimed) or 6 (timed) arguments; anything
-            // else is ignored. Coordinates are prefix-parsed, times
-            // are `i32` (`argtoi32`), and reversed times swap (libass
-            // parses `t1 > t2` swapped), so resolution never sees them.
-            let parts = split_tag_args(params?);
-            match parts.len() {
-                4 => Some(OverrideTag::Move(
-                    sanitize_coord(parse_libass_f64(parts[0])),
-                    sanitize_coord(parse_libass_f64(parts[1])),
-                    sanitize_coord(parse_libass_f64(parts[2])),
-                    sanitize_coord(parse_libass_f64(parts[3])),
-                )),
-                6 => {
-                    let t1 = parse_libass_i32(parts[4]);
-                    let t2 = parse_libass_i32(parts[5]);
-                    let (t1, t2) = if t1 > t2 { (t2, t1) } else { (t1, t2) };
-                    Some(OverrideTag::MoveWithTiming(
-                        sanitize_coord(parse_libass_f64(parts[0])),
-                        sanitize_coord(parse_libass_f64(parts[1])),
-                        sanitize_coord(parse_libass_f64(parts[2])),
-                        sanitize_coord(parse_libass_f64(parts[3])),
-                        t1,
-                        t2,
-                    ))
-                }
-                _ => None,
-            }
-        }
-        "org" => {
-            // Exactly 2 arguments, like `\pos`.
-            let parts = split_tag_args(params?);
-            if parts.len() == 2 {
-                Some(OverrideTag::Origin(
-                    sanitize_coord(parse_libass_f64(parts[0])),
-                    sanitize_coord(parse_libass_f64(parts[1])),
-                ))
-            } else {
-                None
-            }
-        }
-        "an" => {
-            // libass `tag("an")` + `argtoi32`: the value is a digit
-            // prefix (`\an7x` is 7), garbage means 0, and every form —
-            // bare, garbage, out-of-range — consumes PARSED_A with a
-            // style fallback for anything outside 1-9.
-            let raw = params.unwrap_or("");
-            if raw.trim().is_empty() {
-                return Some(OverrideTag::AlignmentReset);
-            }
-            let val = parse_libass_i32(raw);
-            if !(1..=9).contains(&val) {
-                return Some(OverrideTag::AlignmentReset);
-            }
-            Some(OverrideTag::Alignment(val))
-        }
-        "a" => {
-            // Legacy SSA alignment numbering, converted to ASS numpad.
-            // libass `tag("a")` after `tag("an")`: same prefix-number
-            // parsing; values outside 1-11 fall back to the style
-            // (slot still consumed), and the VSFilter quirk maps
-            // illegal \a4 / \a8 to \a5.
-            let raw = params.unwrap_or("");
-            if raw.trim().is_empty() {
-                return Some(OverrideTag::AlignmentReset);
-            }
-            let val = parse_libass_i32(raw);
-            if !(1..=11).contains(&val) {
-                return Some(OverrideTag::AlignmentReset);
-            }
-            let val = if val == 4 || val == 8 { 5 } else { val };
-            Some(OverrideTag::Alignment(super::style::ssa_alignment_to_ass(
-                val,
-            )))
-        }
-        "frx" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::RotationX(val))
-        }
-        "fry" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::RotationY(val))
-        }
-        "frz" | "fr" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::RotationZ(val))
-        }
-        "fscx" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ScaleX(val))
-        }
-        "fscy" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ScaleY(val))
-        }
-        // libass `tag("fsc")`: resets both scale axes to the style and
-        // ignores any value.
-        "fsc" => Some(OverrideTag::ScaleReset),
-        "fax" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ShearX(val))
-        }
-        "fay" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ShearY(val))
-        }
-        "bord" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::Border(val))
-        }
-        "xbord" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::BorderX(val))
-        }
-        "ybord" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::BorderY(val))
-        }
-        "shad" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::Shadow(val))
-        }
-        "xshad" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ShadowX(val))
-        }
-        "yshad" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::ShadowY(val))
-        }
-        "be" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::EdgeBlur(val))
-        }
-        "blur" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::Blur(val))
-        }
-        // libass parses both names identically (`complex_tag("fade") ||
-        // complex_tag("fad")`): argument COUNT selects the behavior, not
-        // the name — 2 args is a simple fade, 7 is a complex fade, and
-        // anything else ignores the tag. So `\fade(100,200)` fades and
-        // `\fad(3-arg)` does not. Values are prefix-parsed `i32` and
-        // never fail (`\fad(x,200)` fades out only).
-        "fad" | "fade" => {
-            let parts = split_tag_args(params?);
-            match parts.len() {
-                2 => Some(OverrideTag::Fade(
-                    parse_libass_i32(parts[0]),
-                    parse_libass_i32(parts[1]),
-                )),
-                7 => Some(OverrideTag::ComplexFade(
-                    parse_libass_i32(parts[0]),
-                    parse_libass_i32(parts[1]),
-                    parse_libass_i32(parts[2]),
-                    parse_libass_i32(parts[3]),
-                    parse_libass_i32(parts[4]),
-                    parse_libass_i32(parts[5]),
-                    parse_libass_i32(parts[6]),
-                )),
-                _ => None,
-            }
-        }
-        "t" => {
-            // libass `complex_tag("t")`: parenthesized only (the group
-            // parser rejects bare `\t`), and the last argument swallows
-            // from the first backslash to `)`, so timing args precede it.
-            // `cnt` = nargs - 1 selects the timing form; without inner
-            // tags, or with more than 3 timing args, it is ignored.
-            // Past the nesting cap the whole tag degrades to Unknown
-            // instead of recursing deeper (stack safety).
-            if depth >= MAX_TAG_NESTING {
-                return None;
-            }
-            let params = params?;
-            let tags_pos = params.find('\\').unwrap_or(params.len());
-            let (args_part, tags_str) = params.split_at(tags_pos);
-            if !tags_str.contains('\\') {
-                return None;
-            }
-            let mut args: Vec<&str> = args_part
-                .split(',')
-                .map(|s| s.trim_matches([' ', '\t']))
-                .filter(|s| !s.is_empty())
-                .collect();
-            // A non-comma-terminated tail before the backslash belongs to
-            // the swallowed last argument, not to timing (`\t(1,2,x\y)`
-            // times (1,2), like libass's backslash swallow).
-            if !args_part.trim_matches([' ', '\t']).ends_with(',') {
-                args.pop();
-            }
-
-            // VSFilter-compatible per-count parsing: the 2-timing-arg
-            // form parses floats (`dtoi32`), the 3-arg form parses ints
-            // (`argtoi32`), so `\t(1e3,2000,\fs3)` starts at 1000 while
-            // `\t(1e3,2000,1,\fs3)` starts at 1. `t2 == 0` means "until
-            // the end of the event" (resolved at evaluation).
-            let (t1, t2, accel) = match args.len() {
-                0 => (0, 0, 1.0),
-                1 => (0, 0, parse_libass_f64(args[0])),
-                2 => (
-                    libass_dtoi32(parse_libass_f64(args[0])),
-                    libass_dtoi32(parse_libass_f64(args[1])),
-                    1.0,
-                ),
-                3 => (
-                    parse_libass_i32(args[0]),
-                    parse_libass_i32(args[1]),
-                    parse_libass_f64(args[2]),
-                ),
-                _ => return None,
-            };
-
-            let tags = parse_tag_group_depth(tags_str, depth + 1);
-
-            Some(OverrideTag::Transform {
-                t1,
-                t2,
-                accel,
-                tags,
-            })
-        }
-        "clip" => parse_clip_params(params, false),
-        "iclip" => parse_clip_params(params, true),
-        "p" => {
-            let val = parse_libass_i32(params.unwrap_or("")).max(0);
-            Some(OverrideTag::Drawing(val))
-        }
-        "pbo" => {
-            let val = parse_libass_f64(params.unwrap_or(""));
-            Some(OverrideTag::DrawingBaseline(val))
-        }
-        "q" => {
-            let val = params.map(parse_libass_i32).unwrap_or(-1);
-            Some(OverrideTag::WrapStyle(val))
-        }
-        // Bare karaoke tags carry libass defaults (`\k`/`\K`/`\kf`/`\ko`
-        // default to 100cs, bare `\kt` to 0); empty parens count as bare.
-        "k" => parse_karaoke_param(params, 0),
-        "K" | "kf" => parse_karaoke_param(params, 1),
-        "ko" => parse_karaoke_param(params, 2),
-        "kt" => parse_karaoke_param(params, 3),
-        _ => {
-            // Reconstruct tag string for unknown tags
+        })
+        .or_else(|| {
             let tag_str = match params {
                 Some(p) => format!("{}{}", name, p),
                 None => name.to_string(),
             };
             Some(OverrideTag::Unknown(tag_str))
-        }
-    }
+        })
 }
 
 #[cfg(test)]

@@ -9,3 +9,17 @@ pub(super) fn drawing_contains_command(drawing: &str) -> bool {
         )
     })
 }
+
+use super::{parse_libass_f64, parse_libass_i32, OverrideTag};
+
+pub(super) fn parse(name: &str, params: Option<&str>) -> Option<OverrideTag> {
+    match name {
+        "p" => Some(OverrideTag::Drawing(
+            parse_libass_i32(params.unwrap_or("")).max(0),
+        )),
+        "pbo" => Some(OverrideTag::DrawingBaseline(parse_libass_f64(
+            params.unwrap_or(""),
+        ))),
+        _ => None,
+    }
+}

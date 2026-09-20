@@ -18,7 +18,7 @@ use self::wrapping::{wrap_event_text, wrap_event_text_with_measure};
 mod lines;
 use self::lines::{
     accumulate_fay_shear, deco_bar_rows, drawing_unit_scale, event_line_boxes, event_line_widths,
-    line_align_inset, paint_deco_bar, scale_clip_rect,
+    line_align_inset, paint_deco_bar,
 };
 #[path = "karaoke.rs"]
 mod karaoke;
@@ -30,9 +30,13 @@ use self::karaoke::{
 use self::karaoke::{KaraokeBuild, KaraokeRun};
 #[path = "compositor_layout.rs"]
 mod layout_resolution;
+#[path = "paint/mod.rs"]
+mod paint;
 #[path = "compositor_style.rs"]
 mod style_resolution;
 
+#[cfg(test)]
+use self::lines::scale_clip_rect;
 #[cfg(test)]
 use self::lines::segment_drawing_mode;
 #[cfg(test)]
@@ -512,23 +516,15 @@ impl Compositor {
                 );
                 rects.push(rect);
             }
-            if shadow_active {
-                for (x, y, w, h) in &rects {
-                    effects::apply_opaque_box(
-                        buffer,
-                        x.saturating_add(shadow_ox),
-                        y.saturating_add(shadow_oy),
-                        *w,
-                        *h,
-                        pad_x,
-                        pad_y,
-                        shadow_fill,
-                    );
-                }
-            }
-            for (x, y, w, h) in &rects {
-                effects::apply_opaque_box(buffer, *x, *y, *w, *h, pad_x, pad_y, fill);
-            }
+            paint::decorations::paint_opaque_boxes(
+                buffer,
+                &rects,
+                shadow_active.then_some((shadow_ox, shadow_oy)),
+                pad_x,
+                pad_y,
+                shadow_fill,
+                fill,
+            );
         }
 
         // Karaoke runs (empty when the event has no karaoke tags).
@@ -1461,31 +1457,14 @@ impl Compositor {
         // midpoint, exactly like the glyph ink.
         sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
 
-        // Blur before clipping: blurring after a clip would bleed
-        // pixels outside the clip region.
-        if resolved.blur > 0.0 {
-            effects::apply_blur_xy(
-                buffer,
-                resolved.blur * blur_scale_x,
-                resolved.blur * blur_scale_y,
-            );
-        }
-
-        // Apply clipping (after all segments rendered)
-        if let Some(clip_rect) = resolved.clip {
-            effects::apply_clip(buffer, scale_clip_rect(clip_rect, scale_x, scale_y));
-        }
-
-        if let Some(clip_rect) = resolved.inverse_clip {
-            effects::apply_inverse_clip(buffer, scale_clip_rect(clip_rect, scale_x, scale_y));
-        }
-
-        if let Some(vector) = &resolved.clip_vector {
-            Self::apply_vector_clip(buffer, vector, scale_x, scale_y, false);
-        }
-        if let Some(vector) = &resolved.inverse_clip_vector {
-            Self::apply_vector_clip(buffer, vector, scale_x, scale_y, true);
-        }
+        paint::clipping::apply_event_clips(
+            buffer,
+            resolved,
+            scale_x,
+            scale_y,
+            blur_scale_x,
+            blur_scale_y,
+        );
 
         // Legacy scroll-effect clip bounds and edge fades (VSFilter
         // EF_BANNER/EF_SCROLL clipper). Sequential clips intersect, so
@@ -1541,24 +1520,6 @@ impl Compositor {
             }
             None => {}
         }
-    }
-
-    /// Render a vector clip shape as an alpha mask over the event buffer
-    /// (script coordinates, drawing scale) and apply or invert it.
-    fn apply_vector_clip(
-        buffer: &mut RenderBuffer,
-        clip: &VectorClip,
-        scale_x: f64,
-        scale_y: f64,
-        inverse: bool,
-    ) {
-        let unit = drawing_unit_scale(scale_x, scale_y, clip.scale.max(1));
-        let mut mask = match RenderBuffer::new(buffer.width, buffer.height) {
-            Ok(mask) => mask,
-            Err(_) => return,
-        };
-        super::drawing::DrawingParser::render_mask(&mut mask, &clip.drawing, 0.0, 0.0, unit);
-        effects::apply_alpha_mask(buffer, &mask, inverse);
     }
 
     /// Extract clean text from event text (remove override tags)

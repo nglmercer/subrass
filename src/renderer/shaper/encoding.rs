@@ -70,6 +70,23 @@ fn decode_text_run(text: &str, encoding: i32) -> String {
         return output;
     }
 
+    if encoding == 130 {
+        // encoding_rs has no Johab codec. Do not silently pass byte-like
+        // U+0080..U+00FF values through as if they were Unicode: reject the
+        // unsupported legacy bytes deterministically while preserving ASCII
+        // syntax and already-valid Unicode scalars.
+        return text
+            .chars()
+            .map(|ch| {
+                if (ch as u32) <= 0x7F || (ch as u32) > u32::from(u8::MAX) {
+                    ch
+                } else {
+                    '\u{FFFD}'
+                }
+            })
+            .collect();
+    }
+
     let Some(codec) = ass_encoding(encoding) else {
         return text.to_string();
     };

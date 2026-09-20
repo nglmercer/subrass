@@ -86,9 +86,10 @@ pub struct TextShaper;
 impl TextShaper {
     /// Apply an ASS charset to the legacy byte-like portion of subtitle text.
     /// ASCII and non-legacy Unicode scalars are preserved. Symbol bytes map
-    /// to the Windows Symbol private-use cmap range; Johab remains explicit
-    /// Unicode-neutral because no portable Johab codec is bundled. Invalid
-    /// byte sequences decode with the WHATWG replacement character, while a
+    /// to the Windows Symbol private-use cmap range. Johab (`\fe130`) is an
+    /// explicit unsupported-codec boundary: byte-like values become the
+    /// replacement character rather than being silently treated as Unicode.
+    /// Invalid byte sequences decode with the replacement character, while a
     /// following real Unicode scalar starts a fresh, unaffected run.
     pub fn decode_font_encoding(text: &str, encoding: i32) -> String {
         decode_ass_text(text, encoding)
@@ -544,11 +545,10 @@ mod tests {
             TextShaper::decode_font_encoding(r"{\fe2}A{\fe0}B", 0),
             "{\\fe2}\u{f041}{\\fe0}B"
         );
-        // Johab is not provided by encoding_rs and remains explicitly neutral.
-        assert_eq!(
-            TextShaper::decode_font_encoding("\u{84}\u{41}", 130),
-            "\u{84}A"
-        );
+        // Johab is not provided by encoding_rs; unsupported byte-like
+        // values are rejected deterministically rather than treated as
+        // Unicode-neutral.
+        assert_eq!(TextShaper::decode_font_encoding("\u{84}\u{41}", 130), "�A");
         assert_eq!(TextShaper::decode_font_encoding("\u{f0}", 999), "ð");
     }
 

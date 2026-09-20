@@ -1,4 +1,4 @@
-# Audit Remediation Log
+# Audit Remediation Log (historical)
 
 Remediation of the 100-item audit, grouped by phase,
 plus follow-up review passes. All Rust behavior changes carry regression
@@ -12,6 +12,13 @@ attachment budgets, 13 new reference fixtures), and the
 remediation pass at the bottom (move timing, exact arity, wrap 3≡0,
 `\r` keeps drawing, per-glyph decorations, CJK/ZWSP breaking, harness
 proofs, doc sync).
+
+This file is a historical audit trail, not the current support matrix. Some
+older entries intentionally describe states that were later superseded. The
+current implementation and verification status live in `CONFORMANCE.md` and
+the README; in particular, OpenType shaping, TTC/OTC collections, byte
+decoding, and code-page-aware fallback are now implemented, while Johab
+(`\fe130`) remains an explicit unsupported codec boundary.
 
 ## Phase 1 — Safety invariants (#1–3, #70–75, #95)
 

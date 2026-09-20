@@ -183,7 +183,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `ScaledBorderAndShadow` yes/no (unscaled = 1:1 video px: VSFilter/legacy-libass; current libass without storage size ignores the flag) | ✓ | `test_scaled_*` | — | Supported |
 | `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators; unset = video size) | ✓ | `test_layout_res_drives_unscaled_borders_like_libass` | — | Supported |
 | `Kerning:` header (default off, like libass `calloc` track); `liga`/`clig` off under non-zero `\fsp` | ✓ | `test_opentype_kerning_matches_libass_default_off`, `test_kerning_header_parses_like_libass_bool` | alignment G+L (mean_err 8.87) | Supported |
-| OpenType shaping (`harfrust` GSUB/GPOS + bidi visual runs; `.ttc`/`.otc` all faces; explicit native system fonts) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_system_font_discovery_is_explicit_and_idempotent` | arabic/hebrew/mixed-bidi/indic/font-collection G+L | Supported |
+| OpenType shaping (`harfrust` GSUB/GPOS + bidi visual runs; `.ttc`/`.otc` all faces; explicit native system fonts) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_edge_script_shaping_and_fallback_share_advances`, `test_system_font_discovery_is_explicit_and_idempotent` | arabic/hebrew/mixed-bidi/indic/font-collection G+L | Supported |
 | `\clip`, `\iclip` rect + vector (separate state: later rect replaces + flips mode, first vector retained, both render) | ✓ | `test_clip_libass_rect_vector_semantics` | clip/vector-clip/rect-vector-clip/vector-rect-clip/vector-vector-clip G+L | Supported |
 | Drawings `\pN`, `\pbo`, `m n l b s p c` (bbox min preserved: advance = width, ink at pen + min; `\kf` splits at ink-left + frac × advance) | ✓ | `test_drawing_preserves_min_*`, `test_pbo_shifts_drawing`, `test_kf_drawing_split_at_fractional_scale` | drawing G+L (IoU 0.828), reset-drawing G+L (IoU 0.889) | Supported (B-splines are subdivided; `\pbo` uses libass asc/desc line metrics) |
 | `\fad`, `\fade` (first fade tag wins, libass `PARSED_FADE`) | ✓ | `test_fad_fade_first_wins_both_orders` | fade/fad-fade/fade-fad G+L | Supported |
@@ -195,7 +195,7 @@ the harness reports it as pending (never as a pass) in normal mode, and
 | `\an`, legacy `\a` (first tag wins, libass `PARSED_A`; `\a4`/`\a8` quirk; bare/out-of-range resets to style) | ✓ | `test_alignment_first_tag_applies_event_wide`, `test_parse_legacy_a_quirk_and_range` | alignment/an-an/a-an/an-a G+L | Supported |
 | `BorderStyle=3` opaque box (Outline colour, outline padding, per-line) | — | opaque-box tests | opaque-box G+L (IoU 0.992), opaque-box-multiline G+L (IoU 1.000) | Supported |
 | `[Fonts]`/`[Graphics]` attachments (validated alphabet, section-aware headers) | ✓ | ✓ | — | Supported; fonts auto-loaded best-effort |
-| `\fe` (legacy-byte charset bridge; Unicode text preserved; parsed/stored/reset) | Partial | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_symbol_bytes_use_private_use_cmap_and_preserve_ass_breaks`, `test_fe_resolve_and_reset` | fe-charset G+L (IoU 0.954) | Windows-125x, Shift-JIS, CP949, GBK, Big5, Thai, and Symbol PUA mapping are supported; malformed bytes are deterministic. Johab is an explicit unsupported-codec boundary (byte-like values become U+FFFD), and charset-based font linking remains unsupported |
+| `\fe` (legacy-byte charset bridge; Unicode text preserved; parsed/stored/reset; code-page-aware fallback ordering) | Partial | `test_ass_charset_mapping_preserves_unicode_scripts`, `test_symbol_bytes_use_private_use_cmap_and_preserve_ass_breaks`, `test_fe_resolve_and_reset`, `test_charset_aware_fallback_prefers_declared_codepage` | fe-charset G+L (IoU 0.954) | Windows-125x, Shift-JIS, CP949, GBK, Big5, Thai, Symbol PUA mapping, and OS/2 code-page fallback hints are supported; glyph coverage remains authoritative and malformed bytes are deterministic. Johab is an explicit unsupported-codec boundary (byte-like values become U+FFFD) |
 | Legacy `Banner`, `Scroll up/down` effects | ✓ | ✓ | effect-* G (L: known-divergent) | Supported (VSFilter semantics; libass ignores) |
 | Complex shaping (Arabic/Hebrew/mixed-bidi, ligatures, kerning, marks; `harfrust` GSUB/GPOS + bidi) | ✓ | `test_opentype_shaping_uses_gsub_bidi_and_marks`, `test_noto_advances_use_win_divisor` | arabic/hebrew/mixed-bidi/ligature/kerning/indic G+L | Supported |
 | `.ttc`/`.otc` collections (every face: metadata, matching, fallback, shaping identity) | ✓ | `test_font_collections_load_every_face`, `test_committed_collection_matches_styles_and_preserves_face_indices` | font-collection G+L | Supported; regular/bold-italic/Indic face indices gated |
@@ -215,8 +215,10 @@ the harness reports it as pending (never as a pass) in normal mode, and
    (libass blurs combined-bitmap runs, subrass the whole event buffer,
    so minor accumulation differences remain at glyph overlaps; inside
    gate thresholds: border-shadow IoU 0.891).
-5. `\fe` has no charset-based font linking. Johab remains an explicit
-   unsupported-codec boundary: byte-like values become U+FFFD rather than
+5. `\fe` uses OS/2 code-page declarations as a soft font-linking hint after
+   the requested face; actual glyph coverage remains authoritative, and
+   missing metadata falls back to deterministic load order. Johab remains an
+   explicit unsupported-codec boundary: byte-like values become U+FFFD rather than
    being passed through as Unicode;
    Symbol bytes are mapped to U+F000..U+F0FF and require a loaded Symbol-compatible face;
    supported byte streams decode before shaping, invalid sequences become
@@ -227,16 +229,20 @@ the harness reports it as pending (never as a pass) in normal mode, and
    `system-fonts` feature, which loads each discovered family once
    after explicit faces
    (`test_system_font_discovery_is_explicit_and_idempotent`).
-7. Legacy `Banner`/`Scroll` render with VSFilter timing while libass
+7. Font fallback intentionally differs from fontconfig's host-dependent
+   selection. Loaded/embedded faces are deterministic, OS/2 code-page hints
+   rank compatible fallback faces, and glyph coverage remains authoritative;
+   opt-in native system-font discovery is the only host-dependent input.
+8. Legacy `Banner`/`Scroll` render with VSFilter timing while libass
    ignores them (measured as known-divergent, never gated).
-8. CJK and U+200B line breaking: default libass builds (no unibreak)
+9. CJK and U+200B line breaking: default libass builds (no unibreak)
    implement `ALLOWBREAK` as `glyph == ' '` — ASCII spaces only — and
    overflow everything else, while this renderer breaks CJK runs (with
    open/close/small-kana/NBSP/combining/currency glue), U+3000, and U+200B
    per UAX #14. This matches VSFilter behavior and libass builds *with*
    unibreak; fixtures `wrap-cjk`, `wrap-cjk-punct`, `wrap-zwsp`,
    `wrap-mixed` are `KNOWN_DIVERGENT` (probes confirm libass overflows).
-9. `\pbo` uses libass drawing ascent/descent metrics (`asc = height - pbo`,
+10. `\pbo` uses libass drawing ascent/descent metrics (`asc = height - pbo`,
    `desc = pbo`), so single-drawing lines keep their ink anchored while mixed
    text/drawing lines use the drawing's adjusted ascent.
 

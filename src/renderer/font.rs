@@ -528,21 +528,23 @@ fn weight_dist(face: u16, requested: u16) -> u16 {
 /// This is intentionally only a hint: the glyph cmap remains authoritative.
 fn ass_code_page_bit(encoding: i32) -> Option<(usize, u32)> {
     match encoding {
-        0 | 1 | 77 => Some((0, 0)), // Windows-1252
-        238 => Some((0, 1)),        // Windows-1250
-        204 => Some((0, 2)),        // Windows-1251
-        161 => Some((0, 3)),        // Windows-1253
-        162 => Some((0, 4)),        // Windows-1254
-        177 => Some((0, 5)),        // Windows-1255
-        178 => Some((0, 6)),        // Windows-1256
-        186 => Some((0, 7)),        // Windows-1257
-        163 => Some((0, 8)),        // Windows-1258
-        222 => Some((0, 16)),       // Windows-874
-        128 => Some((0, 17)),       // Shift-JIS / Windows-932
-        134 => Some((0, 18)),       // GBK / Windows-936
-        129 => Some((0, 19)),       // EUC-KR / Windows-949
-        136 => Some((0, 20)),       // Big5 / Windows-950
-        130 => Some((0, 21)),       // Johab / Windows-1361
+        0 | 1 => Some((0, 0)), // Windows-1252
+        2 => Some((0, 23)),    // Windows Symbol character set
+        77 => Some((0, 22)),   // Macintosh character set
+        238 => Some((0, 1)),   // Windows-1250
+        204 => Some((0, 2)),   // Windows-1251
+        161 => Some((0, 3)),   // Windows-1253
+        162 => Some((0, 4)),   // Windows-1254
+        177 => Some((0, 5)),   // Windows-1255
+        178 => Some((0, 6)),   // Windows-1256
+        186 => Some((0, 7)),   // Windows-1257
+        163 => Some((0, 8)),   // Windows-1258
+        222 => Some((0, 16)),  // Windows-874
+        128 => Some((0, 17)),  // Shift-JIS / Windows-932
+        134 => Some((0, 18)),  // GBK / Windows-936
+        129 => Some((0, 19)),  // EUC-KR / Windows-949
+        136 => Some((0, 20)),  // Big5 / Windows-950
+        130 => Some((0, 21)),  // Johab / Windows-1361
         _ => None,
     }
 }
@@ -807,6 +809,8 @@ mod tests {
         // reorders the fallback candidates.
         fm.fonts[2].code_page_ranges[0] = 1 << 17;
         assert_eq!(fm.fallback_chain_for_encoding(0, 128), vec![0, 2, 1]);
+        fm.fonts[1].code_page_ranges[0] = 1 << 23;
+        assert_eq!(fm.fallback_chain_for_encoding(0, 2), vec![0, 1, 2]);
         assert_eq!(fm.fallback_chain_for_encoding(0, 999), vec![0, 1, 2]);
         // A non-primary requested face must stay first even when another
         // candidate advertises the active code page.

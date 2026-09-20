@@ -462,7 +462,10 @@ fn smart_wrap_lines(words: &[WrapWord], max_width: f64, space_width: f64) -> Vec
                 let l1 = line_len(&lines[i]);
                 let l2 = line_len(&lines[i + 1]);
                 let mut new_l1 = lines[i].clone();
-                let w = new_l1.pop().expect("len > 1");
+                let Some(w) = new_l1.pop() else {
+                    i += 1;
+                    continue;
+                };
                 let mut new_l2 = Vec::with_capacity(lines[i + 1].len() + 1);
                 new_l2.push(w);
                 new_l2.extend_from_slice(&lines[i + 1]);

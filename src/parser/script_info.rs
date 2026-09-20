@@ -104,4 +104,16 @@ mod tests {
             assert_eq!(info.y_cb_cr_matrix, expected, "{value}");
         }
     }
+
+    #[test]
+    fn test_parse_ycbcr_empty_and_unknown_values_like_libass() {
+        let empty = parse_script_info(&["YCbCr Matrix:"], 1).unwrap();
+        assert_eq!(empty.y_cb_cr_matrix, YCbCrMatrix::Default);
+
+        let unknown = parse_script_info(&["YCbCr Matrix: nonsense"], 1).unwrap();
+        assert_eq!(unknown.y_cb_cr_matrix, YCbCrMatrix::Unknown);
+
+        let mixed = parse_script_info(&["yCbCr MaTrIx:  tV.709  "], 1).unwrap();
+        assert_eq!(mixed.y_cb_cr_matrix, YCbCrMatrix::TV709);
+    }
 }

@@ -79,6 +79,7 @@ impl std::str::FromStr for YCbCrMatrix {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(Self::Default),
+            "" => Ok(Self::Default),
             "unknown" => Ok(Self::Unknown),
             "none" => Ok(Self::None),
             "tv.601" => Ok(Self::TV601),
@@ -89,7 +90,10 @@ impl std::str::FromStr for YCbCrMatrix {
             "pc.240m" => Ok(Self::PC240M),
             "tv.fcc" => Ok(Self::TVFCC),
             "pc.fcc" => Ok(Self::PCFCC),
-            _ => Err(format!("Unknown YCbCr matrix: {}", s)),
+            // libass keeps parsing the document when the metadata is not
+            // recognized. Preserve that state explicitly for callers that
+            // need to decide how (or whether) to convert authored RGB.
+            _ => Ok(Self::Unknown),
         }
     }
 }
@@ -152,8 +156,9 @@ impl ScriptInfo {
     }
 
     /// Set a known field, validating the value. Unknown keys are stored
-    /// in `extra_fields`. Returns an error describing invalid known values
-    /// instead of silently keeping defaults.
+    /// in `extra_fields`. YCbCr metadata follows libass's tolerant parsing:
+    /// an empty value selects `Default`, while an unrecognized value selects
+    /// `Unknown` instead of rejecting the document.
     pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
         let parse_res = |what: &str, v: &str| -> Result<u32, String> {
             let n: u32 = v
@@ -298,7 +303,8 @@ mod tests {
         assert!(info.set_field("PlayResY", "-5").is_err());
         assert!(info.set_field("WrapStyle", "9").is_err());
         assert!(info.set_field("ScriptType", "v9").is_err());
-        assert!(info.set_field("YCbCr Matrix", "bogus").is_err());
+        info.set_field("YCbCr Matrix", "bogus").unwrap();
+        assert_eq!(info.y_cb_cr_matrix, YCbCrMatrix::Unknown);
         assert!(info.set_field("ScaledBorderAndShadow", "maybe").is_err());
         // Defaults preserved after rejected writes
         assert_eq!(info.play_res_x, 1920);
@@ -329,6 +335,23 @@ mod tests {
             "tv.240M".parse::<YCbCrMatrix>().unwrap(),
             YCbCrMatrix::TV240M
         );
-        assert!("bogus".parse::<YCbCrMatrix>().is_err());
+        assert_eq!("".parse::<YCbCrMatrix>().unwrap(), YCbCrMatrix::Default);
+        assert_eq!("  \t".parse::<YCbCrMatrix>().unwrap(), YCbCrMatrix::Default);
+        assert_eq!(
+            "bogus".parse::<YCbCrMatrix>().unwrap(),
+            YCbCrMatrix::Unknown
+        );
+    }
+
+    #[test]
+    fn test_ycbcr_matrix_parser_is_case_and_whitespace_tolerant() {
+        for (text, expected) in [
+            ("  tV.601  ", YCbCrMatrix::TV601),
+            ("pC.709", YCbCrMatrix::PC709),
+            (" Tv.240M ", YCbCrMatrix::TV240M),
+            ("PC.fCc", YCbCrMatrix::PCFCC),
+        ] {
+            assert_eq!(text.parse::<YCbCrMatrix>().unwrap(), expected, "{text:?}");
+        }
     }
 }

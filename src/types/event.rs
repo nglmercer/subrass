@@ -41,6 +41,14 @@ pub struct Event {
     /// encodings can be decoded after the style/`\fe` state is known.
     #[serde(skip)]
     pub(crate) source_text_bytes: Option<Vec<u8>>,
+    /// Original bytes for metadata fields from `parse_bytes`. These are
+    /// decoded after the document's style encodings are known.
+    #[serde(skip)]
+    pub(crate) source_style_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    pub(crate) source_name_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    pub(crate) source_effect_bytes: Option<Vec<u8>>,
 }
 
 impl Event {
@@ -59,6 +67,9 @@ impl Event {
             text: String::new(),
             parsed_tags: Vec::new(),
             source_text_bytes: None,
+            source_style_bytes: None,
+            source_name_bytes: None,
+            source_effect_bytes: None,
         }
     }
 
@@ -181,6 +192,9 @@ impl Event {
             text,
             parsed_tags,
             source_text_bytes: None,
+            source_style_bytes: None,
+            source_name_bytes: None,
+            source_effect_bytes: None,
         })
     }
 
@@ -299,6 +313,9 @@ impl Event {
             text,
             parsed_tags,
             source_text_bytes: Some(text_bytes),
+            source_style_bytes: Some(field("style").unwrap_or(&[]).to_vec()),
+            source_name_bytes: Some(field("name").unwrap_or(&[]).to_vec()),
+            source_effect_bytes: Some(field("effect").unwrap_or(&[]).to_vec()),
         })
     }
 

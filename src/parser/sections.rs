@@ -73,35 +73,59 @@ pub(super) fn process_section(
     Ok(())
 }
 
-/// Dispatch a byte-preserving section. Event text is parsed from its original
-/// bytes; the other bounded section parsers receive lossy UTF-8 views because
-/// their syntax is metadata, ASCII attachment data, or validated text fields.
+/// Dispatch a byte-preserving section. Syntax is recognized from ASCII bytes;
+/// user-visible fields stay raw until the section parser has enough context
+/// to apply the appropriate legacy charset.
 pub(super) fn process_section_bytes(
     doc: &mut AssDocument,
     section: Section,
     lines: &[Vec<u8>],
     first_content_line: usize,
 ) -> Result<(), ParseError> {
-    if matches!(section, Section::Events) {
-        let raw_lines: Vec<&[u8]> = lines.iter().map(Vec::as_slice).collect();
-        let parsed = event::parse_events_bytes(&raw_lines, first_content_line)?;
-        check_global_count(
-            doc.events.len(),
-            parsed.len(),
-            event::MAX_EVENTS,
-            "events",
-            first_content_line,
-        )?;
-        doc.events.extend(parsed);
-        return Ok(());
+    let raw_lines: Vec<&[u8]> = lines.iter().map(Vec::as_slice).collect();
+    match section {
+        Section::ScriptInfo => {
+            doc.script_info = script_info::parse_script_info_bytes(&raw_lines, first_content_line)?;
+        }
+        Section::V4PlusStyles | Section::V4Styles => {
+            let parsed = style::parse_styles_bytes(
+                &raw_lines,
+                first_content_line,
+                matches!(section, Section::V4Styles),
+            )?;
+            check_global_count(
+                doc.styles.len(),
+                parsed.len(),
+                style::MAX_STYLES,
+                "styles",
+                first_content_line,
+            )?;
+            doc.styles.extend(parsed);
+        }
+        Section::Events => {
+            let parsed = event::parse_events_bytes(&raw_lines, first_content_line)?;
+            check_global_count(
+                doc.events.len(),
+                parsed.len(),
+                event::MAX_EVENTS,
+                "events",
+                first_content_line,
+            )?;
+            doc.events.extend(parsed);
+        }
+        Section::Fonts | Section::Graphics => {
+            // Attachment payload syntax is ASCII. Decode only the header and
+            // filename bytes as legacy metadata before the strict payload
+            // parser validates the encoded data.
+            let decoded: Vec<String> = raw_lines
+                .iter()
+                .map(|line| crate::charset::decode_metadata_bytes(line, 1))
+                .collect();
+            let text_lines: Vec<&str> = decoded.iter().map(String::as_str).collect();
+            process_section(doc, section, &text_lines, first_content_line)?;
+        }
     }
-
-    let decoded: Vec<String> = lines
-        .iter()
-        .map(|line| String::from_utf8_lossy(line).into_owned())
-        .collect();
-    let text_lines: Vec<&str> = decoded.iter().map(String::as_str).collect();
-    process_section(doc, section, &text_lines, first_content_line)
+    Ok(())
 }
 
 /// Enforce a per-document count cap across appended sections with

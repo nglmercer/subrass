@@ -1,3 +1,4 @@
+use crate::charset::decode_metadata_bytes;
 use crate::types::ScriptInfo;
 
 use super::errors::ParseError;
@@ -26,6 +27,52 @@ pub fn parse_script_info(lines: &[&str], start_line: usize) -> Result<ScriptInfo
     }
 
     Ok(info)
+}
+
+/// Byte-preserving Script Info parser. Keys are ASCII syntax; user-visible
+/// values are decoded as legacy metadata only after the raw `key: value`
+/// boundary has been found.
+pub fn parse_script_info_bytes(
+    lines: &[&[u8]],
+    start_line: usize,
+) -> Result<ScriptInfo, ParseError> {
+    let mut info = ScriptInfo::new();
+    for (i, raw_line) in lines.iter().enumerate() {
+        let line = trim_ascii_bytes(raw_line);
+        if line.is_empty() || line.first() == Some(&b';') {
+            continue;
+        }
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return Err(ParseError::line_error(
+                start_line + i,
+                format!(
+                    "Invalid line in Script Info: {}",
+                    decode_metadata_bytes(line, 1)
+                ),
+            ));
+        };
+        let key = decode_metadata_bytes(trim_ascii_bytes(&line[..colon]), 1);
+        if key.is_empty() {
+            return Err(ParseError::line_error(
+                start_line + i,
+                "Invalid line in Script Info: empty key",
+            ));
+        }
+        let value = decode_metadata_bytes(trim_ascii_bytes(&line[colon + 1..]), 1);
+        info.set_field(&key, &value)
+            .map_err(|e| ParseError::line_error(start_line + i, e))?;
+    }
+    Ok(info)
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn parse_key_value(line: &str) -> Option<(String, String)> {
@@ -115,5 +162,14 @@ mod tests {
 
         let mixed = parse_script_info(&["yCbCr MaTrIx:  tV.709  "], 1).unwrap();
         assert_eq!(mixed.y_cb_cr_matrix, YCbCrMatrix::TV709);
+    }
+
+    #[test]
+    fn test_parse_script_info_bytes_preserves_legacy_metadata() {
+        let title = [
+            b'T', b'i', b't', b'l', b'e', b':', b' ', b'c', b'a', b'f', 0xE9,
+        ];
+        let info = parse_script_info_bytes(&[title.as_slice()], 1).unwrap();
+        assert_eq!(info.title.as_deref(), Some("café"));
     }
 }

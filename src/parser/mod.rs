@@ -95,6 +95,47 @@ impl Default for AssDocument {
     }
 }
 
+/// Finish the byte-oriented parse after every section is available. Event
+/// style/name/effect fields use the selected style's encoding so the raw
+/// bytes are interpreted consistently with style names and font names.
+pub(super) fn normalize_byte_metadata(doc: &mut AssDocument) {
+    let default_encoding = doc
+        .styles
+        .iter()
+        .find(|style| style.name == "Default")
+        .or_else(|| doc.styles.first())
+        .map(|style| style.encoding)
+        .unwrap_or(1);
+
+    for event in &mut doc.events {
+        let encoding = if let Some(raw_style) = event.source_style_bytes.as_deref() {
+            doc.styles
+                .iter()
+                .find_map(|style| {
+                    (crate::charset::decode_metadata_bytes(raw_style, style.encoding) == style.name)
+                        .then_some(style.encoding)
+                })
+                .unwrap_or(default_encoding)
+        } else {
+            doc.styles
+                .iter()
+                .find(|style| style.name == event.style)
+                .map(|style| style.encoding)
+                .unwrap_or(default_encoding)
+        };
+
+        if let Some(raw) = event.source_style_bytes.as_deref() {
+            event.style = crate::charset::decode_metadata_bytes(raw, encoding);
+        }
+        if let Some(raw) = event.source_name_bytes.as_deref() {
+            event.name = crate::charset::decode_metadata_bytes(raw, encoding);
+        }
+        if let Some(raw) = event.source_effect_bytes.as_deref() {
+            event.effect = crate::charset::decode_metadata_bytes(raw, encoding);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +207,46 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
         assert_eq!(doc.script_info.play_res_x, 384);
         assert_eq!(doc.events.len(), 1);
         assert_eq!(doc.events[0].text, "caf�");
+        assert_eq!(
+            doc.events[0].source_text_bytes.as_deref(),
+            Some(b"caf\xE9".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_parse_bytes_decodes_legacy_metadata_consistently_across_sections() {
+        let mut input = b"[Script Info]\nTitle: caf".to_vec();
+        input.extend_from_slice(&[0xE9]);
+        input.extend_from_slice(
+            b"\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: D",
+        );
+        input.extend_from_slice(&[0xE9]);
+        input.extend_from_slice(b"faut,Ar");
+        input.extend_from_slice(&[0xE9]);
+        input.extend_from_slice(
+            b"al,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,D",
+        );
+        input.extend_from_slice(&[0xE9]);
+        input.extend_from_slice(b"faut,J");
+        input.extend_from_slice(&[0xE9]);
+        input.extend_from_slice(b"n,0,0,0,,caf");
+        input.extend_from_slice(&[0xE9]);
+        input.push(b'\n');
+
+        let doc = AssDocument::parse_bytes(&input).unwrap();
+        assert_eq!(doc.script_info.title.as_deref(), Some("café"));
+        assert_eq!(doc.styles[0].name, "Défaut");
+        assert_eq!(doc.styles[0].font_name, "Aréal");
+        assert_eq!(doc.events[0].style, "Défaut");
+        assert_eq!(doc.events[0].name, "Jén");
+        assert_eq!(
+            doc.events[0].source_style_bytes.as_deref(),
+            Some(b"D\xE9faut".as_slice())
+        );
+        assert_eq!(
+            doc.events[0].source_name_bytes.as_deref(),
+            Some(b"J\xE9n".as_slice())
+        );
         assert_eq!(
             doc.events[0].source_text_bytes.as_deref(),
             Some(b"caf\xE9".as_slice())

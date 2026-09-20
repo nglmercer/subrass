@@ -1,4 +1,5 @@
 pub mod api;
+pub(crate) mod charset;
 pub mod parser;
 pub mod renderer;
 pub mod types;

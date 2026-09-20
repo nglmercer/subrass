@@ -68,6 +68,22 @@ impl Section {
             _ => None,
         }
     }
+
+    pub(super) fn from_header_bytes(header: &[u8]) -> Option<Self> {
+        match header {
+            h if h.eq_ignore_ascii_case(b"[script info]")
+                || h.eq_ignore_ascii_case(b"[scriptinfo]") =>
+            {
+                Some(Self::ScriptInfo)
+            }
+            h if h.eq_ignore_ascii_case(b"[v4 styles]") => Some(Self::V4Styles),
+            h if h.eq_ignore_ascii_case(b"[v4+ styles]") => Some(Self::V4PlusStyles),
+            h if h.eq_ignore_ascii_case(b"[events]") => Some(Self::Events),
+            h if h.eq_ignore_ascii_case(b"[fonts]") => Some(Self::Fonts),
+            h if h.eq_ignore_ascii_case(b"[graphics]") => Some(Self::Graphics),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

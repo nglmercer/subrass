@@ -1,3 +1,4 @@
+use crate::charset::decode_metadata_bytes;
 use crate::types::style::ssa_alignment_to_ass;
 use crate::types::Style;
 
@@ -48,6 +49,114 @@ pub fn parse_styles(
     }
 
     Ok(styles)
+}
+
+/// Parse styles from raw ASS bytes. Syntax and numeric fields are ASCII, but
+/// style names and font names may be encoded in the style's `Encoding` code
+/// page. Decode those fields only after the raw fields have been split, so a
+/// legacy byte cannot become U+FFFD before charset interpretation.
+pub fn parse_styles_bytes(
+    lines: &[&[u8]],
+    start_line: usize,
+    is_ssa: bool,
+) -> Result<Vec<Style>, ParseError> {
+    let mut styles = Vec::new();
+    let mut format: Option<Vec<String>> = None;
+
+    for (i, raw_line) in lines.iter().enumerate() {
+        let line = trim_ascii_bytes(raw_line);
+        if line.is_empty() || line.first() == Some(&b';') {
+            continue;
+        }
+        if let Some(fmt) = strip_prefix_ci_bytes(line, b"Format:") {
+            format = Some(parse_format_columns(&decode_metadata_bytes(fmt, 1)));
+            continue;
+        }
+        let Some(style_data) = strip_prefix_ci_bytes(line, b"Style:") else {
+            continue;
+        };
+        if styles.len() >= MAX_STYLES {
+            return Err(ParseError::line_error(
+                start_line + i,
+                format!("Too many styles (limit {MAX_STYLES})"),
+            ));
+        }
+        let columns = match &format {
+            Some(cols) if !cols.is_empty() => cols.clone(),
+            _ if is_ssa => parse_format_columns(SSA_DEFAULT_FORMAT),
+            _ => Vec::new(),
+        };
+        let decoded = decode_style_fields(style_data, &columns);
+        let style = parse_style_line(&decoded, &format, is_ssa, start_line + i)?;
+        styles.push(style);
+    }
+
+    Ok(styles)
+}
+
+fn decode_style_fields(data: &[u8], columns: &[String]) -> String {
+    let field_count = if columns.is_empty() {
+        23
+    } else {
+        columns.len()
+    };
+    let fields = splitn_commas(data, field_count);
+    let encoding_index = columns
+        .iter()
+        .position(|column| column == "encoding")
+        .unwrap_or(22);
+    let encoding = fields
+        .get(encoding_index)
+        .map(|value| String::from_utf8_lossy(trim_ascii_bytes(value)))
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(1);
+
+    fields
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let field = trim_ascii_bytes(value);
+            let is_name = columns
+                .get(index)
+                .is_some_and(|column| column == "name" || column == "fontname")
+                || (columns.is_empty() && index < 2);
+            if is_name {
+                decode_metadata_bytes(field, encoding)
+            } else {
+                String::from_utf8_lossy(field).into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn splitn_commas(line: &[u8], max: usize) -> Vec<&[u8]> {
+    let mut fields = Vec::with_capacity(max);
+    let mut start = 0;
+    for (index, byte) in line.iter().enumerate() {
+        if *byte == b',' && fields.len() + 1 < max {
+            fields.push(&line[start..index]);
+            start = index + 1;
+        }
+    }
+    fields.push(&line[start..]);
+    fields
+}
+
+fn strip_prefix_ci_bytes<'a>(line: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    line.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &line[prefix.len()..])
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {

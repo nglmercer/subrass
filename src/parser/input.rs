@@ -79,14 +79,13 @@ pub(super) fn parse_bytes(input: &[u8]) -> Result<AssDocument, ParseError> {
 
     for line in split_lines(input) {
         line_number += 1;
-        let decoded = String::from_utf8_lossy(line);
-        let trimmed = decoded.trim();
+        let trimmed = trim_ascii_bytes(line);
 
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if trimmed.starts_with(b"[") && trimmed.ends_with(b"]") {
             if let Some(section) = current_section {
                 process_section_bytes(&mut doc, section, &section_lines, section_start_line + 1)?;
             }
-            current_section = Section::from_header(trimmed);
+            current_section = Section::from_header_bytes(trimmed);
             if current_section.is_some() {
                 found_section = true;
             }
@@ -104,14 +103,13 @@ pub(super) fn parse_bytes(input: &[u8]) -> Result<AssDocument, ParseError> {
         process_section_bytes(&mut doc, section, &section_lines, section_start_line + 1)?;
     }
 
-    if !found_section
-        && split_lines(input).any(|line| !String::from_utf8_lossy(line).trim().is_empty())
-    {
+    if !found_section && split_lines(input).any(|line| !trim_ascii_bytes(line).is_empty()) {
         return Err(ParseError::Unexpected(
             "No valid ASS sections found".to_string(),
         ));
     }
 
+    super::normalize_byte_metadata(&mut doc);
     Ok(doc)
 }
 
@@ -123,4 +121,14 @@ fn split_lines(input: &[u8]) -> impl Iterator<Item = &[u8]> {
     input
         .split(|byte| *byte == b'\n')
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+}
+
+fn trim_ascii_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }

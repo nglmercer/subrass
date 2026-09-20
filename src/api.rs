@@ -25,7 +25,9 @@ impl AssDoc {
     }
 
     /// Create a document from raw ASS bytes, preserving legacy event bytes
-    /// until charset/`\fe` handling in the renderer.
+    /// until charset/`\fe` handling in the renderer. Johab (`\fe130`) is an
+    /// explicit unsupported-codec boundary and is reported by renderer
+    /// diagnostics rather than being silently reinterpreted.
     pub fn from_bytes(content: &[u8]) -> Result<AssDoc, JsError> {
         let inner = AssDocument::parse_bytes(content).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
@@ -242,7 +244,8 @@ impl SubtitleRenderer {
     }
 
     /// Create a renderer from raw ASS bytes, retaining legacy event bytes for
-    /// charset-aware decoding.
+    /// charset-aware decoding. Johab (`\fe130`) remains unsupported by
+    /// design; byte-like values become U+FFFD and `get_warnings()` reports it.
     pub fn from_bytes(ass_content: &[u8]) -> Result<SubtitleRenderer, JsError> {
         let inner =
             InnerRenderer::from_bytes(ass_content).map_err(|e| JsError::new(&e.to_string()))?;
@@ -323,7 +326,7 @@ impl SubtitleRenderer {
     }
 
     /// Non-fatal renderer diagnostics (e.g. embedded fonts that failed
-    /// to load) as a JS string array.
+    /// to load or an explicit unsupported `\fe130` tag) as a JS string array.
     pub fn get_warnings(&self) -> Vec<String> {
         self.inner.warnings().to_vec()
     }

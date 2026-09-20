@@ -61,6 +61,7 @@ pub fn parse_script_info_bytes(
         let value = decode_metadata_bytes(trim_ascii_bytes(&line[colon + 1..]), 1);
         info.set_field(&key, &value)
             .map_err(|e| ParseError::line_error(start_line + i, e))?;
+        info.retain_source_field(&key, trim_ascii_bytes(&line[colon + 1..]));
     }
     Ok(info)
 }

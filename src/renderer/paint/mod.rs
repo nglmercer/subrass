@@ -6,3 +6,8 @@
 
 pub(super) mod clipping;
 pub(super) mod decorations;
+pub(super) mod drawing;
+pub(super) mod event;
+pub(super) mod glyph;
+pub(super) mod karaoke;
+pub(super) mod text;

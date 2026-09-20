@@ -122,6 +122,10 @@ pub struct ScriptInfo {
     pub update_date: Option<String>,
     pub comment: Option<String>,
     pub extra_fields: HashMap<String, String>,
+    /// Raw values retained by the byte-oriented parser until the document's
+    /// style encoding is known. This is omitted from serialized/WASM output.
+    #[serde(skip)]
+    pub(crate) source_fields: HashMap<String, Vec<u8>>,
 }
 
 impl Default for ScriptInfo {
@@ -146,6 +150,7 @@ impl Default for ScriptInfo {
             update_date: None,
             comment: None,
             extra_fields: HashMap::new(),
+            source_fields: HashMap::new(),
         }
     }
 }
@@ -153,6 +158,25 @@ impl Default for ScriptInfo {
 impl ScriptInfo {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Retain a raw Script Info value while parsing bytes. Values are
+    /// decoded later once a style encoding provides the legacy-code-page hint.
+    pub(crate) fn retain_source_field(&mut self, key: &str, value: &[u8]) {
+        self.source_fields
+            .insert(key.to_ascii_lowercase(), value.to_vec());
+    }
+
+    /// Re-decode byte-preserved metadata after the style table is available.
+    /// Numeric and enum fields are ASCII and therefore remain unchanged.
+    pub(crate) fn redecode_source_fields(&mut self, encoding: i32) {
+        let fields = self.source_fields.clone();
+        for (key, value) in fields {
+            let decoded = crate::charset::decode_metadata_bytes(&value, encoding);
+            // The original parse already validated the field. Re-decoding can
+            // only change its textual representation.
+            let _ = self.set_field(&key, &decoded);
+        }
     }
 
     /// Set a known field, validating the value. Unknown keys are stored

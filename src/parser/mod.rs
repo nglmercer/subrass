@@ -107,6 +107,8 @@ pub(super) fn normalize_byte_metadata(doc: &mut AssDocument) {
         .map(|style| style.encoding)
         .unwrap_or(1);
 
+    doc.script_info.redecode_source_fields(default_encoding);
+
     for event in &mut doc.events {
         let encoding = if let Some(raw_style) = event.source_style_bytes.as_deref() {
             doc.styles
@@ -251,6 +253,18 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
             doc.events[0].source_text_bytes.as_deref(),
             Some(b"caf\xE9".as_slice())
         );
+    }
+
+    #[test]
+    fn test_parse_bytes_redecodes_script_metadata_with_style_encoding() {
+        let mut input = b"[Script Info]\nTitle: ".to_vec();
+        input.push(0xCF); // Windows-1251: Cyrillic capital Pe.
+        input.extend_from_slice(
+            b"\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,10,10,40,204\n",
+        );
+
+        let doc = AssDocument::parse_bytes(&input).unwrap();
+        assert_eq!(doc.script_info.title.as_deref(), Some("П"));
     }
 
     #[test]

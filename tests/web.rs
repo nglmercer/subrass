@@ -55,6 +55,20 @@ fn test_parse_ass_document() {
 }
 
 #[wasm_bindgen_test]
+fn test_raw_bytes_and_warning_exports() {
+    let ass = b"[Script Info]\nPlayResX: 320\nPlayResY: 180\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,DejaVu Sans,24,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fe130}\x84A\n";
+
+    let doc = subrass::api::AssDoc::from_bytes(ass).unwrap();
+    assert_eq!(doc.get_event_count(), 1);
+
+    let renderer = subrass::api::SubtitleRenderer::from_bytes(ass).unwrap();
+    assert!(renderer
+        .get_warnings()
+        .iter()
+        .any(|warning| warning.contains("Johab") && warning.contains("fe130")));
+}
+
+#[wasm_bindgen_test]
 fn test_get_script_info() {
     let doc = subrass::api::AssDoc::new(TEST_ASS).unwrap();
     let info = doc.get_script_info().unwrap();

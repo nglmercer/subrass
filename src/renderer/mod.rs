@@ -14,7 +14,7 @@ use self::buffer::RenderBuffer;
 use self::compositor::Compositor;
 use self::font::FontManager;
 use crate::parser::AssDocument;
-use crate::types::Event;
+use crate::types::{Event, OverrideTag};
 
 /// Cap on collected diagnostics: each distinct message is kept once,
 /// and collection stops here so hostile documents cannot grow memory.
@@ -115,9 +115,10 @@ impl SubtitleRenderer {
 
     /// Non-fatal diagnostics collected while building the renderer:
     /// embedded fonts that decoded but failed to load, unsupported
-    /// override tags, unsupported `Effect` fields, requested fonts
-    /// with no loaded face (fallback is used). Each distinct message
-    /// appears once; the list is capped at [`MAX_WARNINGS`].
+    /// override tags, the deliberate Johab (`\fe130`) codec boundary,
+    /// unsupported `Effect` fields, and requested fonts with no loaded
+    /// face (fallback is used). Each distinct message appears once; the
+    /// list is capped at [`MAX_WARNINGS`].
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -142,16 +143,11 @@ impl SubtitleRenderer {
         font_manager: &FontManager,
         warnings: &mut Vec<String>,
     ) {
-        use crate::types::{LegacyEffect, OverrideTag};
+        use crate::types::LegacyEffect;
         let default_style = crate::types::Style::new("Default");
         for event in &doc.events {
             for tag in &event.parsed_tags {
-                if let OverrideTag::Unknown(name) = tag {
-                    Self::push_warning(
-                        warnings,
-                        format!("Unsupported override tag '\\{}' (ignored)", name),
-                    );
-                }
+                Self::collect_tag_warnings(tag, warnings);
             }
             if !event.effect.trim().is_empty() && LegacyEffect::parse(&event.effect).is_none() {
                 Self::push_warning(
@@ -175,6 +171,26 @@ impl SubtitleRenderer {
                     ),
                 );
             }
+        }
+    }
+
+    fn collect_tag_warnings(tag: &OverrideTag, warnings: &mut Vec<String>) {
+        match tag {
+            OverrideTag::Unknown(name) => Self::push_warning(
+                warnings,
+                format!("Unsupported override tag '\\{}' (ignored)", name),
+            ),
+            OverrideTag::FontEncoding(130) => Self::push_warning(
+                warnings,
+                "Unsupported legacy codec \\fe130 (Johab); byte-like values become U+FFFD"
+                    .to_string(),
+            ),
+            OverrideTag::Transform { tags, .. } => {
+                for nested in tags {
+                    Self::collect_tag_warnings(nested, warnings);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -460,6 +476,26 @@ mod tests {
              Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,Banner;20,{\\b1}Hello\n";
         let renderer = SubtitleRenderer::new(clean).unwrap();
         assert!(renderer.warnings().is_empty(), "{:?}", renderer.warnings());
+    }
+
+    #[test]
+    fn test_johab_boundary_is_visible_in_renderer_diagnostics() {
+        let ass = "[Script Info]\n\
+             ScriptType: v4.00+\n\
+             PlayResX: 64\n\
+             PlayResY: 64\n\n\
+             [Events]\n\
+             Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+             Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\fe130}\\x84A\n";
+        let renderer = SubtitleRenderer::new(ass).unwrap();
+        assert!(
+            renderer
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("Johab") && warning.contains("fe130")),
+            "{:?}",
+            renderer.warnings()
+        );
     }
 
     /// Plan #58: diagnostics deduplicate and cap (hostile docs cannot

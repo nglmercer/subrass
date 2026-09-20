@@ -4,10 +4,30 @@ use super::lines::{
     drawing_unit_scale, segment_drawing_mode, DrawingLayout, LayoutBlock, LayoutFace, LayoutItem,
 };
 use super::state::LineGlobalKeep;
+use super::wrapping::{wrap_event_text, wrap_event_text_with_measure};
 use super::{Compositor, ResolvedStyle};
-use crate::types::override_tag::{OverrideTag, TextSegment};
-use crate::types::{Event, Style};
+use crate::types::override_tag::{parse_text_segments_with_wrap, OverrideTag, TextSegment};
+use crate::types::{Event, LegacyEffect, Style};
 use ab_glyph::{Font, FontArc};
+
+/// All state produced by layout/position preparation and consumed by paint.
+pub(crate) struct PreparedEvent<'a> {
+    pub(crate) segments: Vec<TextSegment>,
+    pub(crate) layout: LayoutBlock,
+    pub(crate) font: &'a FontArc,
+    pub(crate) alpha_mult: f64,
+    pub(crate) alpha: u8,
+    pub(crate) scale_x: f64,
+    pub(crate) scale_y: f64,
+    pub(crate) blur_scale_x: f64,
+    pub(crate) blur_scale_y: f64,
+    pub(crate) base_x: f64,
+    pub(crate) base_y: f64,
+    pub(crate) org_x: f64,
+    pub(crate) org_y: f64,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) legacy_effect: Option<LegacyEffect>,
+}
 
 impl Compositor {
     /// Convert an alignment anchor into the top-left text origin.
@@ -390,6 +410,277 @@ impl Compositor {
             width: block_width,
             height: block_height,
             baseline,
+        }
+    }
+
+    /// Prepare all time-resolved layout inputs and event position consumed by paint.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_event<'a>(
+        resolved: &ResolvedStyle,
+        event: &Event,
+        font_manager: &'a FontManager,
+        alpha_mult: f64,
+        alpha: u8,
+        time_ms: u64,
+        start_ms: u64,
+        end_ms: u64,
+        play_res_x: u32,
+        play_res_y: u32,
+        video_width: u32,
+        video_height: u32,
+        script_wrap_style: i32,
+        styles: &[Style],
+    ) -> PreparedEvent<'a> {
+        // Find font (+ fallback chain for measurement/shaping).
+        let font_match = font_manager.find_font_with_weight(
+            &resolved.font_name,
+            resolved.font_weight,
+            resolved.italic,
+        );
+        let font = font_match.font;
+        let measure_chain: Vec<&FontArc> = font_manager
+            .fallback_chain_for_encoding(font_match.id, resolved.font_encoding)
+            .iter()
+            .filter_map(|id| font_manager.get_font(*id))
+            .collect();
+        let font_size = resolved.font_size * (video_height as f64 / play_res_y as f64);
+
+        let mut opentype_measure_fonts = Vec::with_capacity(measure_chain.len());
+        for id in font_manager.fallback_chain_for_encoding(font_match.id, resolved.font_encoding) {
+            if let (Some(raster), Some((data, face_index))) =
+                (font_manager.get_font(id), font_manager.shaping_data(id))
+            {
+                let (ft_asc, ft_desc, ft_height) = font_manager.ft_metrics(id).unwrap_or((
+                    raster.ascent_unscaled(),
+                    raster.descent_unscaled(),
+                    raster.height_unscaled().max(1.0),
+                ));
+                opentype_measure_fonts.push(ShapingFont {
+                    id,
+                    raster,
+                    data,
+                    face_index,
+                    ft_asc,
+                    ft_desc,
+                    ft_height,
+                });
+            }
+        }
+
+        let scale_x = video_width as f64 / play_res_x as f64;
+        let scale_y = video_height as f64 / play_res_y as f64;
+        // libass `ass_layout_res` + `init_font_scale`: the blur and
+        // unscaled-border denominators come from LayoutRes, but only
+        // when BOTH axes are set. subrass has square pixels and renders
+        // straight into the video frame, so unset LayoutRes maps to the
+        // video size (the libass storage-size role): blur radii and
+        // unscaled borders/shadows are then 1:1 in video pixels, which
+        // is also the documented VSFilter/legacy-libass contract for
+        // `ScaledBorderAndShadow: no`.
+        let (layout_res_x, layout_res_y) = if resolved.layout_res_x > 0 && resolved.layout_res_y > 0
+        {
+            (resolved.layout_res_x, resolved.layout_res_y)
+        } else {
+            (video_width.max(1), video_height.max(1))
+        };
+        let blur_scale_x = video_width as f64 / layout_res_x as f64;
+        let blur_scale_y = video_height as f64 / layout_res_y as f64;
+
+        // Legacy scroll effect (Banner/Scroll up/Scroll down), if any.
+        // Parsed once and reused for wrap, positioning, and clipping.
+        let legacy_effect = LegacyEffect::parse(&event.effect);
+        // Effective wrap style: a per-event \q overrides the script default.
+        // Banner forces no-wrap (VSFilter sets wrapStyle 2 for banners).
+        let wrap_style = if matches!(legacy_effect, Some(LegacyEffect::Banner { .. })) {
+            2
+        } else {
+            // `\q` is part of the frame-resolved event state, including
+            // when it is nested inside `\t`.  Invalid values fall back to
+            // the track default just as the parser/render context does.
+            resolved
+                .wrap_style
+                .filter(|q| (0..=3).contains(q))
+                .unwrap_or(script_wrap_style)
+        };
+        let wrap_width =
+            (play_res_x as f64 - resolved.margin_l as f64 - resolved.margin_r as f64) * scale_x;
+        // Drawing runs pass through the wrapper verbatim (never wrapped).
+        let wrap_input = match event.source_text_bytes.as_deref() {
+            Some(bytes) => TextShaper::decode_ass_bytes(bytes, resolved.font_encoding),
+            None => TextShaper::decode_font_encoding(&event.text, resolved.font_encoding),
+        };
+        let wrapped_text = if opentype_measure_fonts.is_empty() {
+            wrap_event_text(
+                &wrap_input,
+                wrap_style,
+                wrap_width,
+                &measure_chain,
+                font_size,
+                resolved.spacing,
+            )
+        } else {
+            let measure = |value: &str| {
+                TextShaper::measure_text_with_opentype(
+                    value,
+                    &opentype_measure_fonts,
+                    font_size,
+                    resolved.scale_x / 100.0,
+                    resolved.spacing,
+                    resolved.kerning,
+                )
+            };
+            wrap_event_text_with_measure(&wrap_input, wrap_style, wrap_width, &measure)
+        };
+
+        // Parse text into segments for per-override rendering
+        let segments = parse_text_segments_with_wrap(&wrapped_text, wrap_style);
+
+        // Layout pass: resolve and shape every segment with its own style,
+        // so alignment, positioning, rotation origins, and boxes use the
+        // same per-segment dimensions as rendering.
+        let layout = Self::layout_segments(
+            &segments,
+            event,
+            resolved,
+            font_manager,
+            time_ms,
+            start_ms,
+            end_ms,
+            play_res_x,
+            play_res_y,
+            video_width,
+            video_height,
+            styles,
+        );
+
+        let (mut base_x, mut base_y) = Self::calculate_position(
+            resolved,
+            layout.width,
+            layout.height,
+            layout.baseline,
+            play_res_x,
+            play_res_y,
+            video_width,
+            video_height,
+        );
+
+        // Apply move animation (libass `complex_tag("move")`
+        // evaluation): `t1 <= 0 && t2 <= 0` â€” including the untimed
+        // 4-arg form â€” animates across the whole event; otherwise the
+        // window is literal, the start instant belongs to (x1,y1)
+        // (`t <= t1`), and equal nonzero times are an instant step.
+        // The parser swaps reversed times, and the branch structure
+        // below cannot divide by zero or underflow even if it didn't
+        // (the lerp runs only when `t1 < t2` is proven).
+        if let Some(ref move_data) = resolved.move_data {
+            let elapsed = i64::try_from(time_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+            let duration = i64::try_from(end_ms.saturating_sub(start_ms)).unwrap_or(i64::MAX);
+            let (t1, t2) = if move_data.t1 <= 0 && move_data.t2 <= 0 {
+                (0, duration)
+            } else {
+                (i64::from(move_data.t1), i64::from(move_data.t2))
+            };
+
+            let t = if elapsed <= t1 {
+                0.0
+            } else if elapsed >= t2 {
+                1.0
+            } else {
+                (elapsed - t1) as f64 / (t2 - t1) as f64
+            };
+
+            let anchor_x = (move_data.x1 + (move_data.x2 - move_data.x1) * t) * scale_x;
+            let anchor_y = (move_data.y1 + (move_data.y2 - move_data.y1) * t) * scale_y;
+            let (origin_x, origin_top) = Self::anchor_to_origin(
+                resolved.alignment,
+                anchor_x,
+                anchor_y,
+                layout.width,
+                layout.height,
+            );
+            base_x = origin_x;
+            base_y = origin_top + layout.baseline;
+        }
+
+        // Legacy scroll effects override position on their axis (VSFilter
+        // `fPosOverride`, applied after \move). The other axis keeps its
+        // laid-out (or moved) position.
+        match legacy_effect {
+            Some(LegacyEffect::Banner {
+                delay,
+                left_to_right,
+                ..
+            }) => {
+                base_x = LegacyEffect::banner_x(
+                    time_ms - start_ms,
+                    delay,
+                    scale_x,
+                    left_to_right,
+                    0.0,
+                    video_width as f64,
+                    layout.width,
+                );
+            }
+            Some(
+                LegacyEffect::ScrollUp {
+                    top, bottom, delay, ..
+                }
+                | LegacyEffect::ScrollDown {
+                    top, bottom, delay, ..
+                },
+            ) => {
+                let down = matches!(legacy_effect, Some(LegacyEffect::ScrollDown { .. }));
+                let text_top = LegacyEffect::scroll_top(
+                    time_ms - start_ms,
+                    delay,
+                    scale_y,
+                    down,
+                    top * scale_y,
+                    bottom * scale_y,
+                    layout.height,
+                );
+                base_y = text_top + layout.baseline;
+            }
+            None => {}
+        }
+
+        // Rotation origin for 3D effects. The default origin follows a move;
+        // an explicit \org remains fixed in script coordinates.
+        let (org_x, org_y) = if let Some((ox, oy)) = resolved.origin {
+            (ox * scale_x, oy * scale_y)
+        } else {
+            let text_top = base_y - layout.baseline;
+            let ax = match resolved.alignment {
+                1 | 4 | 7 => base_x,
+                2 | 5 | 8 => base_x + layout.width / 2.0,
+                3 | 6 | 9 => base_x + layout.width,
+                _ => base_x + layout.width / 2.0,
+            };
+            let ay = match resolved.alignment {
+                7..=9 => text_top,
+                4..=6 => text_top + layout.height / 2.0,
+                1..=3 => text_top + layout.height,
+                _ => text_top + layout.height / 2.0,
+            };
+            (ax, ay)
+        };
+
+        PreparedEvent {
+            segments,
+            layout,
+            font,
+            alpha_mult,
+            alpha,
+            scale_x,
+            scale_y,
+            blur_scale_x,
+            blur_scale_y,
+            base_x,
+            base_y,
+            org_x,
+            org_y,
+            elapsed_ms: time_ms.saturating_sub(start_ms),
+            legacy_effect,
         }
     }
 }

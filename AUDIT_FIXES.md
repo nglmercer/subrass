@@ -481,8 +481,8 @@ decoding, and code-page-aware fallback are now implemented, while Johab
 
 | Command | Result |
 |---|---|
-| `cargo test --locked --all-features` | 445 passed, 0 failed (424 lib + 2 corpus + 1 golden + 7 reference + 11 robustness) |
-| `cargo test --locked --no-default-features` | 444 passed, 0 failed (423 lib + 2 corpus + 1 golden + 7 reference + 11 robustness) |
+| `cargo test --locked --all-features` | 455 passed, 0 failed (434 lib + 2 corpus + 1 golden + 7 reference + 11 robustness; web/doc/benchmark harnesses have no native tests) |
+| `cargo test --locked --no-default-features` | 454 passed, 0 failed (433 lib + 2 corpus + 1 golden + 7 reference + 11 robustness; web/doc/benchmark harnesses have no native tests) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo check --target wasm32-unknown-unknown --tests --locked` | ok |
@@ -491,9 +491,10 @@ decoding, and code-page-aware fallback are now implemented, while Johab
 | `wasm-pack build --target web --out-dir pkg` | ok |
 | `bun install --frozen-lockfile` + `bun run typecheck` | clean |
 | `bun test` | 41 passed, 0 failed (13 demo/paths + 17 server HTTP + 11 worker-backend) |
-| `cargo audit --deny warnings` | Environment gap: advisory database loaded, but the registry yanked-check request timed out before audit completed |
+| `cargo audit --deny warnings` | pass; advisory database loaded and Cargo.lock scanned with no reported vulnerability |
+| `cargo test --release --test benchmarks -- --ignored --nocapture --test-threads=1` | pass; p50/p95 latency printed for 1080p plain, 1440p many-event, 4K effects/drawing, and 1080p shaping/karaoke cases (see `BENCHMARKS.md`) |
 | `wasm-pack test --headless --chrome` | Environment gap: ChromeDriver starts, but its WebDriver session request returns HTTP 404 for `tests/web.rs`; `cargo check` and `wasm-pack build` pass locally |
-| fuzz smoke (`parse_ass`, `drawing`, `render`, `parse_ass_bytes`) | Environment gap: Windows stable/MSVC cargo-fuzz invokes nightly sanitizer flags; the pinned nightly invocation cannot produce a clean binary in this environment. Stable hostile-input coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
+| fuzz smoke (`cargo +nightly-2026-09-17 fuzz build`) | Environment gap: Windows MSVC links the crate's `cdylib` with unresolved `main` (`LNK2001`/`LNK1120`); the four fuzz targets cannot run here. Stable hostile-input coverage passes locally: `tests/robustness.rs` (11) + `tests/corpus.rs` (2) |
 
 Note: CI status for a given HEAD cannot be confirmed from local data alone;
 the rows above are local runs. The listed GitHub Actions jobs exist in
@@ -526,8 +527,10 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
 8. `\K`/`\kf` sweep edges split at one device-space vertical line like
    libass (gated incl. rotation/shear/perspective combinations).
 9. `\fe` parses/stores/resets with a legacy-byte charset bridge
-   (`decode_font_encoding`); Unicode text stays render-neutral; no
-   charset-based font linking.
+   (`decode_font_encoding`); Unicode text stays render-neutral. OS/2
+   code-page declarations provide a soft fallback ordering hint after the
+   requested face, while glyph coverage remains authoritative; fontconfig
+   parity is intentionally not promised.
 10. CJK/U+200B line breaking follows UAX #14 / VSFilter (CJK runs
     break with punctuation/combining glue; U+3000 and U+200B break),
     while default libass builds without unibreak break at ASCII
@@ -592,5 +595,6 @@ the rows above are local runs. The listed GitHub Actions jobs exist in
   Windows-1250/51/52/53/54/55/56/57/58, Thai, Shift-JIS, CP949, GBK, and
   Big5 runs decode before shaping. Symbol bytes map to U+F000..U+F0FF when a
   compatible face is explicitly loaded. Unicode is preserved and malformed
-  sequences are deterministic. Johab and charset-based font linking remain
-  explicitly unsupported.
+  sequences are deterministic. Johab (`\fe130`) remains explicitly
+  unsupported; OS/2 code-page hints provide deterministic soft fallback
+  ordering, not host fontconfig-equivalent linking.

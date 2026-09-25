@@ -45,7 +45,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 ab_glyph = "0.2"
 unicode-bidi = "0.3.18"
 encoding_rs = "0.8"
-fontdb = { version = "0.23", optional = true }
+fontdb = { version = "0.24", optional = true }
 harfrust = "0.13"
 
 [dev-dependencies]

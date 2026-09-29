@@ -89,6 +89,7 @@ export class EventInspector {
     this.events = doc.get_events() as AssEvent[];
     this.frame = null;
     this.cardIndex = null;
+    this.selected = null;
     this.refresh(true);
   }
 
@@ -111,6 +112,7 @@ export class EventInspector {
       this.tooltip.hidden = true;
       this.details.innerHTML = `<div class="placeholder">${this.enabled ? "Hover a subtitle or focus an active event to inspect it." : "Enable “Inspect on hover” to see event and run properties."}</div>`;
       this.selected = null;
+      this.status.textContent = this.enabled ? "Hover an event" : "Off";
       return;
     }
     const { width, height, events, timeMs } = this.frame;
@@ -119,7 +121,12 @@ export class EventInspector {
       hovered ?? events.find(e => e.event_index === this.selected);
     const event = debug ? this.events[debug.event_index] : undefined;
     const chosen = event && debug ? debug.event_index : null;
-    this.overlay.innerHTML = events.slice(0, 64).filter(e => e.layout_bounds.every(Number.isFinite))
+    const boxes = events.filter(e => e.layout_bounds.every(Number.isFinite)).slice(0, 64);
+    // A card can select any retained event, including one beyond the overlay cap.
+    if (debug && debug.layout_bounds.every(Number.isFinite) && !boxes.includes(debug)) {
+      boxes.splice(63, 1, debug);
+    }
+    this.overlay.innerHTML = boxes
       .map(e => {
         const [l, t, r, b] = e.layout_bounds;
         return `<div class="debug-box${e.event_index === chosen ? " selected" : ""}" style="left:${l / width * 100}%;top:${t / height * 100}%;width:${Math.max(0, r - l) / width * 100}%;height:${Math.max(0, b - t) / height * 100}%"><span>#${e.event_index + 1}</span></div>`;

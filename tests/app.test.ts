@@ -22,7 +22,7 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
   const ids = ["video", "subtitleCanvas", "playPauseBtn", "stopBtn", "seekBar", "loopCheck",
     "backendBadge", "eventList", "timeDisplay", "summaryRes", "summaryStyles", "summaryEvents",
     "summaryTitle", "videoInput", "videoName", "assInput", "assName", "fontInput", "fontList", "error",
-    "inspectCheck", "sceneSelect", "previewStage", "debugOverlay", "hoverTooltip", "inspectorDetails", "inspectStatus"];
+    "inspectCheck", "sceneSelect", "sceneNote", "previewStage", "debugOverlay", "hoverTooltip", "inspectorDetails", "inspectStatus"];
   const elements = new Map(ids.map((id) => [id, new Element()]));
   const canvas = Object.assign(elements.get("subtitleCanvas")!, {
     width: 1920, height: 1080,
@@ -32,7 +32,7 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
   const saved = new Map(["document", "window", "fetch"].map((name) =>
     [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const timers: ReturnType<typeof setTimeout>[] = [];
-  const script = (word: string) => `[Script Info]\nPlayResX: 640\nPlayResY: 480\n[Events]\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,${word}`;
+  const script = (word: string) => `[Script Info]\nPlayResX: 640\nPlayResY: 480\n[Events]\nDialogue: 0,0:00:00.00,0:06:00.00,Default,,0,0,0,,${word}`;
   let failBackend = false;
   let receivedBytes = false;
   const rendered: number[] = [];
@@ -57,6 +57,15 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
     await startDemo(backend);
     expect(elements.get("eventList")!.innerHTML).toContain("original");
     expect([canvas.width, canvas.height]).toEqual([1920, 1080]);
+    // The scene display follows seeks instead of staying at Introduction.
+    for (const [time, scene] of [[66243, "67000"], [289852, "287000"]] as const) {
+      elements.get("seekBar")!.value = String(time / 363000 * 1000);
+      await elements.get("seekBar")!.emit("input");
+      expect(elements.get("sceneSelect")!.value).toBe(scene);
+    }
+    expect(elements.get("sceneNote")!.textContent).toContain("overlap intentionally");
+    await elements.get("stopBtn")!.emit("click");
+    expect(elements.get("sceneSelect")!.value).toBe("0");
     // A parser error and a backend error both preserve the previous document.
     for (const content of ["[Script Info]\nPlayResX: nope", script("rejected")]) {
       failBackend = content.includes("rejected");
@@ -75,6 +84,9 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
     expect(receivedBytes).toBe(true);
     expect(elements.get("assName")!.textContent).toBe("unicode.ass");
     expect(elements.get("eventList")!.innerHTML).toContain("UTF16 café");
+    expect(elements.get("sceneSelect")!.disabled).toBe(true);
+    expect(elements.get("sceneSelect")!.value).toBe("");
+    expect(elements.get("sceneNote")!.textContent).not.toContain("overlap intentionally");
     expect(rendered.length).toBeGreaterThan(0);
   } finally {
     for (const timer of timers) clearTimeout(timer);

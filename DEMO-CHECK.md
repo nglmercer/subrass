@@ -180,3 +180,39 @@ A real video playback/upload session and other browser engines were not exercise
 in this follow-up. Headless Chrome did exercise the actual demo UI; the earlier
 section's lack of connected interactive browser tooling still applies only to
 that earlier investigation.
+
+## Screenshot follow-up: 1:06.243 and 4:49.852
+
+The new screenshots expose a demo navigation bug: the scene picker remained on
+Introduction after timeline seeks. Both pages now populate all 21 scene shortcuts
+from `demo/shared/scenes.ts` and track the current scene during playback, seeking,
+and stop. Scene boundaries are separate from representative seek times, so the
+colors scene is selected from 1:05 even though its shortcut seeks to 1:07.
+Successful custom subtitle uploads clear and disable sample navigation and hints.
+
+The colors and overlap remain authored behavior. Layer captions now say
+back/middle/front to distinguish paint order from vertical placement; the layer
+scene explains intentional overlap and how to inspect individual event cards.
+Inspector help clarifies layout hit testing and requested font/color settings.
+Sample captions also correct `\ko` outline appearance, linear `\move`, `\p2`
+coordinate scaling, and the cyan TopComment style.
+
+Inspection now resets its selection/status when changing documents and ensures
+the selected event is highlighted even when its card is beyond the first 64
+overlay boxes, while retaining the 64-box display limit.
+
+A fresh comparison of the current WASM renderer against isolated libass 0.17.5
+at 1:06.243 and 4:49.852, using the same bundled DejaVu Sans fallback and 1036x583
+output, confirms the authored placement, colors and overlap. Solid red/green/blue
+pixel bounds differ by at most one pixel; outline/raster coverage differences
+remain. Comparison PNGs are in `target/demo-browser/comparison-66243.png` and
+`comparison-289852.png` (subrass left, libass right). No renderer changes, reference
+threshold changes or golden regeneration were needed.
+
+Validation: `bun run typecheck`, all 52 Bun tests (275 assertions), and all six
+`cargo test --locked --test demo_render` tests pass, including the 110-event,
+232-frame sample sweep. The real Chrome browser runner passes for both basic
+and worker demos, covering slider scene synchronization, keyboard inspection of
+the back layer, pointer selection of the front layer, custom-upload state, and
+highlighting event #70 with 64 overlay boxes. Desktop/mobile screenshots were
+visually checked. Video playback and other browser engines were not tested here.

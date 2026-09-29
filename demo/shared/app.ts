@@ -5,8 +5,9 @@ import { AssDoc } from "../../pkg/subrass.js";
 import type { AssEvent, RenderBackend, ScriptInfo, SubtitleSummary } from "./types.ts";
 import { formatClock, lastEventEndMs } from "./ass.ts";
 import { Player } from "./player.ts";
-import { ActiveEventList, byId, showError, updateSummary } from "./ui.ts";
+import { ActiveEventList, byId, escapeHtml, showError, updateSummary } from "./ui.ts";
 import { EventInspector } from "./inspector.ts";
+import { sampleSceneAt, sampleScenes } from "./scenes.ts";
 import { dbg } from "./debug.ts";
 
 const DEFAULT_WIDTH = 1920;
@@ -37,6 +38,13 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   const loopCheck = byId<HTMLInputElement>("loopCheck");
   const inspectCheck = byId<HTMLInputElement>("inspectCheck");
   const sceneSelect = byId<HTMLSelectElement>("sceneSelect");
+  const sceneNote = byId("sceneNote");
+  const defaultSceneNote = sceneNote.textContent ?? "";
+  sceneSelect.innerHTML = sampleScenes.map(scene => {
+    const minutes = Math.floor(scene.seek / 60000).toString().padStart(2, "0");
+    const seconds = Math.floor(scene.seek / 1000 % 60).toString().padStart(2, "0");
+    return `<option value="${scene.seek}">${minutes}:${seconds} · ${escapeHtml(scene.label)}</option>`;
+  }).join("");
   const stage = byId("previewStage");
   const inspector = new EventInspector(stage, byId("debugOverlay"), byId("hoverTooltip"),
     byId("inspectorDetails"), byId("inspectStatus"), byId("eventList"));
@@ -112,6 +120,7 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     summary = nextSummary;
     inspector.setDocument(doc);
     sceneSelect.disabled = true;
+    sceneSelect.value = "";
     log("backend.loadAss done", { summary });
     loaded = true;
 
@@ -150,6 +159,13 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
       seekBar.value = String((timeMs / player.durationMs) * 1000);
     }
     eventList.update(timeMs);
+    if (!sceneSelect.disabled) {
+      const scene = sampleSceneAt(timeMs);
+      sceneSelect.value = String(scene.seek);
+      sceneNote.textContent = scene.note ?? defaultSceneNote;
+    } else {
+      sceneNote.textContent = defaultSceneNote;
+    }
   }
 
   function refreshHud(): void {
@@ -271,6 +287,7 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
       byId("assName").textContent = "sample.ass";
       await loadAss(await resp.text());
       sceneSelect.disabled = (options.sampleUrl ?? "/sample.ass") !== "/sample.ass";
+      updateHud(player.currentTimeMs());
       log("sample loadAss finished successfully");
     } else {
       log("sample not loaded (non-OK response)");

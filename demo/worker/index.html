@@ -31,15 +31,8 @@
                     <input type="range" id="seekBar" min="0" max="1000" value="0" disabled aria-label="Playback position">
                     <label class="loop-label"><input type="checkbox" id="loopCheck" checked> Loop</label>
                 </div>
-                <div class="scene-row"><label for="sceneSelect">Explore the sample</label><select id="sceneSelect" disabled>
-                    <option value="0">00:00 · Introduction</option><option value="26000">00:26 · Karaoke sweep</option>
-                    <option value="67000">01:07 · Colors &amp; outlines</option><option value="96000">01:36 · Alignment</option>
-                    <option value="112000">01:52 · Movement</option><option value="132000">02:12 · Transforms</option>
-                    <option value="152000">02:32 · Borders &amp; blur</option><option value="166000">02:46 · Clipping</option>
-                    <option value="182000">03:02 · Fades</option><option value="197000">03:17 · Vector drawings</option>
-                    <option value="217000">03:37 · Simultaneous dialogue</option><option value="287000">04:47 · Overlapping layers</option>
-                </select></div>
-                <p class="hint">Play the bundled sample or load your own files. Enable inspection, then hover over a subtitle or focus an active event. Pause to explore a frame.</p>
+                <div class="scene-row"><label for="sceneSelect">Explore the sample</label><select id="sceneSelect" disabled></select></div>
+                <p class="hint" id="sceneNote">Play the bundled sample or load your own files. Enable inspection, then hover over a subtitle or focus an active event. Pause to explore a frame.</p>
                 <div id="error" class="error" role="alert" style="display: none;"></div>
                 <section class="events-section"><div class="section-heading"><h2>On this frame</h2><span>Active dialogue · layer order</span></div>
                     <div class="event-list scrollbar" id="eventList"><div class="placeholder">Loading subtitles…</div></div></section>
@@ -59,7 +52,7 @@
                     </div>
                 </section>
                 <section class="panel inspector-panel"><div class="section-heading"><h2>Event inspector</h2><span id="inspectStatus">Off</span></div>
-                    <p class="inspector-help">Layout boxes include collision placement. Rotation, perspective, clipping, shadows and blur can change visible bounds.</p>
+                    <p class="inspector-help">Hover selects layout boxes, including empty space inside them. Rotation, clipping, shadows and blur can change visible bounds. Font and color values describe requested run settings; fallback fonts, karaoke and fades affect the final pixels.</p>
                     <div id="inspectorDetails" class="inspector-details scrollbar"><div class="placeholder">Enable “Inspect on hover” to see event and run properties.</div></div>
                 </section>
                 <p class="sidebar-note">Explicit positions and separate layers can overlap intentionally. Script coordinates scale with the preview.</p>

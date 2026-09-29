@@ -55,6 +55,10 @@ try {
     await waitFor("return document.getElementById('summaryEvents').textContent === '110'");
     assert.equal(await js("return document.getElementById('error').style.display"), "none");
     assert.equal(await js("return document.documentElement.scrollWidth <= innerWidth"), true);
+    assert.equal(await js("return document.getElementById('sceneSelect').options.length"), 21);
+    // Reproduce the screenshots' slider seeks: the current scene must follow.
+    await js("const s=document.getElementById('seekBar');s.value='213';s.dispatchEvent(new Event('input'));return true");
+    assert.equal(await js("return document.getElementById('sceneSelect').value"), "67000");
     await js("const s=document.getElementById('sceneSelect');s.value='67000';s.dispatchEvent(new Event('change'));return true");
     await waitFor("return document.querySelectorAll('.event-item').length === 2");
     // Worker painting is asynchronous: inspection reply proves this frame was painted.
@@ -81,17 +85,27 @@ try {
       "moving into the inspector retains details for scrolling");
     await click("#inspectCheck");
     assert.equal(await js("return document.querySelectorAll('.debug-box').length"), 0);
+    assert.equal(await js("return document.getElementById('inspectStatus').textContent"), "Off");
     assert.equal(await js("return document.getElementById('hoverTooltip').hidden"), true);
     assert.equal(await js(pixelHash), before);
     await screenshot(`${mode}-desktop`);
     // The layer example keeps its authored overlap and each card can be inspected.
-    await js("const s=document.getElementById('sceneSelect');s.value='287000';s.dispatchEvent(new Event('change'));return true");
+    await js("const s=document.getElementById('seekBar');s.value='932';s.dispatchEvent(new Event('input'));return true");
+    assert.equal(await js("return document.getElementById('sceneSelect').value"), "287000");
+    assert.equal(await js("return document.getElementById('sceneNote').textContent.includes('overlap intentionally')"), true);
     await waitFor("return document.querySelectorAll('.event-item').length === 3");
     await click("#inspectCheck");
     await waitFor("return document.querySelectorAll('.debug-box').length === 3");
     await js("document.querySelector('.event-item').focus();return true");
-    assert.equal(await js("return document.getElementById('inspectorDetails').textContent.includes('Layer 0 (bottom)')"), true);
+    assert.equal(await js("return document.getElementById('inspectorDetails').textContent.includes('Layer 0 (back)')"), true);
     await screenshot(`${mode}-layers`);
+    const front = await js(`const r=document.querySelectorAll('.debug-box')[2].getBoundingClientRect();
+      return [Math.round(r.left+r.width/2),Math.round(r.top+r.height/2)];`);
+    await command("/actions", { actions: [{ type: "pointer", id: "mouse", parameters: { pointerType: "mouse" },
+      actions: [{ type: "pointerMove", duration: 0, origin: "viewport", x: front[0], y: front[1] }] }] });
+    await waitFor("return document.getElementById('inspectStatus').textContent === 'Event #106'");
+    assert.equal(await js("return document.getElementById('inspectorDetails').textContent.includes('Layer 2 (front)')"), true);
+    await screenshot(`${mode}-layers-front`);
     // Narrow layout and source-byte upload paths use the same inspector.
     await command("/window/rect", { width: 390, height: 1100 });
     await js("window.scrollTo(0,0); return true");
@@ -111,6 +125,16 @@ try {
     await command(`/element/${await element('#assInput')}/value`, { text: `${artifacts}/invalid.ass` });
     await waitFor("return document.getElementById('error').style.display === 'block'");
     assert.equal(await js("return document.getElementById('assName').textContent"), "upload.ass");
+    // The overlay cap must not hide a selected card beyond its first 64 boxes.
+    const dense = '[Script Info]\nPlayResX: 640\nPlayResY: 480\n[Events]\n' +
+      Array.from({ length: 70 }, (_, i) => `Dialogue: ${i},0:00:00.00,0:06:00.00,Default,,0,0,0,,{\\pos(320,240)}Event ${i + 1}\n`).join('');
+    await Bun.write(`${artifacts}/dense.ass`, dense);
+    await command(`/element/${await element('#assInput')}/value`, { text: `${artifacts}/dense.ass` });
+    await waitFor("return document.querySelectorAll('.debug-box').length === 64 && document.querySelectorAll('.event-item').length === 70");
+    await js("document.querySelector('.event-item:last-child').focus();return true");
+    assert.equal(await js("return document.querySelector('.debug-box.selected span').textContent"), "#70");
+    assert.equal(await js("return document.querySelectorAll('.debug-box').length"), 64);
+    assert.equal(await js("return document.getElementById('inspectStatus').textContent"), "Event #70");
     console.log(`PASS ${mode}: startup, scenes, hover, run values, pixel preservation, keyboard focus, mobile layout, UTF-16, failed reload`);
   }
   console.log(`Screenshots: ${artifacts}`);

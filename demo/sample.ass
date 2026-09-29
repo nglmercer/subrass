@@ -64,10 +64,10 @@ Dialogue: 1,0:00:33.00,0:00:40.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666
 ; SECTION 4: KARAOKE - Outline \ko (0:40 - 0:52)
 ; ═══════════════════════════════════════════════════════════════
 
-Dialogue: 0,0:00:40.00,0:00:46.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\ko90}Out{\ko70}line {\ko80}dis{\ko60}ap{\ko70}pears
-Dialogue: 1,0:00:40.00,0:00:46.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Outline \ko — border vanishes after syllable
+Dialogue: 0,0:00:40.00,0:00:46.00,Karaoke,,0,0,0,,{\an5\pos(960,380)\ko90}Out{\ko70}line {\ko80}ap{\ko60}pears {\ko70}now
+Dialogue: 1,0:00:40.00,0:00:46.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Outline \ko — border appears when each syllable starts
 
-Dialogue: 0,0:00:46.00,0:00:52.00,Karaoke2,,0,0,0,,{\an5\pos(960,380)\ko50}Bor{\ko40}der {\ko60}fades {\ko50}on {\ko70}sing
+Dialogue: 0,0:00:46.00,0:00:52.00,Karaoke2,,0,0,0,,{\an5\pos(960,380)\ko50}Bor{\ko40}der {\ko60}shows {\ko50}on {\ko70}sing
 Dialogue: 1,0:00:46.00,0:00:52.00,SmallText,,0,0,0,,{\an5\pos(960,450)\c&H666666&}Combined with secondary color highlight
 
 ; ═══════════════════════════════════════════════════════════════
@@ -129,7 +129,7 @@ Dialogue: 2,0:01:45.00,0:01:50.00,Default,,0,0,0,,{\an3\pos(1820,950)}an3\NBot-r
 Dialogue: 0,0:01:50.00,0:01:56.00,Default,,0,0,0,,{\move(100,300,1820,300)}Left → Right
 Dialogue: 1,0:01:50.00,0:01:56.00,Default,,0,0,0,,{\move(1820,400,100,400)}Right → Left
 
-Dialogue: 0,0:01:57.00,0:02:03.00,Default,,0,0,0,,{\move(960,1080,960,200,0,6000)}Bottom → Top (eased)
+Dialogue: 0,0:01:57.00,0:02:03.00,Default,,0,0,0,,{\move(960,1080,960,200,0,6000)}Bottom → Top (linear)
 Dialogue: 1,0:01:57.00,0:02:03.00,Default,,0,0,0,,{\move(200,800,1720,800,2000,6000)}Delayed start
 
 Dialogue: 0,0:02:04.00,0:02:10.00,Default,,0,0,0,,{\move(100,540,1820,540,0,3000)\c&H00FF00&}Fast first half
@@ -195,7 +195,7 @@ Dialogue: 0,0:03:23.00,0:03:30.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p1\bord3\c&
 Dialogue: 1,0:03:23.00,0:03:30.00,SmallText,,0,0,0,,{\an5\pos(960,620)\c&H888888&}Cubic bezier curves
 
 Dialogue: 0,0:03:31.00,0:03:38.00,Drawing,,0,0,0,,{\an5\pos(960,400)\p2\bord2\c&HFF00FF&}m 850 300 l 850 500 l 1070 500 l 1070 300 l 960 200{\p0}Higher precision (\p2)
-Dialogue: 1,0:03:31.00,0:03:38.00,SmallText,,0,0,0,,{\an5\pos(960,600)\c&H888888&}Drawing scale 2x
+Dialogue: 1,0:03:31.00,0:03:38.00,SmallText,,0,0,0,,{\an5\pos(960,600)\c&H888888&}Drawing coordinates scaled to 1/2
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 15: MULTIPLE SIMULTANEOUS DIALOGUES (3:35 - 3:50)
@@ -228,7 +228,7 @@ Dialogue: 0,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,300)\fnArial\fs6
 Dialogue: 1,0:04:05.00,0:04:10.00,Default,,0,0,0,,{\an5\pos(960,380)\c&H0000FF&}Red{\r} {\i1}italic{\r} {\b1}bold{\r} — each \r resets
 
 Dialogue: 0,0:04:11.00,0:04:15.00,Credit,,0,0,0,,{\an5\pos(960,300)}Using Credit style (italic)
-Dialogue: 1,0:04:11.00,0:04:15.00,TopComment,,0,0,0,,{\an5\pos(960,360)}Using TopComment style (yellow)
+Dialogue: 1,0:04:11.00,0:04:15.00,TopComment,,0,0,0,,{\an5\pos(960,360)}Using TopComment style (cyan)
 
 ; ═══════════════════════════════════════════════════════════════
 ; SECTION 18: V4 STYLES (SSA) DEMO (4:15 - 4:30)
@@ -258,9 +258,9 @@ Dialogue: 1,0:04:38.00,0:04:45.00,Default,,0,0,0,,{\an5\pos(960,500)\fs40}And {\
 ; SECTION 20: LAYER COMPOSITING (4:45 - 4:55)
 ; ═══════════════════════════════════════════════════════════════
 
-Dialogue: 0,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,400)\c&HFF0000&\fs60}Layer 0 (bottom)
+Dialogue: 0,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,400)\c&HFF0000&\fs60}Layer 0 (back)
 Dialogue: 1,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,420)\c&H00FF00&\fs50}Layer 1 (middle)
-Dialogue: 2,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,440)\c&H0000FF&\fs40}Layer 2 (top)
+Dialogue: 2,0:04:45.00,0:04:50.00,Default,,0,0,0,,{\an5\pos(960,440)\c&H0000FF&\fs40}Layer 2 (front)
 
 Dialogue: 0,0:04:51.00,0:04:55.00,SmallText,,0,0,0,,{\an5\pos(960,500)\c&H888888&}Higher layer number = rendered on top
 

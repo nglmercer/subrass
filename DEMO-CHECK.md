@@ -88,3 +88,95 @@ real video file was supplied for media playback testing. The supplied images,
 direct reference renders, real WASM/worker tests, source inspection, and sample
 boundary sweep support the findings above. General rendering limitations remain
 in [CONFORMANCE.md](CONFORMANCE.md).
+
+## Playground redesign and hover inspection
+
+A later follow-up replaces the large centered header and file buttons with a
+compact responsive playground, a wider preview, sample scene shortcuts, and
+active event cards below the player. The two screenshots still represent the
+same authored sample; this redesign changes the interface, not the subtitles.
+
+Enable **Inspect on hover**, or open `/basic/?inspect` or `/worker/?inspect`.
+Hover the preview to select the last painted overlapping layout box. Focus or
+tap an active event card to inspect any specific layer. The side panel retains
+the last selected active event when the pointer leaves, allowing scrolling and
+copying. Pause playback to inspect a stable frame. Turning inspection off clears
+metadata and overlays. `?debug` remains a separate console logging option.
+
+The inspector shows event layer/style/timing/actor/effect/margins, original ASS
+text and tags, alignment, pivot, collision eligibility/displacement, fade opacity,
+and effective per-run font request/size, fill/outline RGBA, X/Y scale and shear,
+X/Y/Z rotation, border, shadow, Gaussian blur and edge blur. Frame metadata comes
+from the renderer's measured layout after collision placement and is delivered
+with the frame actually painted, including the worker request ID/timestamp path.
+
+This is layout inspection, not pixel picking. Rectangles include borders but
+precede rotation, shear, perspective, clipping, shadow and blur. Invisible/faded
+runs can retain layout boxes. Font names identify requested families, not the
+fallback face selected for every glyph. RGBA values are requested run colors;
+karaoke coverage, fade and clipping modify their eventual pixels. Snapshots are
+opt-in and capped at 256 events, 64 runs/event and 256 Unicode scalars per font
+name. The preview draws at most 64 boxes, while event cards can select any event
+in the retained snapshot. Source text display is capped at 4000 characters.
+Native renderer callers can use `set_debug_enabled` and `frame_debug`; WASM callers
+use `set_debug_enabled` and `get_frame_debug` after rendering.
+
+### Reproducible browser checks
+
+Build and serve the demo, start a compatible ChromeDriver, then run:
+
+```sh
+bun run build
+bun run start
+# In another terminal, with Chrome/Chromium installed:
+chromedriver --port=9515
+# In another terminal:
+bun run test:demo:browser
+```
+
+The standalone browser regression runner accepts `WEBDRIVER_URL` (default
+`http://localhost:9515`), `DEMO_URL` (default `http://localhost:8001`), optional
+`CHROME_BINARY`, `CHROME_NO_SANDBOX=1` for a container that requires it, and
+`DEMO_ARTIFACT_DIR` (default `target/demo-browser`). It closes its browser session
+and saves desktop/hover/layer/mobile PNGs. It tests both live pages with actual
+WASM and worker rendering, pointer hover, keyboard focus, retained details,
+inline run properties, unchanged canvas pixels, disabled-inspector cleanup,
+mobile overflow, UTF-16 file input, and state preservation on invalid uploads.
+It supplements `bun test` and the Rust WASM browser suite.
+
+For this host, Chrome/ChromeDriver 153.0.8010.12 were used. `/tmp` was full and the
+first Chrome session crashed; starting ChromeDriver with a workspace `TMPDIR`
+resolved it without deleting other files:
+
+```sh
+mkdir -p target/demo-browser-tmp
+TMPDIR="$PWD/target/demo-browser-tmp" \
+  /tmp/subrass-reference/chromedriver-linux64/chromedriver --port=9516
+WEBDRIVER_URL=http://localhost:9516 \
+CHROME_BINARY=/home/meme/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome \
+CHROME_NO_SANDBOX=1 bun run test:demo:browser
+```
+
+### Follow-up validation
+
+| Command / check | Result |
+|---|---|
+| `bun run build` | Optimized WASM package built |
+| `bun run typecheck` | Pass |
+| `bun test` | 52 passed, no failures |
+| `bun run test:demo:browser` with the environment above | Both backends pass; desktop and mobile screenshots visually reviewed |
+| `cargo fmt --all -- --check` | Pass |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | Pass |
+| `cargo test --locked --all-features` | 475 passed, existing benchmark ignored |
+| `cargo test --locked --no-default-features` | Pass |
+| `SUBRASS_STRICT_REFERENCES=1 cargo test --locked --test reference` | All 180 existing frame gates pass; no threshold or golden changes |
+| Headless Chrome WASM command above, using `target/demo-browser-tmp` as `TMPDIR` | 41 passed, including new debug export regression |
+
+New renderer regressions cover opt-in clearing, pixel preservation, deterministic
+seeking, inline colors, animated run values, collision displacement, stable source
+indices including comments, and metadata caps. Logs for this follow-up are
+`target/demo-redesign-*.log`; screenshots are `target/demo-browser/*.png`.
+A real video playback/upload session and other browser engines were not exercised
+in this follow-up. Headless Chrome did exercise the actual demo UI; the earlier
+section's lack of connected interactive browser tooling still applies only to
+that earlier investigation.

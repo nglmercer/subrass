@@ -6,6 +6,7 @@ import type { AssEvent, RenderBackend, ScriptInfo, SubtitleSummary } from "./typ
 import { formatClock, lastEventEndMs } from "./ass.ts";
 import { Player } from "./player.ts";
 import { ActiveEventList, byId, showError, updateSummary } from "./ui.ts";
+import { EventInspector } from "./inspector.ts";
 import { dbg } from "./debug.ts";
 
 const DEFAULT_WIDTH = 1920;
@@ -34,6 +35,11 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   const stopBtn = byId<HTMLButtonElement>("stopBtn");
   const seekBar = byId<HTMLInputElement>("seekBar");
   const loopCheck = byId<HTMLInputElement>("loopCheck");
+  const inspectCheck = byId<HTMLInputElement>("inspectCheck");
+  const sceneSelect = byId<HTMLSelectElement>("sceneSelect");
+  const stage = byId("previewStage");
+  const inspector = new EventInspector(stage, byId("debugOverlay"), byId("hoverTooltip"),
+    byId("inspectorDetails"), byId("inspectStatus"), byId("eventList"));
 
   byId("backendBadge").textContent = backend.kind;
 
@@ -66,6 +72,9 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   });
 
   backend.setFrameTarget(canvas);
+  inspectCheck.checked = typeof location !== "undefined" && new URLSearchParams(location.search).has("inspect");
+  inspector.setEnabled(inspectCheck.checked);
+  backend.setDebug?.(inspectCheck.checked, inspector.onFrame);
   log("setFrameTarget done", { canvasW: canvas.width, canvasH: canvas.height });
 
   // --- Subtitle loading -----------------------------------------------------
@@ -101,6 +110,8 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     doc?.free();
     doc = nextDoc;
     summary = nextSummary;
+    inspector.setDocument(doc);
+    sceneSelect.disabled = true;
     log("backend.loadAss done", { summary });
     loaded = true;
 
@@ -118,6 +129,7 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   function syncCanvasSize(): void {
     const w = video.videoWidth || DEFAULT_WIDTH;
     const h = video.videoHeight || DEFAULT_HEIGHT;
+    stage.style.aspectRatio = `${w} / ${h}`;
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -159,6 +171,16 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   }
 
   // --- Controls ---------------------------------------------------------------
+
+  inspectCheck.addEventListener("change", () => {
+    inspector.setEnabled(inspectCheck.checked);
+    backend.setDebug?.(inspectCheck.checked, inspector.onFrame);
+    if (loaded) backend.renderFrame(player.currentTimeMs());
+  });
+
+  sceneSelect.addEventListener("change", () => {
+    if (!sceneSelect.disabled) player.seekMs(Number(sceneSelect.value));
+  });
 
   playPauseBtn.addEventListener("click", () => {
     player.togglePlay();
@@ -248,6 +270,7 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
     if (resp.ok) {
       byId("assName").textContent = "sample.ass";
       await loadAss(await resp.text());
+      sceneSelect.disabled = (options.sampleUrl ?? "/sample.ass") !== "/sample.ass";
       log("sample loadAss finished successfully");
     } else {
       log("sample not loaded (non-OK response)");

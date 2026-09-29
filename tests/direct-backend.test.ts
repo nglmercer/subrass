@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DirectBackend } from "../demo/shared/direct-backend.ts";
+import type { DebugFrame } from "../demo/shared/types.ts";
 
 // Exercise the real WASM backend under Bun. Only the canvas drawing surface
 // is replaced; parsing, sizing, rasterization, and renderer lifetime are real.
@@ -32,6 +33,30 @@ afterAll(() => {
 const source = (width: number, height: number) => `[Script Info]\nPlayResX: ${width}\nPlayResY: ${height}\n[Events]\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,hello`;
 
 describe("main-thread demo renderer lifecycle", () => {
+  test("inspection arrives with a painted frame and survives document replacement", async () => {
+    const ctx = new TestContext();
+    const canvas = { width: 256, height: 144, getContext: () => ctx } as unknown as HTMLCanvasElement;
+    const backend = new DirectBackend();
+    await backend.init();
+    backend.setFrameTarget(canvas);
+    const snapshots: DebugFrame[] = [];
+    backend.setDebug(true, frame => {
+      expect(ctx.image).toEqual({ width: frame.width, height: frame.height });
+      snapshots.push(frame);
+    });
+    try {
+      for (const width of [256, 640]) {
+        await backend.loadAss(source(width, 144));
+        backend.renderFrame(1000);
+      }
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[0]!.timeMs).toBe(1000);
+      expect(snapshots[0]!.events[0]!.event_index).toBe(0);
+      backend.setDebug(false, frame => snapshots.push(frame));
+      backend.renderFrame(1000);
+      expect(snapshots).toHaveLength(2);
+    } finally { backend.dispose(); }
+  });
   test("subtitle reload keeps the existing output size", async () => {
     const ctx = new TestContext();
     const canvas = { width: 256, height: 144, getContext: () => ctx } as unknown as HTMLCanvasElement;

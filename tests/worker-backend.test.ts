@@ -188,6 +188,25 @@ describe("worker error association (#80)", () => {
 });
 
 describe("render coalescing (#81)", () => {
+  test("inspection follows accepted frame ids and late metadata is ignored after disabling", async () => {
+    const { backend, fake, ready } = readyBackend();
+    await handshake(fake, ready);
+    const snapshots: unknown[] = [];
+    backend.setDebug(true, frame => snapshots.push(frame));
+    expect(fake.posted.at(-1)!.message).toMatchObject({ kind: "setDebug", enabled: true });
+    backend.renderFrame(100);
+    const requestId = fake.renders()[0]!.requestId;
+    fake.emit({ kind: "frame", requestId: 999, timeMs: 50, debug: [], bytes: new ArrayBuffer(16) });
+    expect(snapshots).toHaveLength(0);
+    fake.emit({ kind: "frame", requestId, timeMs: 100, w: 2, h: 2, debug: [], bytes: new ArrayBuffer(16) });
+    expect(snapshots).toEqual([{ timeMs: 100, width: 2, height: 2, events: [] }]);
+    backend.renderFrame(200);
+    backend.setDebug(false, frame => snapshots.push(frame));
+    fake.emit({ kind: "frame", requestId: fake.renders()[1]!.requestId,
+      timeMs: 200, w: 2, h: 2, debug: [], bytes: new ArrayBuffer(16) });
+    expect(snapshots).toHaveLength(1);
+    backend.dispose();
+  });
   test("rapid renders collapse to first + newest", async () => {
     const { backend, fake, ready } = readyBackend();
     await handshake(fake, ready);

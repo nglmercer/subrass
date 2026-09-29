@@ -69,6 +69,28 @@ fn test_raw_bytes_and_warning_exports() {
 }
 
 #[wasm_bindgen_test]
+fn test_frame_debug_exports_match_the_painted_frame() {
+    let mut renderer = subrass::api::SubtitleRenderer::new(TEST_ASS).unwrap();
+    renderer.set_video_size(384, 216).unwrap();
+    renderer.render_frame(2000.0).unwrap();
+    let pixels = renderer.get_frame_data();
+    assert_eq!(as_array(&renderer.get_frame_debug().unwrap()).length(), 0);
+    renderer.set_debug_enabled(true);
+    renderer.render_frame(2000.0).unwrap();
+    assert_eq!(renderer.get_frame_data(), pixels);
+    let snapshot = as_array(&renderer.get_frame_debug().unwrap());
+    assert_eq!(snapshot.length(), 1);
+    let event = snapshot.get(0);
+    assert_eq!(field_f64(&event, "event_index"), 0.0);
+    assert_eq!(as_array(&field(&event, "layout_bounds")).length(), 4);
+    let runs = as_array(&field(&event, "runs"));
+    assert_eq!(runs.length(), 1);
+    assert_eq!(field_f64(&runs.get(0), "font_size"), 48.0);
+    renderer.set_debug_enabled(false);
+    assert_eq!(as_array(&renderer.get_frame_debug().unwrap()).length(), 0);
+}
+
+#[wasm_bindgen_test]
 fn test_get_script_info() {
     let doc = subrass::api::AssDoc::new(TEST_ASS).unwrap();
     let info = doc.get_script_info().unwrap();

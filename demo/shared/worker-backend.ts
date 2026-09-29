@@ -14,7 +14,7 @@
 //                   | { kind: "error", requestId, error }
 //   main -> worker: { kind: "setVideoSize", w, h } | { kind: "loadFont", name, data }
 import init from "../../pkg/subrass.js";
-import type { RenderBackend, SubtitleSummary } from "./types.ts";
+import type { DebugFrame, EventDebug, RenderBackend, SubtitleSummary } from "./types.ts";
 import { dbg } from "./debug.ts";
 
 const log = dbg("worker-backend");
@@ -52,6 +52,8 @@ export class WorkerBackend implements RenderBackend {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private disposed = false;
+  private debugEnabled = false;
+  private onDebugFrame: ((frame: DebugFrame) => void) | null = null;
 
   constructor(workerUrl: URL, options: WorkerBackendOptions = {}) {
     this.workerUrl = workerUrl;
@@ -119,6 +121,12 @@ export class WorkerBackend implements RenderBackend {
     }
   }
 
+  setDebug(enabled: boolean, onFrame: (frame: DebugFrame) => void): void {
+    this.debugEnabled = enabled;
+    this.onDebugFrame = enabled ? onFrame : null;
+    this.post({ kind: "setDebug", enabled });
+  }
+
   loadFont(name: string, data: Uint8Array): void {
     log("loadFont", { name, bytes: data.byteLength });
     // Copy the exact view range: transferring `data.buffer` directly
@@ -171,6 +179,7 @@ export class WorkerBackend implements RenderBackend {
     w?: number;
     h?: number;
     bytes?: ArrayBuffer;
+    debug?: EventDebug[];
   }): void {
     switch (msg.kind) {
       case "ready":
@@ -197,6 +206,9 @@ export class WorkerBackend implements RenderBackend {
         if (this.ctx && w > 0 && h > 0) {
           const image = new ImageData(new Uint8ClampedArray(msg.bytes), w, h);
           this.ctx.putImageData(image, 0, 0);
+        }
+        if (this.debugEnabled && msg.debug && msg.timeMs !== undefined) {
+          this.onDebugFrame?.({ timeMs: msg.timeMs, width: w, height: h, events: msg.debug });
         }
         // Flush a newer pending render, if any.
         if (this.pendingRenderMs !== null) {

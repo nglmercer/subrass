@@ -146,6 +146,8 @@ bun run start               # bundled dev server → http://localhost:8001
 
 Then open `/` (`demo/` landing page, `/basic` for main-thread rendering, `/worker` for worker rendering) and select a video file and an ASS subtitle file. If you load only subtitles, the demo plays them on a virtual timeline. Append `?debug` to enable demo logging.
 
+The playground has sample scene shortcuts and an **Inspect on hover** toggle (or append `?inspect`). Hover over a subtitle to see its layer, timing, tags, and effective run properties; focus or tap an active event card to inspect a specific overlapping layer. The side panel keeps the last selection so you can scroll through its properties. Inspection uses layout boxes after collision placement, rather than exact visible pixel bounds; rotation, clipping and effects can extend or reduce the visible area. Font names are requested families, and fill/outline RGBA values exclude karaoke coverage and event fade. Both backends support inspection without changing rendered pixels. See [DEMO-CHECK.md](DEMO-CHECK.md) for browser regression commands and limits.
+
 A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all major features: karaoke (hard swap, sweep, outline), V4+ and V4 (SSA) styles, transforms, movement, clipping, vector drawing, multi-layer compositing, and fade effects.
 
 Some sample scenes deliberately overlap explicitly positioned events. In the layer scene, “bottom/middle/top” names the painting order, while all three lines use `\an5\pos(...)`. Collision placement leaves authored positions intact. Subtitle uploads use raw bytes, including BOM-marked UTF-16 and supported legacy encodings. See [DEMO-CHECK.md](DEMO-CHECK.md) for the screenshot investigation, fixes, and validation scope.

@@ -7,6 +7,7 @@ class Element {
   textContent = "";
   innerHTML = "";
   style = { display: "" };
+  classList = { toggle() {} };
   disabled = true;
   checked = true;
   value = "0";
@@ -20,7 +21,8 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
   await init();
   const ids = ["video", "subtitleCanvas", "playPauseBtn", "stopBtn", "seekBar", "loopCheck",
     "backendBadge", "eventList", "timeDisplay", "summaryRes", "summaryStyles", "summaryEvents",
-    "summaryTitle", "videoInput", "videoName", "assInput", "assName", "fontInput", "fontList", "error"];
+    "summaryTitle", "videoInput", "videoName", "assInput", "assName", "fontInput", "fontList", "error",
+    "inspectCheck", "sceneSelect", "previewStage", "debugOverlay", "hoverTooltip", "inspectorDetails", "inspectStatus"];
   const elements = new Map(ids.map((id) => [id, new Element()]));
   const canvas = Object.assign(elements.get("subtitleCanvas")!, {
     width: 1920, height: 1080,
@@ -60,7 +62,6 @@ test("demo file loading keeps valid state on errors and reads raw subtitle bytes
       failBackend = content.includes("rejected");
       await elements.get("assInput")!.emit("change", { files: [{ name: "bad.ass",
         arrayBuffer: async () => new TextEncoder().encode(content).buffer }] });
-      elements.get("eventList")!.innerHTML = "";
       elements.get("seekBar")!.value = "100";
       await elements.get("seekBar")!.emit("input");
       expect(elements.get("eventList")!.innerHTML).toContain("original");

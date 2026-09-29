@@ -310,6 +310,19 @@ impl SubtitleRenderer {
         vec![w, h]
     }
 
+    /// Enable opt-in layout/run snapshots; disabled by default. Render a frame
+    /// after enabling. Disabling clears retained metadata.
+    pub fn set_debug_enabled(&mut self, enabled: bool) {
+        self.inner.set_debug_enabled(enabled);
+    }
+
+    /// Last frame's event metadata (max 256 events, 64 runs/event).
+    /// Layout bounds are in video pixels after collision placement, before
+    /// rotation/shear/perspective and effects; they are not exact ink bounds.
+    pub fn get_frame_debug(&self) -> Result<JsValue, JsError> {
+        to_js(&self.inner.frame_debug())
+    }
+
     /// Get event count
     pub fn get_event_count(&self) -> usize {
         self.inner.document().get_event_count()

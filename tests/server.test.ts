@@ -58,7 +58,7 @@ describe("example pages and redirects", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
-    expect(body).toContain("ASS subtitle renderer");
+    expect(body).toContain("Subtitle playground");
   });
 
   test("GET /basic and /worker redirect to trailing slashes", async () => {
@@ -73,11 +73,15 @@ describe("example pages and redirects", () => {
     const basic = await fetch(`${base}/basic/`);
     expect(basic.status).toBe(200);
     expect(basic.headers.get("content-type")).toContain("text/html");
-    expect(await basic.text()).toContain("Basic example");
+    const basicHtml = await basic.text();
+    expect(basicHtml).toContain("Main thread playground");
+    expect(basicHtml).toContain('id="inspectCheck"');
 
     const worker = await fetch(`${base}/worker/`);
     expect(worker.status).toBe(200);
-    expect(await worker.text()).toContain("Worker example");
+    const workerHtml = await worker.text();
+    expect(workerHtml).toContain("Web worker playground");
+    expect(workerHtml).toContain('id="inspectorDetails"');
   });
 });
 

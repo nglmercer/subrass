@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod compositor;
+pub mod debug;
 pub mod drawing;
 pub mod effects;
 pub mod font;
@@ -34,6 +35,8 @@ pub struct SubtitleRenderer {
     /// A malformed attachment *encoding* is a hard parse error, while a
     /// decoded-but-unusable font only warns here and never breaks rendering.
     warnings: Vec<String>,
+    debug_enabled: bool,
+    frame_debug: Vec<debug::EventDebug>,
 }
 
 impl SubtitleRenderer {
@@ -110,6 +113,8 @@ impl SubtitleRenderer {
             video_width: play_res_x,
             video_height: play_res_y,
             warnings,
+            debug_enabled: false,
+            frame_debug: Vec::new(),
         })
     }
 
@@ -239,6 +244,7 @@ impl SubtitleRenderer {
             .map_err(|e| format!("Invalid video size: {}", e))?;
         self.video_width = self.buffer.width;
         self.video_height = self.buffer.height;
+        self.frame_debug.clear();
         Ok(())
     }
 
@@ -252,24 +258,26 @@ impl SubtitleRenderer {
     pub fn render_frame(&mut self, time_ms: u64) -> Result<(), String> {
         // Clear buffer
         self.buffer.clear();
+        self.frame_debug.clear();
 
         // Active dialogue events only: comments are never rendered, so
         // filter them before any style resolution or allocation. Collect
         // references (no per-frame event cloning) and stable-sort by
         // layer so equal layers keep source order.
-        let mut active_events: Vec<&Event> = self
+        let mut active_events: Vec<(usize, &Event)> = self
             .doc
             .events
             .iter()
-            .filter(|e| e.is_dialogue() && e.is_active_at(time_ms))
+            .enumerate()
+            .filter(|(_, e)| e.is_dialogue() && e.is_active_at(time_ms))
             .collect();
-        active_events.sort_by_key(|a| a.layer);
+        active_events.sort_by_key(|(_, e)| e.layer);
 
         // Render each event
         let default_style = crate::types::Style::new("Default");
 
         let mut placements = Vec::with_capacity(active_events.len());
-        for (index, event) in active_events.iter().enumerate() {
+        for (index, (_, event)) in active_events.iter().enumerate() {
             let resolved = self.resolved_event_style(event, &default_style);
             if let Some(prepared) = Compositor::measure_event(
                 event,
@@ -292,7 +300,7 @@ impl SubtitleRenderer {
         // Shape one event at a time for painting. Geometry is remeasured to
         // keep peak layout memory independent of active event count.
         for placement in placements {
-            let event = active_events[placement.index];
+            let (event_index, event) = active_events[placement.index];
             let resolved = self.resolved_event_style(event, &default_style);
             if let Some(mut measured) = Compositor::measure_event(
                 event,
@@ -307,6 +315,10 @@ impl SubtitleRenderer {
                 &self.doc.styles,
             ) {
                 measured.shift_y(placement.shift);
+                if self.debug_enabled && self.frame_debug.len() < debug::MAX_DEBUG_EVENTS {
+                    self.frame_debug
+                        .push(measured.debug_snapshot(event_index, placement.shift));
+                }
                 self.compositor.paint_event(
                     &mut self.buffer,
                     &self.font_manager,
@@ -352,6 +364,19 @@ impl SubtitleRenderer {
     /// Dimensions of the render buffer (source of truth for frame size)
     pub fn frame_size(&self) -> (u32, u32) {
         (self.buffer.width, self.buffer.height)
+    }
+
+    /// Enable bounded debug snapshots. Disabled by default; disabling clears
+    /// retained metadata. Enable before rendering and read after that frame.
+    pub fn set_debug_enabled(&mut self, enabled: bool) {
+        self.debug_enabled = enabled;
+        self.frame_debug = Vec::new();
+    }
+
+    /// Layout bounds and effective run properties of the last rendered frame.
+    /// At most 256 events and 64 runs/event; see [`debug::EventDebug`].
+    pub fn frame_debug(&self) -> &[debug::EventDebug] {
+        &self.frame_debug
     }
 
     /// Transfer the render buffer to the canvas

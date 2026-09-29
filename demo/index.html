@@ -1,42 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>subrass — ASS subtitle renderer for WebAssembly</title>
+    <title>subrass · Subtitle playground</title>
     <link rel="stylesheet" href="/shared/style.css">
 </head>
-
 <body>
     <div class="container">
-        <header>
-            <h1>subrass</h1>
-            <p class="subtitle">ASS/SSA subtitle parser &amp; renderer — pure Rust, compiled to WebAssembly</p>
-        </header>
-
-        <div class="example-grid">
-            <a class="example-card" href="/basic">
-                <h2>Basic</h2>
-                <p>The renderer runs on the main thread and draws straight into a canvas overlay.
-                    The simplest way to integrate subrass — a few lines of TypeScript.</p>
-                <span class="tag">main-thread</span>
-            </a>
-
-            <a class="example-card" href="/worker">
-                <h2>Worker</h2>
-                <p>The renderer lives in a Web Worker. Frames arrive as transferred
-                    ArrayBuffers and the UI thread never blocks on WASM work.</p>
-                <span class="tag">web-worker</span>
-            </a>
-        </div>
-
-        <p class="footer-note">
-            Both examples auto-load a bundled sample file that exercises most ASS features
-            (karaoke, transforms, rotation, blur, vector drawings). Serve with
-            <code>bun run server.ts</code> after building the WASM package.
-        </p>
+        <header class="studio-header"><div class="brand"><a href="/" class="wordmark">subrass<span> / </span></a><span>Subtitle playground</span></div><nav><span class="badge">Rust → WebAssembly</span></nav></header>
+        <main>
+            <div class="page-intro landing-intro"><div><p class="eyebrow">ASS / SSA · In your browser</p><h1>See what your subtitles can do.</h1><p>From karaoke to vector drawings. Preview the sample, load your files, and inspect every run.</p></div></div>
+            <div class="example-grid">
+                <a class="example-card" href="/basic/"><p class="eyebrow">01 / Main thread</p><h2>Start with the basics ↗</h2><p>A direct canvas preview with playback controls, sample scene shortcuts, and a hover inspector. A simple starting point for integrating subrass.</p><span class="tag">Open playground</span></a>
+                <a class="example-card" href="/worker/"><p class="eyebrow">02 / Web worker</p><h2>Take rendering off thread ↗</h2><p>The same playground with rendering in a dedicated worker. Explore heavy effects while keeping rendering work off the interface thread.</p><span class="tag">Open worker playground</span></a>
+            </div>
+            <p class="footer-note">Both playgrounds load the same sample. Your video, subtitle and font files stay in this browser; no upload service is involved.</p>
+        </main>
+        <footer>subrass <span>Pure Rust. Made for the web.</span></footer>
     </div>
 </body>
-
 </html>

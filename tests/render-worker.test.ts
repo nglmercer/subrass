@@ -27,6 +27,7 @@ test("real render worker preserves its frame size and renderer after a failed re
     expect((await request({ kind: "loadAss", content: script })).kind).toBe("loaded");
     const before = await request({ kind: "render", timeMs: 1000 });
     expect(before.kind).toBe("frame");
+    expect(before.debug).toBeUndefined();
     expect([before.w, before.h]).toEqual([256, 144]);
     expect((await request({ kind: "loadAss", content: "[Script Info]\nPlayResX: nope" })).kind).toBe("error");
     const after = await request({ kind: "render", timeMs: 1000 });
@@ -44,6 +45,17 @@ test("real render worker preserves its frame size and renderer after a failed re
     const encoded = await request({ kind: "render", timeMs: 1000 });
     expect(encoded.kind).toBe("frame");
     expect(new Uint8Array(encoded.bytes)).toEqual(new Uint8Array(before.bytes));
+    worker.postMessage({ kind: "setDebug", enabled: true });
+    const inspected = await request({ kind: "render", timeMs: 1000 });
+    expect(inspected.timeMs).toBe(1000);
+    expect(inspected.debug).toHaveLength(1);
+    expect(inspected.debug[0].event_index).toBe(0);
+    expect(new Uint8Array(inspected.bytes)).toEqual(new Uint8Array(before.bytes));
+    // The setting survives replacement; disabling removes metadata from replies.
+    await request({ kind: "loadAss", content: script });
+    expect((await request({ kind: "render", timeMs: 1000 })).debug).toHaveLength(1);
+    worker.postMessage({ kind: "setDebug", enabled: false });
+    expect((await request({ kind: "render", timeMs: 1000 })).debug).toBeUndefined();
   } finally {
     worker.terminate();
   }

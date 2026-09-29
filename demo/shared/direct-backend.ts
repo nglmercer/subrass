@@ -2,7 +2,7 @@
 // and draws straight into the visible canvas. This is the simplest way to
 // use subrass — see the worker example for the off-thread variant.
 import init, { SubtitleRenderer } from "../../pkg/subrass.js";
-import type { RenderBackend, SubtitleSummary } from "./types.ts";
+import type { DebugFrame, RenderBackend, SubtitleSummary } from "./types.ts";
 import { dbg } from "./debug.ts";
 
 const log = dbg("direct-backend");
@@ -13,6 +13,8 @@ export class DirectBackend implements RenderBackend {
   private canvas: HTMLCanvasElement | null = null;
   private frameW = 0;
   private frameH = 0;
+  private debugEnabled = false;
+  private onDebugFrame: ((frame: DebugFrame) => void) | null = null;
 
   async init(): Promise<void> {
     log("init() begin", {
@@ -50,6 +52,7 @@ export class DirectBackend implements RenderBackend {
         ? new SubtitleRenderer(content)
         : SubtitleRenderer.from_bytes(content);
       next.set_canvas(this.canvas);
+      next.set_debug_enabled(this.debugEnabled);
       if (this.frameW > 0 && this.frameH > 0) next.set_video_size(this.frameW, this.frameH);
       const [w, h] = next.get_play_resolution();
       const summary = {
@@ -81,6 +84,12 @@ export class DirectBackend implements RenderBackend {
     }
   }
 
+  setDebug(enabled: boolean, onFrame: (frame: DebugFrame) => void): void {
+    this.debugEnabled = enabled;
+    this.onDebugFrame = enabled ? onFrame : null;
+    this.renderer?.set_debug_enabled(enabled);
+  }
+
   loadFont(name: string, data: Uint8Array): void {
     log("loadFont", { name, bytes: data.byteLength });
     try {
@@ -94,6 +103,10 @@ export class DirectBackend implements RenderBackend {
     if (this.renderer && this.canvas) {
       try {
         this.renderer.render_frame(timeMs);
+        if (this.debugEnabled) {
+          const [width, height] = this.renderer.get_frame_size();
+          this.onDebugFrame?.({ timeMs, width, height, events: this.renderer.get_frame_debug() });
+        }
       } catch (err) {
         log("render_frame rejected", { timeMs, err });
       }

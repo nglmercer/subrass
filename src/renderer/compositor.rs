@@ -70,6 +70,55 @@ pub(crate) struct EventPlacement {
 }
 
 impl MeasuredEvent<'_> {
+    pub(crate) fn debug_snapshot(
+        &self,
+        event_index: usize,
+        collision_shift: f64,
+    ) -> super::debug::EventDebug {
+        use super::debug::{EventDebug, RunDebug, MAX_DEBUG_RUNS};
+        let p = &self.prepared;
+        let rect = self.rect();
+        EventDebug {
+            event_index,
+            layout_bounds: [rect.0, rect.1, rect.2, rect.3],
+            collision_eligible: self.collision,
+            collision_shift,
+            alignment: self.resolved.alignment,
+            origin: [p.org_x, p.org_y],
+            opacity: p.alpha_mult,
+            run_count: p.layout.items.len(),
+            runs: p
+                .layout
+                .items
+                .iter()
+                .take(MAX_DEBUG_RUNS)
+                .map(|item| {
+                    let r = &item.resolved;
+                    RunDebug {
+                        font_name: {
+                            let mut name: String = r.font_name.chars().take(256).collect();
+                            if name.len() < r.font_name.len() {
+                                name.push('…');
+                            }
+                            name
+                        },
+                        font_size: r.font_size,
+                        fill: r.color.to_straight_rgba(),
+                        outline_color: r.outline_color.to_straight_rgba(),
+                        scale: [r.scale_x, r.scale_y],
+                        rotation: [r.rotation_x, r.rotation_y, r.angle],
+                        shear: [r.shear_x, r.shear_y],
+                        border: [r.outline_x, r.outline_y],
+                        shadow: [r.shadow_x, r.shadow_y],
+                        blur: r.blur,
+                        edge_blur: r.edge_blur,
+                        drawing_mode: r.drawing_mode,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub(crate) fn placement(&self, index: usize) -> EventPlacement {
         EventPlacement {
             index,

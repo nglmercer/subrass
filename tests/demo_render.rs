@@ -95,3 +95,85 @@ fn full_demo_renders_event_boundaries_and_has_no_unknown_override_examples() {
         assert_eq!(renderer.frame_data().len(), 512 * 288 * 4);
     }
 }
+
+#[test]
+fn frame_inspection_is_opt_in_deterministic_and_preserves_pixels() {
+    let mut renderer = SubtitleRenderer::new(SAMPLE).unwrap();
+    renderer.set_video_size(512, 288).unwrap();
+    renderer.render_frame(67000).unwrap();
+    let pixels = renderer.frame_data().to_vec();
+    assert!(renderer.frame_debug().is_empty());
+    renderer.set_debug_enabled(true);
+    renderer.render_frame(67000).unwrap();
+    assert_eq!(renderer.frame_data(), pixels);
+    let events = renderer.frame_debug();
+    assert_eq!(events.len(), 2);
+    let event = &renderer.document().events[events[0].event_index];
+    assert!(event.text.contains("Red"));
+    assert!(!events[0].collision_eligible);
+    assert_eq!(events[0].runs.len(), 3);
+    assert_eq!(events[0].runs[0].fill, [255, 0, 0, 255]);
+    assert_eq!(events[0].runs[1].fill, [0, 255, 0, 255]);
+    assert_eq!(events[0].runs[2].fill, [0, 0, 255, 255]);
+    let snapshot = events.to_vec();
+    renderer.render_frame(287000).unwrap();
+    assert_eq!(renderer.frame_debug().len(), 3);
+    renderer.render_frame(67000).unwrap();
+    assert_eq!(renderer.frame_debug(), snapshot);
+    renderer.set_debug_enabled(false);
+    assert!(renderer.frame_debug().is_empty());
+    renderer.render_frame(67000).unwrap();
+    assert!(renderer.frame_debug().is_empty());
+    assert_eq!(renderer.frame_data(), pixels);
+}
+
+#[test]
+fn frame_inspection_reports_collision_shifts_and_animated_run_values() {
+    let source = "[Script Info]\nPlayResX: 384\nPlayResY: 216\n[Events]\n\
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,First\n\
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,Second\n\
+Dialogue: 1,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\\pos(100,100)\\fs20\\t(0,2000,\\fs40)}Animated";
+    let mut renderer = SubtitleRenderer::new(source).unwrap();
+    renderer.set_debug_enabled(true);
+    renderer.render_frame(1000).unwrap();
+    let events = renderer.frame_debug();
+    assert_eq!(events.len(), 3);
+    assert!(events[0].collision_eligible && events[1].collision_eligible);
+    assert_eq!(events[0].collision_shift, 0.0);
+    assert!(events[1].collision_shift < 0.0);
+    assert!(events[1].layout_bounds[3] <= events[0].layout_bounds[1]);
+    assert_eq!(events[2].runs[0].font_size, 30.0);
+    assert!(!events[2].collision_eligible);
+    renderer.set_video_size(768, 432).unwrap();
+    assert!(renderer.frame_debug().is_empty());
+    renderer.render_frame(1000).unwrap();
+    assert_eq!(renderer.frame_debug()[2].runs[0].font_size, 30.0);
+}
+
+#[test]
+fn frame_inspection_caps_events_runs_and_font_names_and_keeps_source_indices() {
+    let mut source = String::from(
+        "[Script Info]\nPlayResX: 32\nPlayResY: 18\n[Events]\n\
+Comment: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,Not painted\n",
+    );
+    let long_font = "字".repeat(300);
+    let runs = (0..65)
+        .map(|i| format!("{{\\fs{}}}x", i % 2 + 1))
+        .collect::<String>();
+    source.push_str(&format!(
+        "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{{\\pos(16,9)\\fn{long_font}}}{runs}\n"
+    ));
+    for _ in 0..256 {
+        source.push_str("Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\\pos(16,9)\\fs1}x\n");
+    }
+    let mut renderer = SubtitleRenderer::new(&source).unwrap();
+    renderer.set_debug_enabled(true);
+    renderer.render_frame(1000).unwrap();
+    let events = renderer.frame_debug();
+    assert_eq!(events.len(), 256);
+    assert_eq!(events[0].event_index, 1, "indices include comments");
+    assert_eq!(events[0].run_count, 65);
+    assert_eq!(events[0].runs.len(), 64);
+    assert_eq!(events[0].runs[0].font_name.chars().count(), 257);
+    assert!(events[0].runs[0].font_name.ends_with('…'));
+}

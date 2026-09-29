@@ -9,7 +9,8 @@
     "dev": "bun --watch server.ts",
     "start": "bun server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "test:demo:browser": "bun scripts/check-demo-browser.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

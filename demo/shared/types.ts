@@ -14,6 +14,7 @@ export interface AssTime {
 
 /** A dialogue/comment event as returned by `AssDoc.get_events_at_time`. */
 export interface AssEvent {
+  event_type?: string;
   layer: number;
   start: AssTime;
   end: AssTime;
@@ -41,6 +42,40 @@ export interface SubtitleSummary {
   events: number;
 }
 
+export interface RunDebug {
+  font_name: string;
+  font_size: number;
+  fill: number[];
+  outline_color: number[];
+  scale: number[];
+  rotation: number[];
+  shear: number[];
+  border: number[];
+  shadow: number[];
+  blur: number;
+  edge_blur: number;
+  drawing_mode: number;
+}
+
+export interface EventDebug {
+  event_index: number;
+  layout_bounds: [number, number, number, number];
+  collision_eligible: boolean;
+  collision_shift: number;
+  alignment: number;
+  origin: number[];
+  opacity: number;
+  run_count: number;
+  runs: RunDebug[];
+}
+
+export interface DebugFrame {
+  timeMs: number;
+  width: number;
+  height: number;
+  events: EventDebug[];
+}
+
 /**
  * A rendering backend draws subtitle frames for a given playback time.
  *
@@ -63,6 +98,8 @@ export interface RenderBackend {
   loadFont(name: string, data: Uint8Array): void;
   /** Render the frame for the given playback time. */
   renderFrame(timeMs: number): void;
+  /** Opt-in metadata delivered with the frame actually painted. */
+  setDebug?(enabled: boolean, onFrame: (frame: DebugFrame) => void): void;
   /** Release the backend (terminates the worker, if any). */
   dispose(): void;
 }

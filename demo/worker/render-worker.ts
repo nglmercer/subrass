@@ -11,6 +11,7 @@ const log = dbg("render-worker");
 let renderer: SubtitleRenderer | null = null;
 let frameW = 0;
 let frameH = 0;
+let debugEnabled = false;
 
 interface InMessage {
   kind: string;
@@ -21,6 +22,7 @@ interface InMessage {
   h?: number;
   name?: string;
   data?: ArrayBuffer;
+  enabled?: boolean;
 }
 
 function fail(requestId: number | undefined, error: unknown): void {
@@ -53,6 +55,7 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         if (frameW > 0 && frameH > 0) {
           next.set_video_size(frameW, frameH);
         }
+        next.set_debug_enabled(debugEnabled);
         const [w, h] = next.get_play_resolution();
         const summary = {
           resolution: [w, h] as [number, number],
@@ -90,6 +93,11 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
       }
       break;
     }
+    case "setDebug": {
+      debugEnabled = msg.enabled === true;
+      renderer?.set_debug_enabled(debugEnabled);
+      break;
+    }
     case "render": {
       try {
         if (!renderer) throw new Error("No subtitle file loaded");
@@ -104,7 +112,9 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
         // painting. Total: one required WASM→JS copy per frame.
         const bytes = renderer.get_frame_data();
         self.postMessage(
-          { kind: "frame", requestId: msg.requestId, w: size[0], h: size[1], bytes: bytes.buffer },
+          { kind: "frame", requestId: msg.requestId, timeMs: msg.timeMs ?? 0,
+            w: size[0], h: size[1], bytes: bytes.buffer,
+            ...(debugEnabled ? { debug: renderer.get_frame_debug() } : {}) },
           { transfer: [bytes.buffer] },
         );
       } catch (err) {

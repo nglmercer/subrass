@@ -2,7 +2,7 @@
 // panel, the live "active events" list, and the error toast.
 import type { AssDoc } from "../../pkg/subrass.js";
 import type { AssEvent, SubtitleSummary } from "./types.ts";
-import { formatAssTime, plainText } from "./ass.ts";
+import { formatAssTime, plainText, timeToMs } from "./ass.ts";
 
 /** Look up an element by id with the expected type, or throw. */
 export function byId<T extends HTMLElement>(id: string): T {
@@ -22,6 +22,9 @@ export function updateSummary(summary: SubtitleSummary | null, title: string | n
 export class ActiveEventList {
   private el: HTMLElement;
   private getDoc: () => AssDoc | null;
+  private cachedDoc: AssDoc | null = null;
+  private events: AssEvent[] = [];
+  private signature = "";
 
   constructor(el: HTMLElement, getDoc: () => AssDoc | null) {
     this.el = el;
@@ -31,23 +34,28 @@ export class ActiveEventList {
   update(timeMs: number): void {
     const doc = this.getDoc();
     if (!doc) return;
-    let events: AssEvent[];
-    try {
-      events = doc.get_events_at_time(timeMs) as AssEvent[];
-    } catch {
-      return;
+    if (doc !== this.cachedDoc) {
+      this.cachedDoc = doc;
+      this.events = doc.get_events() as AssEvent[];
+      this.signature = "";
     }
+    const events = this.events.map((event, index) => ({ event, index }))
+      .filter(({ event: e }) => e.event_type !== "Comment" && timeToMs(e.start) <= timeMs && timeMs < timeToMs(e.end))
+      .sort((a, b) => a.event.layer - b.event.layer);
+    const signature = events.map(({ index }) => index).join(",") || "empty";
+    if (signature === this.signature) return;
+    this.signature = signature;
     if (events.length === 0) {
       this.el.innerHTML = '<div class="placeholder">No active events</div>';
       return;
     }
     this.el.innerHTML = events
-      .map((e) => {
+      .map(({ event: e, index }) => {
         const range = `${formatAssTime(e.start)}–${formatAssTime(e.end)}`;
         const text = plainText(e) || "(drawing/effect)";
-        return `<div class="event-item"><span class="event-time">${range}</span>` +
-          `<span class="event-style">${escapeHtml(e.style)}</span>` +
-          `<span class="event-text">${escapeHtml(text)}</span></div>`;
+        return `<button type="button" class="event-item" data-event-index="${index}"><span class="event-time">${range}</span>` +
+          `<span class="event-style">Layer ${e.layer} · ${escapeHtml(e.style)}</span>` +
+          `<span class="event-text">${escapeHtml(text.slice(0, 240))}</span></button>`;
       })
       .join("");
   }
@@ -65,7 +73,7 @@ export function showError(msg: string): void {
   }, 6000);
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );

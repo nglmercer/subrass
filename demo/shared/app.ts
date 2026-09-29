@@ -70,15 +70,15 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
 
   // --- Subtitle loading -----------------------------------------------------
 
-  async function loadAss(content: string): Promise<void> {
+  async function loadAss(content: string | Uint8Array): Promise<void> {
     log("loadAss begin", {
       contentBytes: content.length,
-      contentHead: content.slice(0, 40).replace(/\n/g, "\\n"),
+      contentHead: typeof content === "string" ? content.slice(0, 40).replace(/\n/g, "\\n") : "raw subtitle bytes",
     });
-    doc?.free();
+    let nextDoc: AssDoc;
     try {
       log("constructing AssDoc on main thread (requires wasm bindings)");
-      doc = new AssDoc(content);
+      nextDoc = typeof content === "string" ? new AssDoc(content) : AssDoc.from_bytes(content);
       log("AssDoc constructed ok");
     } catch (err) {
       log("AssDoc constructor FAILED", {
@@ -91,7 +91,16 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
       });
       throw err;
     }
-    summary = await backend.loadAss(content);
+    let nextSummary: SubtitleSummary;
+    try {
+      nextSummary = await backend.loadAss(content);
+    } catch (err) {
+      nextDoc.free();
+      throw err;
+    }
+    doc?.free();
+    doc = nextDoc;
+    summary = nextSummary;
     log("backend.loadAss done", { summary });
     loaded = true;
 
@@ -200,9 +209,9 @@ export async function startDemo(backend: RenderBackend, options: DemoOptions = {
   byId<HTMLInputElement>("assInput").addEventListener("change", async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
-    byId("assName").textContent = file.name;
     try {
-      await loadAss(await file.text());
+      await loadAss(new Uint8Array(await file.arrayBuffer()));
+      byId("assName").textContent = file.name;
     } catch (err) {
       showError(`Failed to load subtitle file: ${(err as Error).message}`);
     }

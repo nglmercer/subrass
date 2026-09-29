@@ -78,6 +78,9 @@ oracle, not subrass output, and use lossless RGBA run-length encoding.
 
 ## Validation on this host
 
+These counts describe the compatibility fix committed as `b17e6e1`. The later
+[demo investigation](DEMO-CHECK.md) records additional regressions and checks.
+
 Commands below were run from the repository root unless stated otherwise.
 Rust is `1.96.0 (ac68faa20 2026-05-25)`. No dependency versions were changed.
 Native counts include all integration tests; the existing benchmark is ignored.

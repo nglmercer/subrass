@@ -56,7 +56,7 @@ export interface RenderBackend {
   /** Canvas that receives frames (drawn directly, or via worker messages). */
   setFrameTarget(canvas: HTMLCanvasElement): void;
   /** Parse and load ASS/SSA content; resolves with file metadata. */
-  loadAss(content: string): Promise<SubtitleSummary>;
+  loadAss(content: string | Uint8Array): Promise<SubtitleSummary>;
   /** Set the render resolution (usually the video or script resolution). */
   resize(width: number, height: number): void;
   /** Register an additional font (TTF/OTF bytes) with the renderer. */

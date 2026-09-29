@@ -11,6 +11,8 @@ export class DirectBackend implements RenderBackend {
   readonly kind = "main-thread";
   private renderer: SubtitleRenderer | null = null;
   private canvas: HTMLCanvasElement | null = null;
+  private frameW = 0;
+  private frameH = 0;
 
   async init(): Promise<void> {
     log("init() begin", {
@@ -36,23 +38,32 @@ export class DirectBackend implements RenderBackend {
     log("setFrameTarget", { id: canvas.id, w: canvas.width, h: canvas.height });
     this.canvas = canvas;
     this.renderer?.set_canvas(canvas);
+    this.resize(canvas.width, canvas.height);
   }
 
-  async loadAss(content: string): Promise<SubtitleSummary> {
+  async loadAss(content: string | Uint8Array): Promise<SubtitleSummary> {
     log("loadAss begin", { contentBytes: content.length, hasCanvas: !!this.canvas });
     if (!this.canvas) throw new Error("setFrameTarget() must be called before loadAss()");
+    let next: SubtitleRenderer | null = null;
     try {
-      this.renderer = new SubtitleRenderer(content);
-      this.renderer.set_canvas(this.canvas);
-      const [w, h] = this.renderer.get_play_resolution();
+      next = typeof content === "string"
+        ? new SubtitleRenderer(content)
+        : SubtitleRenderer.from_bytes(content);
+      next.set_canvas(this.canvas);
+      if (this.frameW > 0 && this.frameH > 0) next.set_video_size(this.frameW, this.frameH);
+      const [w, h] = next.get_play_resolution();
       const summary = {
         resolution: [w, h] as [number, number],
-        styles: this.renderer.get_style_count(),
-        events: this.renderer.get_event_count(),
+        styles: next.get_style_count(),
+        events: next.get_event_count(),
       };
+      this.renderer?.free();
+      this.renderer = next;
+      next = null;
       log("loadAss ok", summary);
       return summary;
     } catch (err) {
+      next?.free();
       log("loadAss FAILED (SubtitleRenderer needs initialized wasm)", err);
       throw err;
     }
@@ -62,6 +73,8 @@ export class DirectBackend implements RenderBackend {
     if (width > 0 && height > 0) {
       try {
         this.renderer?.set_video_size(width, height);
+        this.frameW = width;
+        this.frameH = height;
       } catch (err) {
         log("set_video_size rejected", { width, height, err });
       }

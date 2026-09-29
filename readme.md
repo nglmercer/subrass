@@ -148,6 +148,8 @@ Then open `/` (`demo/` landing page, `/basic` for main-thread rendering, `/worke
 
 A comprehensive test file [`demo/sample.ass`](demo/sample.ass) exercises all major features: karaoke (hard swap, sweep, outline), V4+ and V4 (SSA) styles, transforms, movement, clipping, vector drawing, multi-layer compositing, and fade effects.
 
+Some sample scenes deliberately overlap explicitly positioned events. In the layer scene, “bottom/middle/top” names the painting order, while all three lines use `\an5\pos(...)`. Collision placement leaves authored positions intact. Subtitle uploads use raw bytes, including BOM-marked UTF-16 and supported legacy encodings. See [DEMO-CHECK.md](DEMO-CHECK.md) for the screenshot investigation, fixes, and validation scope.
+
 ## Development
 
 ```bash

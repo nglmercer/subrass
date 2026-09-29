@@ -15,7 +15,7 @@ let frameH = 0;
 interface InMessage {
   kind: string;
   requestId?: number;
-  content?: string;
+  content?: string | Uint8Array;
   timeMs?: number;
   w?: number;
   h?: number;
@@ -45,21 +45,27 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
       break;
     }
     case "loadAss": {
+      let next: SubtitleRenderer | null = null;
       try {
-        renderer?.free();
-        renderer = new SubtitleRenderer(msg.content ?? "");
+        next = typeof msg.content === "string"
+          ? new SubtitleRenderer(msg.content)
+          : SubtitleRenderer.from_bytes(msg.content ?? new Uint8Array());
         if (frameW > 0 && frameH > 0) {
-          renderer.set_video_size(frameW, frameH);
+          next.set_video_size(frameW, frameH);
         }
-        const [w, h] = renderer.get_play_resolution();
+        const [w, h] = next.get_play_resolution();
         const summary = {
           resolution: [w, h] as [number, number],
-          styles: renderer.get_style_count(),
-          events: renderer.get_event_count(),
+          styles: next.get_style_count(),
+          events: next.get_event_count(),
         };
+        renderer?.free();
+        renderer = next;
+        next = null;
         log("loadAss ok", { requestId: msg.requestId, ...summary });
         self.postMessage({ kind: "loaded", requestId: msg.requestId, summary });
       } catch (err) {
+        next?.free();
         fail(msg.requestId, err);
       }
       break;
@@ -74,9 +80,11 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
     }
     case "setVideoSize": {
       try {
-        frameW = msg.w ?? 0;
-        frameH = msg.h ?? 0;
-        renderer?.set_video_size(frameW, frameH);
+        const w = msg.w ?? 0;
+        const h = msg.h ?? 0;
+        renderer?.set_video_size(w, h);
+        frameW = w;
+        frameH = h;
       } catch (err) {
         fail(msg.requestId, err);
       }

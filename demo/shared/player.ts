@@ -81,8 +81,8 @@ export class Player {
     if (this.mode === "video") {
       this.video.pause();
     } else if (this.virtualPlaying) {
-      this.virtualPlaying = false;
       this.virtualTime = this.currentTimeMs();
+      this.virtualPlaying = false;
     }
     this.stopAnimation();
   }

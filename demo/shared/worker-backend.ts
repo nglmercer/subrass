@@ -100,7 +100,7 @@ export class WorkerBackend implements RenderBackend {
     this.post({ kind: "setVideoSize", w: canvas.width, h: canvas.height });
   }
 
-  loadAss(content: string): Promise<SubtitleSummary> {
+  loadAss(content: string | Uint8Array): Promise<SubtitleSummary> {
     const requestId = this.nextRequestId++;
     log("loadAss begin", { requestId, contentBytes: content.length });
     return new Promise<SubtitleSummary>((resolve, reject) => {

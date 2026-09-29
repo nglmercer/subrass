@@ -10,9 +10,8 @@
 // Different rasterizers never match byte-exact, so this gates on
 // structural similarity instead: ink bounding boxes must overlap
 // strongly, mean channel error must be small, and hard-mismatch
-// pixels must be rare. Known divergences (legacy effects, which
-// libass ignores; fontconfig fallback, which is environment-specific)
-// are measured and reported but not gated.
+// pixels must be rare. Intentional font fallback and Unicode wrapping
+// differences are measured separately; legacy motion effects are gated.
 //
 // Regenerate references (never automatic):
 //   $env:FFMPEG = '<ffmpeg with libass>'; ./tests/reference/gen_references.ps1
@@ -22,14 +21,6 @@ use subrass::renderer::SubtitleRenderer;
 
 /// Fixtures measured but never gated, with the reason.
 const KNOWN_DIVERGENT: &[(&str, &str)] = &[
-    (
-        "effect-banner",
-        "libass ignores legacy Banner effects (renders static)",
-    ),
-    (
-        "effect-scroll",
-        "libass ignores legacy Scroll effects (renders static)",
-    ),
     (
         "font-fallback",
         "fontconfig fallback is environment-dependent",
@@ -316,14 +307,16 @@ fn compare(ours_rgba: &[u8], ref_rgba: &[u8], w: u32, normalize_reference: bool)
 fn libass_reference_comparison() {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let ref_dir = reference_dir();
-    if !ref_dir.join("provenance.json").exists() {
-        eprintln!("skipping: no tests/reference/provenance.json (run gen_references.ps1)");
-        return;
-    }
+    assert!(
+        ref_dir.join("provenance.json").exists(),
+        "missing historical provenance"
+    );
     let mut failures = Vec::new();
     let mut report = Vec::new();
+    let (mut gated, mut divergent_count, mut host, mut pending_count) = (0, 0, 0, 0);
     for (name, time_ms) in manifest_times() {
         if HOST_CONVERTED_FIXTURES.contains(&name.as_str()) {
+            host += 1;
             report.push(format!(
                 "{name:14} [host/video conversion artifact; raw RGBA tested directly]"
             ));
@@ -356,6 +349,7 @@ fn libass_reference_comparison() {
             Ok(b) => b,
             Err(_) => {
                 if PENDING_REFERENCES.contains(&name.as_str()) {
+                    pending_count += 1;
                     // Strict release mode: pending references fail the
                     // gate instead of skipping it.
                     if std::env::var("SUBRASS_STRICT_REFERENCES").is_ok() {
@@ -371,6 +365,11 @@ fn libass_reference_comparison() {
                 continue;
             }
         };
+        assert_eq!(
+            ref_bytes.len(),
+            256 * 144 * 4,
+            "{name}: reference dimensions"
+        );
         // The legacy corpus omits `YCbCr Matrix`, and FFmpeg/libass emits
         // its subtitle colors through TV range; normalize that historical
         // corpus back to full RGB. YCbCr host-conversion artifacts are
@@ -392,6 +391,7 @@ fn libass_reference_comparison() {
                 .unwrap_or_default(),
         ));
         if divergent.is_some() {
+            divergent_count += 1;
             continue;
         }
         let mut problems = Vec::new();
@@ -415,9 +415,12 @@ fn libass_reference_comparison() {
         }
         if !problems.is_empty() {
             failures.push(format!("{name}: {}", problems.join(", ")));
+        } else {
+            gated += 1;
         }
     }
     eprintln!("libass comparison report:\n{}", report.join("\n"));
+    eprintln!("REFERENCE_COUNTS gated={gated} divergent={divergent_count} host_converted={host} pending={pending_count} failures={}", failures.len());
     assert!(
         failures.is_empty(),
         "{} reference failure(s):\n{}",
@@ -449,6 +452,14 @@ fn harness_manifest_and_references_are_consistent() {
             ));
         }
         let has_ref = root.join(format!("tests/reference/{name}.rgba")).exists();
+        if has_ref
+            && std::fs::metadata(root.join(format!("tests/reference/{name}.rgba")))
+                .unwrap()
+                .len()
+                != 256 * 144 * 4
+        {
+            problems.push(format!("{name}: incorrect reference dimensions"));
+        }
         let pending = PENDING_REFERENCES.contains(&name.as_str());
         if !has_ref && !pending {
             problems.push(format!("{name}: missing reference frame and not pending"));
@@ -656,5 +667,117 @@ fn blank_libass_frame_has_zero_ink() {
             std::fs::read(root.join(format!("tests/reference/{name}.rgba"))).expect("reference");
         let ink = reference_ink_mask(&bytes).iter().filter(|m| **m).count();
         assert!(ink > 0, "{name}: reference frame is blank");
+    }
+}
+
+#[test]
+fn compatibility_reference_comparison() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/compatibility");
+    let cases = std::fs::read_to_string(root.join("cases.tsv")).unwrap();
+    let mut failures = Vec::new();
+    let mut passed = 0;
+    for row in cases
+        .lines()
+        .filter(|r| !r.is_empty() && !r.starts_with('#'))
+    {
+        let fields: Vec<_> = row.split('\t').collect();
+        assert_eq!(fields.len(), 5);
+        let (name, script) = (fields[0], fields[1]);
+        let w: u32 = fields[2].parse().unwrap();
+        let h: u32 = fields[3].parse().unwrap();
+        let ms: u64 = fields[4].parse().unwrap();
+        let ass = std::fs::read_to_string(root.join(format!("{script}.ass"))).unwrap();
+        let encoded = std::fs::read(root.join(format!("{name}.rle"))).unwrap();
+        let mut reference = Vec::new();
+        assert!(encoded.len().is_multiple_of(8), "{name}: malformed RLE");
+        for run in encoded.chunks_exact(8) {
+            let count = u32::from_le_bytes(run[..4].try_into().unwrap());
+            assert!(
+                count > 0
+                    && reference.len() as u64 + u64::from(count) * 4
+                        <= u64::from(w) * u64::from(h) * 4,
+                "{name}: invalid RLE run"
+            );
+            for _ in 0..count {
+                reference.extend_from_slice(&run[4..]);
+            }
+        }
+        assert_eq!(reference.len(), (w * h * 4) as usize, "{name}");
+        let mut renderer = SubtitleRenderer::new(&ass).unwrap();
+        renderer.set_video_size(w, h).unwrap();
+        renderer.render_frame(ms).unwrap();
+        let ours = renderer.frame_data();
+        let stats = compare(ours, &reference, w, false);
+        if let Some(s) = stats {
+            let ratio = s.ours_ink as f64 / s.ref_ink.max(1) as f64;
+            eprintln!(
+                "COMPAT {name} iou={:.3} ratio={ratio:.3} mean={:.2} hard={:.4}",
+                s.iou, s.mean_err, s.hard_frac
+            );
+            if s.iou < MIN_IOU
+                || !(MIN_INK_RATIO..=MAX_INK_RATIO).contains(&ratio)
+                || s.mean_err > MAX_MEAN_ERR
+                || s.hard_frac > MAX_HARD_FRAC
+            {
+                failures.push(name.to_string());
+            } else {
+                passed += 1;
+            }
+        } else {
+            let a = ours.chunks_exact(4).any(|p| p[3] != 0);
+            let b = reference_ink_mask(&reference).iter().any(|p| *p);
+            if a || b {
+                failures.push(format!("{name}: unexpected blank"));
+            } else {
+                eprintln!("COMPAT {name} blank=true");
+                passed += 1;
+            }
+        }
+    }
+    eprintln!(
+        "COMPAT_COUNTS gated={passed} divergent=0 host_converted=0 pending=0 failures={}",
+        failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "compatibility failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn direct_reference_harness_is_consistent() {
+    use std::collections::HashSet;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/compatibility");
+    let provenance = std::fs::read_to_string(root.join("provenance.json")).unwrap();
+    assert!(provenance.contains("\"libass\": \"0.17.5\""));
+    assert!(provenance.contains("ASS_FONTPROVIDER_NONE"));
+    let mut names = HashSet::new();
+    let mut scripts = HashSet::new();
+    for line in std::fs::read_to_string(root.join("cases.tsv"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 5);
+        let name = fields[0].to_string();
+        assert!(names.insert(name.clone()), "duplicate sample {name}");
+        scripts.insert(fields[1].to_string());
+        assert!(root.join(format!("{name}.rle")).exists());
+        assert!(root.join(format!("{}.ass", fields[1])).exists());
+        assert!(
+            provenance.contains(&format!("\"name\": \"{name}\"")),
+            "sample has provenance"
+        );
+    }
+    for entry in std::fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        match path.extension().and_then(|s| s.to_str()) {
+            Some("rle") => assert!(names.contains(name), "orphan reference {name}"),
+            Some("ass") => assert!(scripts.contains(name), "orphan script {name}"),
+            _ => {}
+        }
     }
 }

@@ -79,6 +79,8 @@ pub struct ResolvedStyle {
     pub drawing_mode: i32,
     pub drawing_baseline_offset: f64,
     pub blur: f64,
+    /// Integer passes of the unscaled 3x3 binomial edge filter.
+    pub edge_blur: u32,
     /// Script `ScaledBorderAndShadow` flag: when true (default), borders
     /// and shadows scale with the script-to-video resolution ratio.
     pub scaled_border_and_shadow: bool,
@@ -236,5 +238,6 @@ impl ResolvedStyle {
             && self.shear_x == other.shear_x
             && self.shear_y == other.shear_y
             && self.blur == other.blur
+            && self.edge_blur == other.edge_blur
     }
 }

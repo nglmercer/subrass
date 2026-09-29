@@ -12,10 +12,13 @@
   ],
   "background": "black (ass composited over opaque black)",
   "generated_utc": "2026-09-19T21:19:37.7691425Z",
-  "note": "effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent); font-collection uses the isolated committed TTC only; ycbcr-* references are host/video conversion artifacts and are not raw libass color proofs",
+  "note": "Historical FFmpeg artifacts: recorded essentials build is authoritative; the previous CONFORMANCE full-build claim had no matching provenance. Banner and Scroll are implemented by libass and are now gated. Font fallback and Unicode wrapping differences remain explicit. YCbCr samples are host/video conversion artifacts.",
   "ycbcr_reference_layer": "FFmpeg final-composited video RGB; raw subtitle colors are tested by direct SubtitleRenderer RGBA tests",
   "ycbcr_input_colorspace": "BT.709",
   "ycbcr_input_range": "TV/limited",
   "ycbcr_output_colorspace": "BT.709",
-  "ycbcr_output_range": "TV/limited"
+  "ycbcr_output_range": "TV/limited",
+  "libass_version": "unrecorded for historical frames (do not infer from FFmpeg version)",
+  "shaping_dependencies": "unrecorded for historical frames",
+  "reference_environment_status": "historical; new pinned direct reference environment is tests/compatibility/provenance.json"
 }

@@ -132,6 +132,7 @@ pub(super) const MAX_SWEEP_BUFFER_BYTES: usize = 16 << 20;
 /// document order with no re-transform.
 pub(super) struct BufferedSweepGlyph {
     pub(super) bitmap: Vec<u8>,
+    pub(super) blur: super::paint::glyph::MaskBlur,
     pub(super) w: u32,
     pub(super) h: u32,
     pub(super) gx: i32,
@@ -239,50 +240,33 @@ impl SweepState {
             // Blank run (whitespace only): nothing paints anyway.
             _ => ink.map(|(left, _)| left).unwrap_or(0),
         };
+        if super::paint::glyph::paint_sweep_run(buffer, &self.buf, edge, run.flip, fade_alpha) {
+            self.buf.clear();
+        }
         for glyph in self.buf.drain(..) {
-            if let Some((rgba, rx, ry)) = glyph.outline {
-                effects::apply_outline_xy(
-                    buffer,
-                    &glyph.bitmap,
-                    glyph.w,
-                    glyph.h,
-                    glyph.gx,
-                    glyph.gy,
-                    rx,
-                    ry,
-                    rgba,
-                );
-            }
-            if let Some((rgba, ox, oy)) = glyph.shadow {
-                effects::apply_shadow(
-                    buffer,
-                    &glyph.bitmap,
-                    glyph.w,
-                    glyph.h,
-                    glyph.gx,
-                    glyph.gy,
-                    ox,
-                    oy,
-                    rgba,
-                );
-            }
             let (primary, primary_alpha) = (glyph.primary, glyph.primary_alpha);
             let (secondary, secondary_alpha) = (glyph.secondary, glyph.secondary_alpha);
             let flip = run.flip;
-            let geom = GlyphGeom {
-                w: glyph.w,
-                h: glyph.h,
-                gx: glyph.gx,
-                gy: glyph.gy,
-            };
-            paint_glyph_fill(buffer, &glyph.bitmap, geom, fade_alpha, |px| {
-                let left_side = i64::from(glyph.gx) + i64::from(px) < edge;
-                if left_side != flip {
-                    (primary, primary_alpha)
-                } else {
-                    (secondary, secondary_alpha)
-                }
-            });
+            super::paint::glyph::paint_split(
+                buffer,
+                &glyph.bitmap,
+                glyph.w,
+                glyph.h,
+                glyph.gx,
+                glyph.gy,
+                fade_alpha,
+                |px| {
+                    let left_side = i64::from(glyph.gx) + i64::from(px) < edge;
+                    if left_side != flip {
+                        (primary, primary_alpha)
+                    } else {
+                        (secondary, secondary_alpha)
+                    }
+                },
+                glyph.outline,
+                glyph.shadow,
+                glyph.blur,
+            );
         }
         self.bytes = 0;
         // A degraded run keeps its edge for whole-glyph members.

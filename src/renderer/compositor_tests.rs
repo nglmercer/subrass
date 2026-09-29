@@ -3488,3 +3488,47 @@ fn test_karaoke_render_second_syllable_secondary_before_start() {
         .chunks_exact(4)
         .any(|pixel| pixel[1] > 200 && pixel[0] < 50 && pixel[2] < 50 && pixel[3] > 0));
 }
+
+#[test]
+fn test_blur_fields_reset_and_interpolate_independently() {
+    let base = Style::new("Default");
+    let event = Event::parse_from_line(
+        r"Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\be1\blur2\t(0,1000,\be4\blur6)}x",
+    )
+    .unwrap();
+    let resolved = Compositor::resolve_style(&base, &event);
+    let segments = parse_text_segments(&event.text);
+    let style = Compositor::resolve_segment_style(
+        &resolved,
+        &segments[0],
+        &event,
+        std::slice::from_ref(&base),
+        500,
+        0,
+        5000,
+    );
+    assert_eq!(style.edge_blur, 3); // 2.5 + 0.5, truncation at each tag
+    assert_eq!(style.blur, 4.0);
+    for (text, expected) in [
+        (r"{\be2\blur3\be}x", (0, 3.0)),
+        (r"{\be2\blur3\blur}x", (2, 0.0)),
+        (r"{\be2\blur3\r}x", (0, 0.0)),
+    ] {
+        let event = Event::parse_from_line(&format!(
+            "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{text}"
+        ))
+        .unwrap();
+        let resolved = Compositor::resolve_style(&base, &event);
+        let segment = parse_text_segments(&event.text).remove(0);
+        let state = Compositor::resolve_segment_style(
+            &resolved,
+            &segment,
+            &event,
+            std::slice::from_ref(&base),
+            0,
+            0,
+            5000,
+        );
+        assert_eq!((state.edge_blur, state.blur), expected);
+    }
+}

@@ -15,7 +15,20 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(mut renderer) = SubtitleRenderer::new(&text) {
             // Small fixed frame: renderer caps, not the harness, bound memory.
             if renderer.set_video_size(256, 144).is_ok() {
-                let _ = renderer.render_frame(time_ms % 3_600_000);
+                // An ASS header fixes the first eight bytes, and the old
+                // modulo-hour timestamp sampled normal seeds far past their
+                // events. Deliberately exercise one active dialogue interval.
+                let sample_time = renderer
+                    .document()
+                    .events
+                    .iter()
+                    .find(|event| event.is_dialogue() && event.end > event.start)
+                    .map(|event| {
+                        let start = event.start.to_millis();
+                        start.saturating_add(time_ms % (event.end.to_millis() - start))
+                    })
+                    .unwrap_or(time_ms % 3_600_000);
+                let _ = renderer.render_frame(sample_time);
             }
         }
     }

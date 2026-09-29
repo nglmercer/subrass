@@ -4,9 +4,7 @@
 //! layout and owns glyph/drawing/karaoke raster painting plus the event-local
 //! sweep buffer. It never computes wrapping or mutates final layout state.
 
-use super::super::super::buffer::{
-    effective_shear, finite_to_i32, RenderBuffer, MAX_GLYPH_BITMAP_PIXELS,
-};
+use super::super::super::buffer::{finite_to_i32, RenderBuffer, MAX_GLYPH_BITMAP_PIXELS};
 use super::super::super::effects;
 use super::super::super::font::FontManager;
 use super::super::super::glyph_cache::GlyphCache;
@@ -20,7 +18,6 @@ use super::karaoke::{
     GlyphGeom, KaraokeKind, SweepState, MAX_SWEEP_BUFFER_BYTES,
 };
 use crate::types::override_tag::TextSegment;
-use crate::utils::Matrix3x3;
 use ab_glyph::{Font, FontArc};
 use std::borrow::Cow;
 
@@ -53,6 +50,7 @@ pub(crate) fn render_runs(
     let (karaoke_runs, glyph_run, drawing_run) = build_karaoke_runs(segments, &layout.items);
     // Sweep buffer for the in-window sweep run (see `SweepState`).
     let mut sweep = SweepState::new();
+    let mut blur_run = super::glyph::BlurRun::default();
 
     // Per-segment rendering
     let mut x_offset = 0.0_f64;
@@ -81,6 +79,7 @@ pub(crate) fn render_runs(
         // Leading breaks open new lines (mirrors event_line_widths).
         let leading = segment.text.chars().take_while(|c| *c == '\n').count();
         if leading > 0 {
+            blur_run.flush(buffer);
             cur_line = cur_line.saturating_add(leading);
             x_offset = 0.0;
             fay_line_shear = 0.0;
@@ -93,6 +92,7 @@ pub(crate) fn render_runs(
 
         // Drawing segments render vector paths at the pen position.
         if let Some(drawing) = &item.drawing {
+            blur_run.flush(buffer);
             // Drawings break karaoke runs; a pending sweep (only
             // possible under builder/render skew) flushes first.
             sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
@@ -101,7 +101,10 @@ pub(crate) fn render_runs(
             // next text segment via the drawing-boundary check).
             fay_line_shear = 0.0;
             prev_shear_seg = Some(seg_idx);
-            let unit = drawing_unit_scale(scale_x, scale_y, drawing.mode);
+            let ux = drawing_unit_scale(scale_x, scale_x, drawing.mode) * segment_resolved.scale_x
+                / 100.0;
+            let uy = drawing_unit_scale(scale_y, scale_y, drawing.mode) * segment_resolved.scale_y
+                / 100.0;
             // libass drawing placement (`get_outline_glyph`): the
             // drawing origin sits at the pen with the box hanging
             // above the baseline by its HEIGHT (`offset.y = -asc`,
@@ -128,30 +131,32 @@ pub(crate) fn render_runs(
             // Karaoke for drawings (libass splits drawing runs
             // exactly like text runs: verified by probe).
             let run = drawing_run[seg_idx].and_then(|id| karaoke_runs.get(id));
+            let Some(ink) = super::drawing::coverage(
+                buffer,
+                &segment.text,
+                (draw_x, draw_y),
+                (ux, uy),
+                (org_x, org_y),
+                &segment_resolved,
+                video_height,
+                play_res_y,
+            ) else {
+                continue;
+            };
             let sweep_split = run.and_then(|run| {
-                if run.kind == KaraokeKind::Sweep
+                (run.kind == KaraokeKind::Sweep
                     && run.sweep
                     && elapsed_ms >= run.start_ms
                     && elapsed_ms < run.end_ms
-                    && run.span > 0.0
-                {
-                    // Ink-left + full advance width (probe:
-                    // libass splits at `leftmost_x + frac *
-                    // advance`: a 60u square at x=80 splits at
-                    // its ink middle, not at pen + frac).
-                    // `run.span` and `min_x` already carry the
-                    // unit scale (layout multiplies once), so no
-                    // further scaling applies here. Drawings
-                    // render unrotated here, so `flip` (a rotation
-                    // effect) never applies: mirroring the sweep of
-                    // an unrotated drawing would be wrong.
-                    let offset = run.sweep_frac(elapsed_ms) * run.span;
-                    let left = draw_x + drawing.min_x;
-                    if left.is_finite() && offset.is_finite() && unit.is_finite() {
-                        return Some((left + offset).round() as i64);
-                    }
-                }
-                None
+                    && run.span > 0.0)
+                    .then(|| {
+                        let frac = if run.flip {
+                            1.0 - run.sweep_frac(elapsed_ms)
+                        } else {
+                            run.sweep_frac(elapsed_ms)
+                        };
+                        (f64::from(ink.x) + frac * run.span).round() as i64
+                    })
             });
             // Outline + shadow (libass BorderStyle 1 draws both
             // under the fill): painted once for the whole drawing
@@ -195,73 +200,34 @@ pub(crate) fn render_runs(
                 } else {
                     None
                 };
-            super::drawing::render_effects(
+            let outline_on = !run.is_some_and(|r| {
+                r.kind == KaraokeKind::Outline && karaoke_outline_suppressed(elapsed_ms, r.start_ms)
+            });
+            let primary = segment_resolved.color;
+            let secondary = segment_resolved.secondary_color;
+            super::glyph::paint_split(
                 buffer,
-                &segment.text,
-                draw_x,
-                draw_y,
-                unit,
-                draw_outline,
-                draw_shadow,
-            );
-            match (run, sweep_split) {
-                (Some(_), Some(brk)) => {
-                    // Two non-overlapping clipped passes with a hard
-                    // edge (probe: adjacent primary/secondary
-                    // columns, no blended column).
-                    let (primary, secondary) =
-                        (segment_resolved.color, segment_resolved.secondary_color);
-                    let pa = (primary.opacity() as f64 * alpha_mult) as u8;
-                    let sa = (secondary.opacity() as f64 * alpha_mult) as u8;
-                    let pc = primary.to_ass_components();
-                    let sc = secondary.to_ass_components();
-                    let (left_c, left_a, right_c, right_a) = (pc, pa, sc, sa);
-                    super::drawing::render_clipped(
-                        buffer,
-                        &segment.text,
-                        draw_x,
-                        draw_y,
-                        unit,
-                        [left_c[0], left_c[1], left_c[2], left_a],
-                        (None, Some(brk)),
-                    );
-                    super::drawing::render_clipped(
-                        buffer,
-                        &segment.text,
-                        draw_x,
-                        draw_y,
-                        unit,
-                        [right_c[0], right_c[1], right_c[2], right_a],
-                        (Some(brk), None),
-                    );
-                }
-                _ => {
-                    let mut color = segment_resolved.color;
-                    // Pop runs (and out-of-window sweeps) light at
-                    // the window end; for `\k`/`\ko` that is the
-                    // run start. Drawings have no outline pass, so
-                    // `\ko` needs no separate suppression here.
-                    if let Some(run) = run {
-                        if elapsed_ms < run.end_ms {
-                            color = segment_resolved.secondary_color;
+                &ink.bitmap,
+                ink.w,
+                ink.h,
+                ink.x,
+                ink.y,
+                alpha,
+                |px| {
+                    let use_primary = match (run, sweep_split) {
+                        (Some(r), Some(edge)) => {
+                            (i64::from(ink.x) + i64::from(px) < edge) != r.flip
                         }
-                    }
-                    let components = color.to_ass_components();
-                    super::drawing::render(
-                        buffer,
-                        &segment.text,
-                        draw_x,
-                        draw_y,
-                        unit,
-                        [
-                            components[0],
-                            components[1],
-                            components[2],
-                            (color.opacity() as f64 * alpha_mult) as u8,
-                        ],
-                    );
-                }
-            }
+                        (Some(r), None) => elapsed_ms >= r.end_ms,
+                        _ => true,
+                    };
+                    let c = if use_primary { primary } else { secondary };
+                    (c.to_ass_components(), c.opacity())
+                },
+                if outline_on { draw_outline } else { None },
+                draw_shadow,
+                super::glyph::MaskBlur::from_style(&segment_resolved, blur_scale_x, blur_scale_y),
+            );
             // Drawings advance the baseline shear like libass glyphs.
             accumulate_fay_shear(
                 &mut fay_line_shear,
@@ -357,6 +323,7 @@ pub(crate) fn render_runs(
                 None => shear_row_y = Some(glyph.y),
                 Some(y) if y == glyph.y => {}
                 Some(_) => {
+                    blur_run.flush(buffer);
                     shear_row_y = Some(glyph.y);
                     fay_line_shear = 0.0;
                     cur_line = cur_line.saturating_add(1);
@@ -658,37 +625,13 @@ pub(crate) fn render_runs(
             // negated versus standard math because screen Y grows
             // downward: positive \frz runs counterclockwise on
             // screen, matching the reference frames.
-            let rz = segment_resolved.angle;
-            let rx = segment_resolved.rotation_x;
-            let ry = segment_resolved.rotation_y;
-
-            let mat_z = Matrix3x3::rotation_z((-rz).to_radians());
-            let mat_y = Matrix3x3::rotation_y((-ry).to_radians());
-            let mat_x = Matrix3x3::rotation_x((-rx).to_radians());
-
-            let matrix = mat_y.multiply(&mat_x).multiply(&mat_z);
-
-            // Perspective distance (libass `calc_transform_matrix`:
-            // `dist = 20000 * blur_scale_y` in 1/64px units, i.e.
-            // 312.5px times the vertical frame-to-layout scale).
-            let perspective = 312.5 * (video_height as f64 / play_res_y as f64);
-
-            // Effective pre-rotation shear. References shear the
-            // unscaled glyph, so non-uniform scale adjusts the
-            // factors (libass `fax*sx/sy`, `fay*sy/sx`). Non-finite
-            // shear skips the glyph.
+            let matrix = super::transform::rotation(&segment_resolved);
+            let perspective = super::transform::perspective(video_height, play_res_y);
             let Some((fax, fay)) =
-                effective_shear((segment_resolved.shear_x, segment_resolved.shear_y))
+                super::transform::shear(&segment_resolved, eff_scale_x, eff_scale_y)
             else {
                 continue;
             };
-            let (sx, sy) = (eff_scale_x, eff_scale_y);
-            let (fax, fay) =
-                if sx.is_finite() && sy.is_finite() && sx.abs() > 1e-9 && sy.abs() > 1e-9 {
-                    (fax * sx / sy, fay * sy / sx)
-                } else {
-                    (fax, fay)
-                };
 
             // Use projective transform for exact perspective warping
             let (rot_bitmap, rot_w, rot_h, rot_ox, rot_oy) =
@@ -788,6 +731,7 @@ pub(crate) fn render_runs(
                     && elapsed_ms < run.end_ms
             });
             if let (true, Some(id), Some(run)) = (sweeping, glyph_run_id, run) {
+                blur_run.flush(buffer);
                 // Degraded members (past the buffer cap) paint
                 // whole-glyph against the flushed edge.
                 let mut degraded_edge = sweep.degraded.map(|(_, e, f)| (e, f));
@@ -864,6 +808,11 @@ pub(crate) fn render_runs(
                         current_outline_x,
                         current_outline_y,
                     )),
+                    blur: super::glyph::MaskBlur::from_style(
+                        &segment_resolved,
+                        blur_scale_x,
+                        blur_scale_y,
+                    ),
                     shadow: shadow_active.then_some((
                         shadow_rgba,
                         current_shadow_x,
@@ -893,9 +842,9 @@ pub(crate) fn render_runs(
                     outline_on = false;
                 }
             }
-            super::glyph::paint(
+            blur_run.push(
                 buffer,
-                &rot_bitmap,
+                rot_bitmap,
                 rot_w,
                 rot_h,
                 final_gx,
@@ -904,6 +853,8 @@ pub(crate) fn render_runs(
                 fill,
                 outline_on.then_some((outline_rgba, current_outline_x, current_outline_y)),
                 shadow_active.then_some((shadow_rgba, current_shadow_x, current_shadow_y)),
+                super::glyph::MaskBlur::from_style(&segment_resolved, blur_scale_x, blur_scale_y),
+                &segment_resolved,
             );
         }
 
@@ -916,6 +867,7 @@ pub(crate) fn render_runs(
         // Update offsets for next segment
         // Check if segment ends with line break
         if segment.text.ends_with('\n') {
+            blur_run.flush(buffer);
             x_offset = 0.0;
             line_y_offset += shaped.height;
             fay_line_shear = 0.0;
@@ -934,4 +886,5 @@ pub(crate) fn render_runs(
     // `{\kf100\u1}He` shows the bar split white/red at the
     // midpoint, exactly like the glyph ink.
     sweep.flush(buffer, &karaoke_runs, elapsed_ms, alpha);
+    blur_run.flush(buffer);
 }

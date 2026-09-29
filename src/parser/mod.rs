@@ -180,11 +180,11 @@ Comment: 0,0:00:00.00,0:00:30.00,Default,,0,0,0,,This is a comment
 
     /// A leading UTF-8 BOM must not hide `[Script Info]`: without the
     /// strip, the first section line fails the `[` match and PlayRes
-    /// silently falls back to the 1920x1080 default.
+    /// silently falls back to the 384x288 default.
     #[test]
     fn test_parse_bom_preserves_script_info() {
         // Non-default PlayRes: without the strip the header is lost
-        // and these read back the 1920x1080 default.
+        // and these read back the 384x288 default.
         let doc_text = TEST_ASS
             .replace("PlayResX: 1920", "PlayResX: 384")
             .replace("PlayResY: 1080", "PlayResY: 216");

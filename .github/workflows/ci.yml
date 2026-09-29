@@ -20,6 +20,7 @@ jobs:
         with:
           toolchain: "1.96.0"
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - name: Show pinned toolchain
         run: rustc --version
       - name: Format check
@@ -79,8 +80,8 @@ jobs:
       - name: Smoke each target briefly
         run: |
           cd fuzz
-          for target in parse_ass drawing render; do
-            cargo fuzz run "$target" -- -runs=10000 -max_total_time=20
+          for target in parse_ass parse_ass_bytes drawing render; do
+            cargo fuzz run "$target" -- -runs=10000 -max_total_time=20 -timeout=10
           done
 
   demo:

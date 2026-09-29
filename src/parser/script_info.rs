@@ -122,7 +122,7 @@ mod tests {
     fn test_parse_script_info_empty() {
         let lines: Vec<&str> = vec![];
         let info = parse_script_info(&lines, 0).unwrap();
-        assert_eq!(info.play_res_x, 1920); // default
+        assert_eq!(info.play_res_x, 384); // default
     }
 
     #[test]

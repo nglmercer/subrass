@@ -118,6 +118,25 @@ impl LegacyEffect {
         (delay / scale).max(1.0)
     }
 
+    /// libass quantizes delay in storage/layout pixels, then converts back
+    /// to PlayRes units. Display scaling happens after that quantization.
+    pub(crate) fn traveled_in_layout(
+        elapsed_ms: u64,
+        delay: f64,
+        screen_scale: f64,
+        layout_scale: f64,
+    ) -> f64 {
+        if !screen_scale.is_finite()
+            || !layout_scale.is_finite()
+            || screen_scale <= 0.0
+            || layout_scale <= 0.0
+        {
+            return 0.0;
+        }
+        let script_delay = (delay / layout_scale).max(1.0).trunc() * layout_scale;
+        elapsed_ms as f64 * screen_scale / script_delay
+    }
+
     /// Pixels travelled `elapsed_ms` into the event.
     pub fn traveled(elapsed_ms: u64, delay: f64, scale: f64) -> f64 {
         elapsed_ms as f64 / Self::effective_delay(delay, scale)

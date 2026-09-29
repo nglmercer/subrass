@@ -268,12 +268,20 @@ impl Compositor {
             }
             let shaped_text =
                 TextShaper::decode_font_encoding(&segment.text, seg_resolved.font_encoding);
+            // Explicit LayoutRes makes libass infer display/storage pixel
+            // aspect even when the host requests square pixels.
+            let par = if resolved.layout_res_x > 0 && resolved.layout_res_y > 0 {
+                (f64::from(video_width) / f64::from(video_height.max(1)))
+                    / (f64::from(resolved.layout_res_x) / f64::from(resolved.layout_res_y))
+            } else {
+                1.0
+            };
             let shaped = if opentype_fonts.is_empty() {
                 TextShaper::shape_with_fallback(
                     &shaped_text,
                     &shape_fonts,
                     seg_font_size,
-                    seg_resolved.scale_x / 100.0,
+                    seg_resolved.scale_x / 100.0 * par,
                     seg_resolved.scale_y / 100.0,
                     seg_resolved.font_weight,
                     seg_resolved.italic,
@@ -288,7 +296,7 @@ impl Compositor {
                     &shaped_text,
                     &opentype_fonts,
                     seg_font_size,
-                    seg_resolved.scale_x / 100.0,
+                    seg_resolved.scale_x / 100.0 * par,
                     seg_resolved.scale_y / 100.0,
                     seg_resolved.font_weight,
                     seg_resolved.italic,
@@ -304,25 +312,23 @@ impl Compositor {
             // Per-segment drawing state (mixed drawing/text supported).
             let mode = segment_drawing_mode(&segment.tags, resolved.drawing_mode);
             let drawing = if !skipped && mode > 0 {
-                let unit = drawing_unit_scale(scale_x, scale_y, mode);
-                super::super::drawing::DrawingParser::measure(&segment.text).map(
-                    |(min_x, _, w, h)| {
-                        DrawingLayout {
-                            mode,
-                            min_x: min_x * unit,
-                            width: w * unit,
-                            height: h * unit,
-                            // libass `get_outline_glyph`: a drawing glyph
-                            // takes `desc = pbo` and `asc = (y_max -
-                            // y_min) - pbo` in drawing units, scaled to
-                            // video pixels. Negative and oversized pbo
-                            // values move the drawing outside its nominal
-                            // ink box; the line pass clamps the descent
-                            // contribution at zero like libass `max_desc`.
-                            baseline: (h - seg_resolved.drawing_baseline_offset) * unit,
-                        }
-                    },
-                )
+                let ux = drawing_unit_scale(scale_x, scale_x, mode) * seg_resolved.scale_x / 100.0;
+                let uy = drawing_unit_scale(scale_y, scale_y, mode) * seg_resolved.scale_y / 100.0;
+                super::super::drawing::DrawingParser::measure(&segment.text).map(|(_, _, w, h)| {
+                    DrawingLayout {
+                        mode,
+                        width: w * ux,
+                        height: h * uy,
+                        // libass `get_outline_glyph`: a drawing glyph
+                        // takes `desc = pbo` and `asc = (y_max -
+                        // y_min) - pbo` in drawing units, scaled to
+                        // video pixels. Negative and oversized pbo
+                        // values move the drawing outside its nominal
+                        // ink box; the line pass clamps the descent
+                        // contribution at zero like libass `max_desc`.
+                        baseline: (h - seg_resolved.drawing_baseline_offset) * uy,
+                    }
+                })
             } else {
                 None
             };
@@ -509,6 +515,12 @@ impl Compositor {
             Some(bytes) => TextShaper::decode_ass_bytes(bytes, resolved.font_encoding),
             None => TextShaper::decode_font_encoding(&event.text, resolved.font_encoding),
         };
+        let par = if resolved.layout_res_x > 0 && resolved.layout_res_y > 0 {
+            (f64::from(video_width) / f64::from(video_height.max(1)))
+                / (f64::from(resolved.layout_res_x) / f64::from(resolved.layout_res_y))
+        } else {
+            1.0
+        };
         let wrapped_text = if opentype_measure_fonts.is_empty() {
             wrap_event_text(
                 &wrap_input,
@@ -524,7 +536,7 @@ impl Compositor {
                     value,
                     &opentype_measure_fonts,
                     font_size,
-                    resolved.scale_x / 100.0,
+                    resolved.scale_x / 100.0 * par,
                     resolved.spacing,
                     resolved.kerning,
                 )
@@ -611,15 +623,17 @@ impl Compositor {
                 left_to_right,
                 ..
             }) => {
-                base_x = LegacyEffect::banner_x(
+                let traveled = LegacyEffect::traveled_in_layout(
                     time_ms - start_ms,
                     delay,
                     scale_x,
-                    left_to_right,
-                    0.0,
-                    video_width as f64,
-                    layout.width,
+                    f64::from(layout_res_x) / f64::from(play_res_x),
                 );
+                base_x = if left_to_right {
+                    -layout.width + traveled
+                } else {
+                    f64::from(video_width) - traveled
+                };
             }
             Some(
                 LegacyEffect::ScrollUp {
@@ -630,15 +644,17 @@ impl Compositor {
                 },
             ) => {
                 let down = matches!(legacy_effect, Some(LegacyEffect::ScrollDown { .. }));
-                let text_top = LegacyEffect::scroll_top(
+                let traveled = LegacyEffect::traveled_in_layout(
                     time_ms - start_ms,
                     delay,
                     scale_y,
-                    down,
-                    top * scale_y,
-                    bottom * scale_y,
-                    layout.height,
+                    f64::from(layout_res_y) / f64::from(play_res_y),
                 );
+                let text_top = if down {
+                    top * scale_y + traveled - layout.height
+                } else {
+                    bottom * scale_y - traveled
+                };
                 base_y = text_top + layout.baseline;
             }
             None => {}

@@ -145,6 +145,10 @@ impl SubtitleRenderer {
     ) {
         use crate::types::LegacyEffect;
         let default_style = crate::types::Style::new("Default");
+        if doc.styles.iter().any(|style| style.encoding == 130) {
+            Self::push_warning(warnings,
+                "Unsupported legacy codec style Encoding 130 (Johab); byte-like values become U+FFFD".into());
+        }
         for event in &doc.events {
             for tag in &event.parsed_tags {
                 Self::collect_tag_warnings(tag, warnings);
@@ -264,22 +268,10 @@ impl SubtitleRenderer {
         // Render each event
         let default_style = crate::types::Style::new("Default");
 
-        for event in &active_events {
-            let style = self
-                .doc
-                .find_style(&event.style)
-                .unwrap_or_else(|| self.doc.get_default_style().unwrap_or(&default_style));
-
-            let mut resolved = Compositor::resolve_style(style, event);
-            resolved.scaled_border_and_shadow = self.doc.script_info.scaled_border_and_shadow;
-            // 0 = unset: `composite_event` owns the libass
-            // `ass_layout_res` fallback (both axes set, else video
-            // size), so every caller shares one semantic.
-            resolved.layout_res_x = self.doc.script_info.layout_res_x.unwrap_or(0);
-            resolved.layout_res_y = self.doc.script_info.layout_res_y.unwrap_or(0);
-            resolved.kerning = self.doc.script_info.kerning;
-            self.compositor.composite_event(
-                &mut self.buffer,
+        let mut placements = Vec::with_capacity(active_events.len());
+        for (index, event) in active_events.iter().enumerate() {
+            let resolved = self.resolved_event_style(event, &default_style);
+            if let Some(prepared) = Compositor::measure_event(
                 event,
                 &resolved,
                 &self.font_manager,
@@ -292,7 +284,37 @@ impl SubtitleRenderer {
                 // i32::MAX wrap no fields (a bare `as i32` would go negative).
                 self.doc.script_info.wrap_style.min(i32::MAX as u32) as i32,
                 &self.doc.styles,
-            );
+            ) {
+                placements.push(prepared.placement(index));
+            }
+        }
+        compositor::place_collisions(&mut placements);
+        // Shape one event at a time for painting. Geometry is remeasured to
+        // keep peak layout memory independent of active event count.
+        for placement in placements {
+            let event = active_events[placement.index];
+            let resolved = self.resolved_event_style(event, &default_style);
+            if let Some(mut measured) = Compositor::measure_event(
+                event,
+                &resolved,
+                &self.font_manager,
+                time_ms,
+                self.doc.script_info.play_res_x,
+                self.doc.script_info.play_res_y,
+                self.video_width,
+                self.video_height,
+                self.doc.script_info.wrap_style.min(i32::MAX as u32) as i32,
+                &self.doc.styles,
+            ) {
+                measured.shift_y(placement.shift);
+                self.compositor.paint_event(
+                    &mut self.buffer,
+                    &self.font_manager,
+                    measured,
+                    self.video_height,
+                    self.doc.script_info.play_res_y,
+                );
+            }
         }
 
         // Transfer buffer to canvas when one is set. Without a canvas the
@@ -303,6 +325,23 @@ impl SubtitleRenderer {
         }
 
         Ok(())
+    }
+
+    fn resolved_event_style(
+        &self,
+        event: &Event,
+        default: &crate::types::Style,
+    ) -> compositor::ResolvedStyle {
+        let style = self
+            .doc
+            .find_style(&event.style)
+            .unwrap_or_else(|| self.doc.get_default_style().unwrap_or(default));
+        let mut resolved = Compositor::resolve_style(style, event);
+        resolved.scaled_border_and_shadow = self.doc.script_info.scaled_border_and_shadow;
+        resolved.layout_res_x = self.doc.script_info.layout_res_x.unwrap_or(0);
+        resolved.layout_res_y = self.doc.script_info.layout_res_y.unwrap_or(0);
+        resolved.kerning = self.doc.script_info.kerning;
+        resolved
     }
 
     /// Raw RGBA bytes of the last rendered frame

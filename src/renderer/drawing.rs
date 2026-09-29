@@ -71,6 +71,55 @@ impl DrawingParser {
         ))
     }
 
+    /// Rasterize a projected path into a bounded local coverage mask. The
+    /// caller supplies the shared ASS transform; clips still run after paint.
+    pub(crate) fn projected_coverage(
+        text: &str,
+        frame_width: u32,
+        frame_height: u32,
+        mut project: impl FnMut(f64, f64) -> Option<(f64, f64)>,
+    ) -> Option<(Vec<u8>, u32, u32, i32, i32)> {
+        let mut polygons = Self::polygons(text);
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for polygon in &mut polygons {
+            for point in polygon {
+                *point = project(point.0, point.1)?;
+                x0 = x0.min(point.0);
+                y0 = y0.min(point.1);
+                x1 = x1.max(point.0);
+                y1 = y1.max(point.1);
+            }
+        }
+        if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        // Keep off-frame ink that can contribute borders/blur, without
+        // allocating according to untrusted drawing coordinates.
+        let pad = 512.0;
+        x0 = x0.floor().max(-pad);
+        y0 = y0.floor().max(-pad);
+        x1 = x1.ceil().min(f64::from(frame_width) + pad);
+        y1 = y1.ceil().min(f64::from(frame_height) + pad);
+        if x1 < x0 || y1 < y0 {
+            return None;
+        }
+        let (w, h) = ((x1 - x0 + 1.0) as u32, (y1 - y0 + 1.0) as u32);
+        let len = crate::renderer::buffer::checked_pixel_count(w, h)?;
+        if len as u64 > crate::renderer::limits::MAX_GLYPH_BITMAP_PIXELS {
+            return None;
+        }
+        let mut bitmap = vec![0; len];
+        raster::scan_polygons(w, h, &polygons, -x0, -y0, 1.0, |x, y| {
+            bitmap[y as usize * w as usize + x as usize] = 255;
+        });
+        Some((bitmap, w, h, x0 as i32, y0 as i32))
+    }
+
     fn polygons(text: &str) -> Vec<Vec<(f64, f64)>> {
         let commands = parse(text);
         paths::commands_to_polygons(&commands)

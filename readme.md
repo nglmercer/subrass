@@ -54,34 +54,39 @@ src/
 5. **Resolve** — Base style is merged with override tags into per-segment `ResolvedStyle`s; line-global tags (`\pos`, `\move`, `\org`, `\clip`/`\iclip` incl. vector, `\fad`/`\fade`, `\an`) apply wherever they appear textually, first tag wins per libass (`EVENT_POSITIONED`, `PARSED_A`, `PARSED_FADE`, first vector clip), while `\q` lays out the whole line last-wins
 6. **Layout** — Every segment is shaped/measured with its own style; alignment, positioning, rotation origins, and opaque boxes use these per-segment dimensions
 7. **Rasterize** — Glyphs are rasterized to coverage bitmaps (per-font cache; faux bold/italic only when the face lacks the style), then sheared/rotated
-8. **Effects** — Elliptical outline, offset shadow, blur, then rectangular/vector clipping
+8. **Placement and effects** — Collision placement runs before paint; independent `\be`/`\blur` filter style-run coverage masks before color compositing and clipping
 9. **Composite** — Segments are alpha-blended onto the RGBA buffer
 10. **Display** — Buffer is transferred to canvas via `putImageData`, or read back as bytes in a worker
 
+Raw byte input accepts UTF-8, BOM-marked UTF-16LE/BE, and existing legacy encodings. Malformed UTF-16 rejects with a diagnostic; Johab remains unsupported.
+
 ## Override Tag Support Matrix
+
+Reference-tested cases and intentional differences are recorded separately in [CONFORMANCE.md](CONFORMANCE.md). “Supported” does not imply full reference parity.
 
 Status key: **Supported** = parsed and rendered; **Partial** = parsed, rendered with documented limits; **Parsed** = parsed but not rendered; **—** = not recognized (kept as `Unknown`, ignored by the renderer).
 
 | Category | Supported | Partial | Parsed |
 |---|---|---|---|
+| Collision | Source-order placement within layers; exclusions for positioned, origin, animated and scroll events | Frame-derived placement differs from libass playback retention; regression-tested across seeking | |
 | Position | `\pos`, `\move` (with/without timing), `\org` (first positioning tag wins, first `\org` wins, like libass) | | |
 | Colors/Alpha | `\c`, `\1c`–`\4c`, `\alpha`, `\1a`–`\4a` | | |
 | Font | `\fn`, `\fs` (absolute, relative `\fs+N/-N`, bare reset), `\fsp`, `\b`, `\i`, `\u`, `\s` | | |
 | Rotation/Scale | `\fr`, `\frx`, `\fry`, `\frz` (counterclockwise on screen), `\fscx`, `\fscy`, `\fax`, `\fay` (pre-rotation shear + `\fay` baseline slant, libass order) | Rotation uses a fixed perspective distance (see known limitations) | |
-| Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative), `\be`, `\blur` | | |
+| Border/Shadow | `\bord`, `\xbord`, `\ybord`, `\shad`, `\xshad`, `\yshad` (incl. negative); independent `\be` binomial passes and `\blur` Gaussian masks, resets and interpolation | Gaussian/stroker quantization and opaque-box blur differ; see conformance | |
 | Clipping | `\clip`, `\iclip` (rectangular and vector; rect and vector are separate state like libass: later rect replaces + flips mode, first vector retained, both render) | | |
-| Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c` | B-splines are subdivided (no exact curve rasterizer) | |
+| Drawing | `\p1`–`\pN`, `\pbo`, commands `m n l b s p c`, independent X/Y scale, shear, rotation, origin, perspective and animation | B-splines are subdivided (no exact curve rasterizer) | |
 | Fade | `\fad`, `\fade` (first fade tag wins, like libass) | `\fade` with degenerate timing saturates instead of dividing by zero | |
 | Karaoke | `\k`, `\kt` (explicit syllable starts), `\K`/`\kf` (continuous sweep, split within glyph bitmaps), `\ko` (secondary fill + outline suppressed before start; primary + outline from start) | | |
 | Wrap/Breaks | `\N` (hard break), `\n` (space, or break in wrap mode 2), `\h`, `\q`; wrap styles 0/1/2 and 3≡0 (greedy fill + pairwise rebalance when style ≠ 1, libass algorithm); each line aligns independently; CJK + U+3000 + U+200B breaks with open/close/small-kana/combining/NBSP/currency glue (VSFilter behavior; default libass builds without unibreak overflow instead — see `CONFORMANCE.md`) | | |
 | Reset | `\r`, `\rStyleName` (line-global state preserved) | | |
 | Animation | `\t` (accel `t^accel`, optional timing) recursively consumes libass discrete/event-global tags, interpolates rectangular clips, and animates colors, alpha, size, scales, spacing, rotation, borders, shadows, and shear | Vector clip geometry remains discrete; transform nesting is bounded for hostile input | |
 | Alignment | `\an`, legacy `\a` (SSA numbering converted; first tag wins, like libass) | | |
-| Script fields | `PlayResX/Y`, `WrapStyle`, `ScaledBorderAndShadow` (unscaled = 1:1 video px, VSFilter/legacy-libass), `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators, unset = video size), `Kerning` (default off, like libass), all libass `YCbCr Matrix` metadata values | | Raw RGBA keeps authored RGB unchanged; host/video conversion requires an explicit destination colorspace |
+| Script fields | `PlayResX/Y` with absent-dimension inference (384x288 if both absent), `WrapStyle`, `ScaledBorderAndShadow` (unscaled = 1:1 video px, VSFilter/legacy-libass), `LayoutResX/Y` (libass `ass_layout_res`: blur + unscaled-border denominators, unset = video size), `Kerning` (default off, like libass), all libass `YCbCr Matrix` metadata values | | Raw RGBA keeps authored RGB unchanged; host/video conversion requires an explicit destination colorspace |
 | Attachments | `[Fonts]` parsed, decoded, and best-effort auto-loaded as fallback faces (failures surface via `warnings()`); `[Graphics]` parsed, decoded, exposed via `get_attachment_*`; manual `load_font(name, data)` | | |
 | Misc | `Effect` field: `Banner`, `Scroll up`, `Scroll down` (timing, band clip, edge fadeaway per VSFilter); `\fe` decodes Windows single-byte plus Shift-JIS/CP949/GBK/Big5 byte-like runs before Unicode shaping; Symbol bytes use U+F000..U+F0FF; OS/2 code-page hints rank loaded fallback faces | Johab (`\fe130`) is a deliberate unsupported-codec boundary; unknown effect names render as plain events | `HardLineBreak` exists as a tag variant but is never produced (breaks are `\n` text) |
 
-Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur is applied **before** clipping so blurred pixels cannot bleed outside the clip region.
+Position tags use the event's alignment as their anchor: for example, `\an5\pos(960,540)` centers the text on `(960,540)`, while `\an7\pos(100,150)` places its top-left corner there. ASS colors use `&HAABBGGRR&` ordering, where alpha is **transparency** (`00` opaque, `FF` transparent) — the `Color` type documents this invariant and converts explicitly at every boundary. `\2c` is the karaoke secondary color, shown before a syllable starts; `\4c` controls the shadow/back channel. Blur filters run-local coverage **before** clipping so blurred pixels cannot bleed outside the clip region.
 
 ## Known Limitations
 

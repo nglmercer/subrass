@@ -89,11 +89,13 @@ impl super::Compositor {
             match target {
                 OverrideTag::Blur(b) => {
                     let from = resolved.blur;
-                    resolved.blur = from + (b - from) * progress;
+                    resolved.blur = (from + (b - from) * progress).clamp(0.0, 100.0);
                 }
                 OverrideTag::EdgeBlur(b) => {
-                    let from = resolved.blur;
-                    resolved.blur = from + (b - from) * progress;
+                    let from = f64::from(resolved.edge_blur);
+                    resolved.edge_blur = (from + (b - from) * progress + 0.5)
+                        .trunc()
+                        .clamp(0.0, 127.0) as u32;
                 }
                 OverrideTag::Border(b) => {
                     let from = resolved.outline;

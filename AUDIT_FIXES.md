@@ -1,3 +1,8 @@
+> Historical implementation log. Current compatibility statuses, measured counts,
+> and corrections to earlier claims are in [CONFORMANCE.md](CONFORMANCE.md) and
+> [COMPATIBILITY-FIXES.md](COMPATIBILITY-FIXES.md). Historical table counts below
+> included host-converted samples and should not be used as current gate counts.
+
 # Audit Remediation Log (historical)
 
 Remediation of the 100-item audit, grouped by phase,
@@ -161,7 +166,7 @@ decoding, and code-page-aware fallback are now implemented, while Johab
   cannot bleed outside the clip region. Re-verified against libass
   `ass_render.c` ("convert glyphs to bitmaps, combine them, apply blur",
   clips applied at blend time): the order matches libass; only the blur
-  granularity differs (per combined-bitmap run vs whole event buffer).
+  historical granularity differed. The current renderer filters style-run coverage masks.
 - **#35 Layout measurement**: two-pass layout — every segment resolved (incl.
   `\t` at the frame time) and shaped with its own style; alignment, `\pos`,
   `\move`, rotation origins, and opaque boxes use block metrics from the same
@@ -234,8 +239,8 @@ decoding, and code-page-aware fallback are now implemented, while Johab
 - **#56 Demo errors**: renderer calls wrapped in try/catch (throwing WASM APIs).
 - **#57 `Effect` field**: parsed, exposed, and **rendered**: `Banner` and
   `Scroll up/down` with VSFilter timing, band clip, and edge fadeaway.
-  libass ignores these effects (renders static text), so their reference
-  fixtures are known-divergent, not gated.
+  Correction: libass implements these effects. Both reference fixtures now gate;
+  direct samples additionally cover directions, timestamps, and delay quantization.
 - **#58 Support matrix**: unsupported-but-parsed tags documented in README.
 
 ## Phase 6 — Quality gates (#59–69, #77–80, #84, #85, #89–92, #96, #98)

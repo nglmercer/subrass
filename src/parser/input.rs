@@ -57,6 +57,7 @@ pub(super) fn parse_text(input: &str) -> Result<AssDocument, ParseError> {
         ));
     }
 
+    doc.script_info.infer_play_resolution();
     Ok(doc)
 }
 
@@ -65,6 +66,34 @@ pub(super) fn parse_text(input: &str) -> Result<AssDocument, ParseError> {
 /// existing string path unchanged; only genuinely non-UTF-8 input uses the
 /// byte-preserving section scan.
 pub(super) fn parse_bytes(input: &[u8]) -> Result<AssDocument, ParseError> {
+    // A UTF-16 BOM is authoritative. Reject truncated units and unpaired
+    // surrogates instead of accidentally treating this as legacy byte input.
+    let endian = if input.starts_with(&[0xff, 0xfe]) {
+        Some(true)
+    } else if input.starts_with(&[0xfe, 0xff]) {
+        Some(false)
+    } else {
+        None
+    };
+    if let Some(little) = endian {
+        let bytes = &input[2..];
+        if !bytes.len().is_multiple_of(2) {
+            return Err(ParseError::Unexpected("Truncated UTF-16 code unit".into()));
+        }
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|b| {
+                if little {
+                    u16::from_le_bytes([b[0], b[1]])
+                } else {
+                    u16::from_be_bytes([b[0], b[1]])
+                }
+            })
+            .collect();
+        let text = String::from_utf16(&units)
+            .map_err(|_| ParseError::Unexpected("Invalid UTF-16 surrogate sequence".into()))?;
+        return parse_text(&text);
+    }
     let input = strip_utf8_bom(input);
     if let Ok(text) = std::str::from_utf8(input) {
         return parse_text(text);
@@ -110,6 +139,7 @@ pub(super) fn parse_bytes(input: &[u8]) -> Result<AssDocument, ParseError> {
     }
 
     super::normalize_byte_metadata(&mut doc);
+    doc.script_info.infer_play_resolution();
     Ok(doc)
 }
 

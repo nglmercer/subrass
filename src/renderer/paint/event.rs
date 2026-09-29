@@ -38,8 +38,7 @@ pub(crate) fn event_alpha(
 }
 
 /// Whether the event must render into an isolated buffer before final blend.
-pub(crate) fn needs_isolation(resolved: &ResolvedStyle, effect: &str) -> bool {
-    let legacy = LegacyEffect::parse(effect);
+pub(crate) fn needs_isolation(resolved: &ResolvedStyle, legacy: Option<LegacyEffect>) -> bool {
     let effect_isolated = match legacy {
         Some(LegacyEffect::ScrollUp { .. } | LegacyEffect::ScrollDown { .. }) => true,
         Some(LegacyEffect::Banner { fadeaway, .. }) => fadeaway > 0.0,
@@ -49,7 +48,6 @@ pub(crate) fn needs_isolation(resolved: &ResolvedStyle, effect: &str) -> bool {
         || resolved.inverse_clip.is_some()
         || resolved.clip_vector.is_some()
         || resolved.inverse_clip_vector.is_some()
-        || resolved.blur > 0.0
         || effect_isolated
 }
 

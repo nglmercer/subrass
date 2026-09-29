@@ -159,33 +159,10 @@ pub enum OverrideTag {
 
 impl OverrideTag {
     pub fn parse_from_text(text: &str) -> Vec<Self> {
-        let mut tags = Vec::new();
-        let mut chars = text.chars().peekable();
-
-        while let Some(&c) = chars.peek() {
-            if c == '{' {
-                chars.next(); // consume '{'
-                let mut tag_str = String::new();
-
-                while let Some(&c) = chars.peek() {
-                    if c == '}' {
-                        chars.next(); // consume '}'
-                        break;
-                    }
-                    tag_str.push(c);
-                    chars.next();
-                }
-
-                // Parse the tag string
-                for tag in parse_tag_group(&tag_str) {
-                    tags.push(tag);
-                }
-            } else {
-                chars.next();
-            }
-        }
-
-        tags
+        parse_text_segments(text)
+            .last()
+            .map(|s| s.tags.clone())
+            .unwrap_or_default()
     }
 
     pub fn is_positioning(&self) -> bool {
@@ -323,6 +300,8 @@ pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSeg
         if current_text.is_empty() {
             if let Some(last) = segments.last_mut() {
                 last.text.push(ch);
+            } else {
+                current_text.push(ch);
             }
         } else {
             current_text.push(ch);
@@ -390,17 +369,23 @@ pub fn parse_text_segments_with_wrap(text: &str, wrap_style: i32) -> Vec<TextSeg
                                 current_text.push('\u{00A0}');
                             }
                         }
-                        _ => {
-                            // Keep escape sequences as-is for other tags
-                            current_text.push('\\');
+                        '{' | '}' => {
                             current_text.push(next);
                             chars.next();
                         }
+                        _ => {
+                            // Keep escape sequences as-is for other tags
+                            // Unknown escapes consume only the backslash.
+                            // The next character may itself introduce a valid escape.
+                            current_text.push('\\');
+                        }
                     }
+                } else {
+                    current_text.push('\\');
                 }
             }
             _ => {
-                current_text.push(c);
+                current_text.push(if c == '\t' { ' ' } else { c });
                 chars.next();
             }
         }

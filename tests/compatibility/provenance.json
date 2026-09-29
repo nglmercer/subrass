@@ -1,0 +1,411 @@
+{
+  "generator": "tests/compatibility/libass.py --generate",
+  "libass": "0.17.5",
+  "api_version": "0x1705000",
+  "runtime_dependencies": {
+    "freetype": "2.14.3",
+    "harfbuzz": "14.5.0",
+    "fribidi": "(GNU FriBidi) 1.0.17"
+  },
+  "freetype_pkg_config": "26.6.20",
+  "harfbuzz": "14.5.0",
+  "fribidi_pkg_config": "1.0.17",
+  "fribidi_build_header": "1.0.16 (libass Shaper log)",
+  "libass_source": "4a05d8127f525943ebf45fdc6497c9e665947f0d",
+  "libunibreak_pkg_config": "7.0",
+  "font_provider": "ASS_FONTPROVIDER_NONE",
+  "fonts": {
+    "fonts/DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+  },
+  "configuration": {
+    "hinting": "NONE",
+    "shaping": "COMPLEX",
+    "storage_size": "frame dimensions",
+    "wrap_unicode": false,
+    "pixel_aspect": 1,
+    "margins": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "samples": "fresh renderer at each timestamp",
+    "composition": "raw ASS_Image over black; no FFmpeg"
+  },
+  "scripts": {
+    "blur-animated.ass": "a5b3b2d690174e1b95b157b83c3b150d2257d048bdf3f75f2a92dda913a55d75",
+    "blur-be.ass": "185664a8934bec9e4cf126774352c3a7ca8ca072fb94db67d96b885ab31fb089",
+    "blur-be3.ass": "95298535797acd662d8ebd69b74ea61c5697416a8be658061ca044fd518c84f8",
+    "blur-blur.ass": "a6655ad16912a485513b21fb8205fb8b5690a06344ebea0acc5dade8d99e2441",
+    "blur-border.ass": "1a33f4031941f373acf159a112e11310865e5cc31bdb788fa5ab7972eac4eee5",
+    "blur-inline.ass": "d260c9752e0b196e0400c258d3290f52ed89f16722f2078a2de9a9e95aa5c66d",
+    "blur-text.ass": "48ae5b9c980de055ca036243477818f4596bd663cd2462b4499dc22aeec9c754",
+    "blur-together.ass": "e86f2e126a26c0891c1b6ff635631f6c18f603f18377c2cbe5b725526bbacb6b",
+    "blur-wide.ass": "a862e55c8de59449e0802d26dbeb24d87676530416889f86f0ca96b8750b273e",
+    "collision-2.ass": "6c7220fbafe7f71671faf46394ff385929f53845c52ef3c0d8ceb547cb725e89",
+    "collision-5.ass": "6e20bb5778ec47b6ad84eac2dbefd4cb4680e7503053289a1b12075c59ebadb1",
+    "collision-8.ass": "66a4f04d0c5fe9c5629f651706b89a327f32c126b31e5db557a671975a8c7f88",
+    "collision-exclusions.ass": "99c74d9eb021d70508826175d783a7f332556a7cc22e41304a60f9c638fd57cc",
+    "collision-fade.ass": "03cfc2e2fa632691c0abf43a4ceadb60e3c939735cbaa09a94312219d24ec02d",
+    "collision-layer.ass": "72b2775ee68ef853a690f36cc999901c7c0638bc09fec2b3c5cb72b7c384f402",
+    "collision-staggered.ass": "a2508b4abcb99dccfd7c2ca4296da449870a7badef96cc859a8d93f27f4b6958",
+    "drawing-animated.ass": "085482b4e8607dcacb3808c9e3822fc12f40d50ccaf830ea8edb4b16312df1cf",
+    "drawing-combined.ass": "63199373a8918e4d193a9f65d26e96ff2273ddcdc63a2981c3af87df0f547da2",
+    "drawing-frx.ass": "ebd4d24570abd9ae37071c83aeb012b6544a24f0e8843daa6b8f7444ddad98ab",
+    "drawing-fry.ass": "21d2785d75d7b16696fa8099c5b8ecca5ef7da7c184d8e3c982c99eb1db4d9b4",
+    "drawing-frz.ass": "04832b86ddd75859124ad271bb6aba69e47cc5d10f4023f37a321875f1517953",
+    "drawing-karaoke.ass": "aa33adc2b1fe39c08bbc1fad64c4379371ad4e47323905b5678e2d1231677a2f",
+    "drawing-mixed.ass": "d6ca2c9f489d47a2f00d8393b75fc44a9be8e1cf4e58cdce9f23dd7d35480596",
+    "drawing-scale.ass": "9b0843b4383527f6ed05714612b2c2526692d5f40b000409f0ae1be1f84d9cf0",
+    "drawing-shear.ass": "696ec89ebab45a1c034d94514c63daa97958f3c34cb71769a070e50c68fe83c8",
+    "effect-Banner-right.ass": "d9e65e5dccf6f3dfc561135a93e9df5f5bab42c2560406808e2ed6ea589e35b2",
+    "effect-Banner-small.ass": "d1db4c81fe49be6e44fc8a216f7beac6d0cee221fdaaf0f78d90a62fd81d9373",
+    "effect-Banner-zero.ass": "2ce46697be488193bce2cae772bfd9f48e9164007a508589a8a9188f56508923",
+    "effect-Banner.ass": "342906b1648fdf6bdba2fc3d0e17c1c462011a87d2c2ab30073428570c5c17bd",
+    "effect-Scroll-down.ass": "b866679d3e272421327a0c56b2c4a862fa81812c661429d3173714ce961a71fa",
+    "effect-Scroll-up.ass": "f3687c2a0bf15a106468db774478aa62c3a2b1a98e8d6be89137d0641d031684",
+    "missing-playres.ass": "f689a92720865b195bad68ca1b75cba24a37d750307e9f29888c442b7be7dc92"
+  },
+  "samples": [
+    {
+      "name": "collision-2-384x216-1000",
+      "sha256": "a925801d6f9f178b54731cb74f597d2a68389f957d7fc1a5cba66ed1d57c6fe3"
+    },
+    {
+      "name": "collision-2-768x432-1000",
+      "sha256": "290ef92f5e416c2333f489240a7501ea61c2d454474af3f40ebe0e9bb71ad56e"
+    },
+    {
+      "name": "collision-5-384x216-1000",
+      "sha256": "5a2f13ea783c534f3858aa9c114744d92bad68a601dc147e6326f4005e60f675"
+    },
+    {
+      "name": "collision-5-768x432-1000",
+      "sha256": "52178d0c5422897b280c5577efbedc57c3acd1f6547017c59e6c59d2f49686ab"
+    },
+    {
+      "name": "collision-8-384x216-1000",
+      "sha256": "641511f5d4f0055016d6f065d0addcd2366f0d684089dbb6a7e4babe7d457898"
+    },
+    {
+      "name": "collision-8-768x432-1000",
+      "sha256": "b17e8f8a68ce7821350e3ddba6b7eb3fe83da20ed36bb3d28478c506fa8a3ab0"
+    },
+    {
+      "name": "collision-layer-384x216-1000",
+      "sha256": "98090391379a9a97eb478bef95f98170ef0d8d57e76532215ea4d4796d314d7b"
+    },
+    {
+      "name": "collision-exclusions-384x216-0",
+      "sha256": "6c014f3c2aa859c99766654cfb8bdc9c8101bdbd6e62a4547f489934ad31ed88"
+    },
+    {
+      "name": "collision-exclusions-384x216-1999",
+      "sha256": "6c014f3c2aa859c99766654cfb8bdc9c8101bdbd6e62a4547f489934ad31ed88"
+    },
+    {
+      "name": "collision-exclusions-384x216-2000",
+      "sha256": "6c014f3c2aa859c99766654cfb8bdc9c8101bdbd6e62a4547f489934ad31ed88"
+    },
+    {
+      "name": "collision-exclusions-384x216-3000",
+      "sha256": "7e56cc42ce9c629043369c6b62fbc0d9be2de6404d4fa9e17aa60d27efa362bf"
+    },
+    {
+      "name": "collision-staggered-384x216-999",
+      "sha256": "79679e9a92e2dcc1fd1de35a350511f3c86ddc21f95569c287bfb04704507e80"
+    },
+    {
+      "name": "collision-staggered-384x216-1000",
+      "sha256": "51131d57c3bf8a0b58212f7ccb3b206c49f9b584713af2a820f72e0d732c3d60"
+    },
+    {
+      "name": "collision-staggered-384x216-2000",
+      "sha256": "51131d57c3bf8a0b58212f7ccb3b206c49f9b584713af2a820f72e0d732c3d60"
+    },
+    {
+      "name": "drawing-scale-384x216-1000",
+      "sha256": "0f5b244cd305c62d1d85423c6350e0c3e93de74e9e3b215e0fbc1bcfe42671ab"
+    },
+    {
+      "name": "drawing-scale-768x432-1000",
+      "sha256": "925a1966a81b76f4935f30d0236202ff8f5852a062aec2845040e8409af597f7"
+    },
+    {
+      "name": "drawing-shear-384x216-1000",
+      "sha256": "f47b50a08c3f7558334e37b771bd1f0957a1d0ac459186f97da760d9b3f1eb98"
+    },
+    {
+      "name": "drawing-shear-768x432-1000",
+      "sha256": "2f1fe38a06380c4efe36ba31a6a59e197179d2fe2d49a7227f83038b7b2e1b3c"
+    },
+    {
+      "name": "drawing-frz-384x216-1000",
+      "sha256": "98a0f8cbf1798b1a63ffb1d9a5bc0f701fababa5e9baafc741100e19ec637b78"
+    },
+    {
+      "name": "drawing-frz-768x432-1000",
+      "sha256": "cd4be0f2ac96bb59355e6c896249b26d792cb1bcf07be39f670f97ba9fbc9e4d"
+    },
+    {
+      "name": "drawing-frx-384x216-1000",
+      "sha256": "64a1b5336bfdab50f5efdcca533f6be0e484f070d6d300b58ff0a7d6c0e4ee77"
+    },
+    {
+      "name": "drawing-frx-768x432-1000",
+      "sha256": "971a154af66c9c496bf0b04b22c9051c1389f40295b17dc0f309924d4eaa5951"
+    },
+    {
+      "name": "drawing-fry-384x216-1000",
+      "sha256": "362795ae8889f48779da20cb75b95feb958b0d4e6475a10be896dac356020f0f"
+    },
+    {
+      "name": "drawing-fry-768x432-1000",
+      "sha256": "3315b18c4c963acc0c0e0f286e8e271a16f8c2e25822546f6b27178ad1727e2d"
+    },
+    {
+      "name": "drawing-combined-384x216-1000",
+      "sha256": "5a45e3b56ac3bf53c4d899658e46ee875f077f836b53346100949143f56dd802"
+    },
+    {
+      "name": "drawing-combined-768x432-1000",
+      "sha256": "8269bfc5904e34e0e65c11ede6f1a1a6c4d6b00be7de87121ed9bd812ebcf02a"
+    },
+    {
+      "name": "drawing-mixed-384x216-1000",
+      "sha256": "6b27c6f169d01f59a685fb62ae626e781a99411fdb96f88e07840a88ba6997ec"
+    },
+    {
+      "name": "drawing-animated-384x216-999",
+      "sha256": "349ba06aff23addc750662c53131fa651ff224464a55c8798205ca67ed53d00d"
+    },
+    {
+      "name": "drawing-animated-384x216-1000",
+      "sha256": "349ba06aff23addc750662c53131fa651ff224464a55c8798205ca67ed53d00d"
+    },
+    {
+      "name": "drawing-animated-384x216-1500",
+      "sha256": "625baa76a880d34299e519228ecd2020b4d563d6b8928b7d1559d6e9e859263f"
+    },
+    {
+      "name": "drawing-animated-384x216-2000",
+      "sha256": "35925a822b776e4b9906a62468dc17f1bf999648321d59f5dc554693e84fc68a"
+    },
+    {
+      "name": "drawing-animated-384x216-2001",
+      "sha256": "35925a822b776e4b9906a62468dc17f1bf999648321d59f5dc554693e84fc68a"
+    },
+    {
+      "name": "drawing-animated-768x432-999",
+      "sha256": "d3a2979da6113be775f836a5e0ca5fd75c13047bbb0af52aac25505f8b1885b1"
+    },
+    {
+      "name": "drawing-animated-768x432-1000",
+      "sha256": "d3a2979da6113be775f836a5e0ca5fd75c13047bbb0af52aac25505f8b1885b1"
+    },
+    {
+      "name": "drawing-animated-768x432-1500",
+      "sha256": "3aa3360ae4ba59dc1c4490c23cdf5ff58c0f16f14c8a8090a3a17ab6ae9dc9ba"
+    },
+    {
+      "name": "drawing-animated-768x432-2000",
+      "sha256": "09af73622483cc4447f53a7334761e629a38596f1de17e1adc0a89f99569de79"
+    },
+    {
+      "name": "drawing-animated-768x432-2001",
+      "sha256": "09af73622483cc4447f53a7334761e629a38596f1de17e1adc0a89f99569de79"
+    },
+    {
+      "name": "drawing-karaoke-384x216-0",
+      "sha256": "ffa29954c87368d35a5cf15d6b4430889bd1a0816af6540bb22a7241499c39a1"
+    },
+    {
+      "name": "drawing-karaoke-384x216-1000",
+      "sha256": "25559da42c84c079a564ea15f2d52ad36d84f075fb815d74be888c07b4284858"
+    },
+    {
+      "name": "drawing-karaoke-384x216-2000",
+      "sha256": "2723b62daa4928d32373c021b1a3f3fe8daa1b4e7fab7ce4aea23ef9109c2722"
+    },
+    {
+      "name": "blur-be-384x216-1000",
+      "sha256": "d5eb87118c72dd29430a3339e72928a3683ea70a16fe1bb35eba04ae405f2c23"
+    },
+    {
+      "name": "blur-be-768x432-1000",
+      "sha256": "9f4577f0d07d48480176c0af6995486e90fa791c6f3399641f84a06b9d65f353"
+    },
+    {
+      "name": "blur-be3-384x216-1000",
+      "sha256": "f1d0089d1bb334eacb6327a8b5d5fee1c6776aa585c3c32492dbd4a02ebde6d4"
+    },
+    {
+      "name": "blur-be3-768x432-1000",
+      "sha256": "032fbb66ad34a0103193eccb9dc48b50363d0a9af2ea0879828fc5729281a547"
+    },
+    {
+      "name": "blur-blur-384x216-1000",
+      "sha256": "afdf01b35548833e5cebc16deb46baeef2ae18352ed911fb290b0b75b77594ae"
+    },
+    {
+      "name": "blur-blur-768x432-1000",
+      "sha256": "128b690843981f582fde09a01b0d13105e9e7967425faacbd7d5a5ab1beccaa7"
+    },
+    {
+      "name": "blur-together-384x216-1000",
+      "sha256": "6c0e4d5756914cad961aee1ece3e5bcd1c0e7fd7142d0545c960d36dd2e8f323"
+    },
+    {
+      "name": "blur-together-768x432-1000",
+      "sha256": "17e42e4e035d85ea4d1c338b5f8a40cd817d91489f8165aac4a5497bb954fece"
+    },
+    {
+      "name": "blur-border-384x216-1000",
+      "sha256": "9d3fddaeed8605b52a6aac355b1f994bcfd41382d1157b19bd33ce39162589dd"
+    },
+    {
+      "name": "blur-border-768x432-1000",
+      "sha256": "00da60c5e98fb57f40a5b97b98acd554e039b24238d18bfd8757aa2a0a24da95"
+    },
+    {
+      "name": "blur-inline-384x216-1000",
+      "sha256": "41caa4306c9d2ce4a7e6a02cea12e96f2d3cad5f0aaa92a111dc4351cb28c522"
+    },
+    {
+      "name": "blur-animated-384x216-999",
+      "sha256": "56b22ce2ed7fc7efea0892053cb9ef67ff88544d967aaf17f413fe3ac3d25956"
+    },
+    {
+      "name": "blur-animated-384x216-1000",
+      "sha256": "56b22ce2ed7fc7efea0892053cb9ef67ff88544d967aaf17f413fe3ac3d25956"
+    },
+    {
+      "name": "blur-animated-384x216-1250",
+      "sha256": "a627b090b485cacb747dc99b31075567a474d26d16379f3aa7489e2363e8f4fe"
+    },
+    {
+      "name": "blur-animated-384x216-1500",
+      "sha256": "6c0e4d5756914cad961aee1ece3e5bcd1c0e7fd7142d0545c960d36dd2e8f323"
+    },
+    {
+      "name": "blur-animated-384x216-1750",
+      "sha256": "a014de5fcdacd6a38046eac35663cb5f29338183283a74fd6f082d426e569279"
+    },
+    {
+      "name": "blur-animated-384x216-2000",
+      "sha256": "d658a36aeb2ea0420557b72453626babf4297c7f43c55da2f6fab206b3247683"
+    },
+    {
+      "name": "blur-animated-384x216-2001",
+      "sha256": "d658a36aeb2ea0420557b72453626babf4297c7f43c55da2f6fab206b3247683"
+    },
+    {
+      "name": "blur-text-384x216-1000",
+      "sha256": "c22b741ce53a73c990b83bc539fad2f088de2fe94b9cfe7b07c47524ac1a1b21"
+    },
+    {
+      "name": "effect-Banner-384x216-1000",
+      "sha256": "bb68d231ea93ed4d3f1bd082a8b288257b312d4e621237d0a5721646318a0ea7"
+    },
+    {
+      "name": "effect-Banner-384x216-2000",
+      "sha256": "0377110ce83c5555b4a4b5d1e81e0a8bf843b288cb7cdfa58794c9e709c296af"
+    },
+    {
+      "name": "effect-Banner-384x216-4000",
+      "sha256": "1c8c602854d7ef0a7f64a7ce11fb45cd8a38800a1a1fd511ad8aca2f5cdb5679"
+    },
+    {
+      "name": "effect-Banner-right-384x216-1000",
+      "sha256": "19f9f8e783d20aedbb97836245c22719e5099873446711887686af5f9d8c74ff"
+    },
+    {
+      "name": "effect-Banner-right-384x216-2000",
+      "sha256": "837f2bd95cbdb5d79acc05c080cd05da19b0ea0bc378d36e11ec8aa98b6c2a10"
+    },
+    {
+      "name": "effect-Banner-right-384x216-4000",
+      "sha256": "2a40f53aa82b2cf5ef85c92a46a9cbf874c461e1e118ebbfb55597d2488fa61e"
+    },
+    {
+      "name": "effect-Scroll-up-384x216-1000",
+      "sha256": "1a4e92bd43e50f42d34939770d497ef3632f5ae1737fdc8d0d0350aded788558"
+    },
+    {
+      "name": "effect-Scroll-up-384x216-2000",
+      "sha256": "5abc88d5b07ad6524c288fda0e0c4e9745edf9b375b461e1f65ce40f4df34f18"
+    },
+    {
+      "name": "effect-Scroll-up-384x216-4000",
+      "sha256": "939855ac971834aa8a96563faf553ad8a995b76a0b476be35ef1646d5b2ca082"
+    },
+    {
+      "name": "effect-Scroll-down-384x216-1000",
+      "sha256": "4cd872f3289a0b16e2081453be5b49e27e72ab4bb21c2b53e089693112e5e289"
+    },
+    {
+      "name": "effect-Scroll-down-384x216-2000",
+      "sha256": "4c73a15f40db1e43954ff6f6c032864962edcd0eb37cbf59dbb8cd5bbb870ba2"
+    },
+    {
+      "name": "effect-Scroll-down-384x216-4000",
+      "sha256": "351e3b7c73eb613c88ab2f88eb58ff86db2277ebad9b26f414b77019c23e847b"
+    },
+    {
+      "name": "missing-playres-384x288-1000",
+      "sha256": "8e34315f876255129e22ad6a0a46db3821b83e6ce39addcf34f664785f93453b"
+    },
+    {
+      "name": "effect-Banner-small-256x144-100",
+      "sha256": "aecbee1fe663e2bd309359f6514257a34eda95702e6232d6776cd75c798d1e41"
+    },
+    {
+      "name": "effect-Banner-small-256x144-200",
+      "sha256": "06560113831d9d9f9ac491aefeae91ab4a4c9dab3d172aabd9df4b5901e84cf9"
+    },
+    {
+      "name": "effect-Banner-small-768x432-100",
+      "sha256": "1a8138d0aa3ce8b451a9b7570f7405b0373e1983c45199b3071778c3bda64c65"
+    },
+    {
+      "name": "effect-Banner-small-768x432-200",
+      "sha256": "030aae0157fc1edae74c4d499aa4847e8f70cb738e2e5f5a0b0ae6778ec92598"
+    },
+    {
+      "name": "effect-Banner-zero-256x144-100",
+      "sha256": "ec73184abdafd90c8b4092651de5fc8818b7eae0c06050fc3b3fe777ba68dda9"
+    },
+    {
+      "name": "effect-Banner-zero-256x144-200",
+      "sha256": "89ffd4b52167b5546691b17db9039964177fe6e1ac5e41b6046041f52dce81ff"
+    },
+    {
+      "name": "effect-Banner-zero-768x432-100",
+      "sha256": "9fb559d7ecda013b9a3f284b9379fb5749ec27ba6ceb8f8dfa156df4adf50fd5"
+    },
+    {
+      "name": "effect-Banner-zero-768x432-200",
+      "sha256": "151053caca4c9c070f9d8c80f82d0fec755221245ccb3a72373178de8bc532e0"
+    },
+    {
+      "name": "collision-fade-384x216-0",
+      "sha256": "2be0751cde21b4d661597ff1217d60bbac4dbd7f66d51bdbfad81985e3bd6e44"
+    },
+    {
+      "name": "collision-fade-384x216-500",
+      "sha256": "a6a13e6815ce7348d5efa7d3f378bfe498f1afdadb3424cdaf9bb1c6ba37130f"
+    },
+    {
+      "name": "collision-fade-384x216-1000",
+      "sha256": "60a5da904a984f1e945d91b2aaf8579413319fd7eefa2f6ed4df43b04c00bf3d"
+    },
+    {
+      "name": "blur-wide-384x216-1000",
+      "sha256": "a73f53efba018dcb91e6d1780c35bb28b02faf17c616d495cf0804a88af25d92"
+    },
+    {
+      "name": "blur-wide-768x432-1000",
+      "sha256": "fc3a9460d116cab540964a584e884f77f9c4ffa421bdfe915b39c2d02d03265b"
+    }
+  ]
+}

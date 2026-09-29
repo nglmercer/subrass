@@ -4,8 +4,8 @@
 #   $env:FFMPEG = path to ffmpeg.exe (defaults to `ffmpeg` on PATH)
 #
 # For every tests/golden/<name>.ass, renders one 256x144 raw-RGBA frame
-# at the manifest time over a black background, using ONLY the repo's
-# fonts/ directory (fontsdir), and writes tests/reference/<name>.rgba
+# at the manifest time over a black background, supplying the repo's
+# fonts/ directory (fontsdir; host fallback can still be selected), and writes tests/reference/<name>.rgba
 # plus tests/reference/provenance.json.
 #
 # Never runs during normal `cargo test`; see tests/reference.rs.
@@ -45,7 +45,8 @@ foreach ($prop in $manifest.fixtures.PSObject.Properties) {
     $out = "tests/reference/$name.rgba"
     # This fixture must resolve every face from the TTC itself. Keeping its
     # fontsdir isolated prevents the standalone source fonts from masking a
-    # collection face while still using the same deterministic direct provider.
+    # collection face. FFmpeg's default host provider remains enabled;
+    # inspect fontselect diagnostics if another family is selected.
     $fontsDir = if ($name -eq 'font-collection') { $collectionFonts } else { 'fonts' }
     $isYcbcr = $name.StartsWith('ycbcr-')
     # YCbCr fixtures are downstream host/video-conversion artifacts, not raw
@@ -79,7 +80,21 @@ $sha = [System.Security.Cryptography.SHA256]::Create()
 $fontHash = [System.BitConverter]::ToString(
     $sha.ComputeHash([System.IO.File]::ReadAllBytes('fonts/DejaVuSans.ttf'))
 ).Replace('-', '').ToLower()
+# Record actual renderer/dependency diagnostic lines, not guesses from the
+# FFmpeg product version. Keep subset regeneration separate from full provenance.
+$rendererProbe = & $ffmpeg -hide_banner -loglevel verbose -f lavfi `
+    -i 'color=c=black:s=256x144:r=10:d=0.1' `
+    -vf "ass='tests/golden/plain.ass':fontsdir='fonts'" `
+    -frames:v 1 -f null - 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'ffmpeg renderer provenance probe failed' }
+$rendererDetails = @($rendererProbe -split "`n" | Where-Object {
+    $_ -match 'libass API version|libass source|Raster: FreeType|Shaper:|fontselect:'
+})
 $prov = [ordered]@{
+    renderer_diagnostics = $rendererDetails
+    font_provider = 'FFmpeg default provider; fontsdir supplied, host fallback possible'
+    regenerated_fixtures = $referenceFilter
+
     generator      = 'tests/reference/gen_references.ps1'
     ffmpeg_version = "$version"
     ffmpeg_buildconf_sha256 = [System.BitConverter]::ToString(
@@ -92,16 +107,21 @@ $prov = [ordered]@{
     video          = @(256, 144)
     background     = 'black (ass composited over opaque black)'
     generated_utc  = (Get-Date).ToUniversalTime().ToString('o')
-    note           = 'effect-banner, effect-scroll and font-fallback are known-divergent (libass ignores legacy effects; fontconfig fallback is environment-dependent); font-collection uses the isolated committed TTC only; ycbcr-* references are host/video conversion artifacts and are not raw libass color proofs'
+    note           = 'Banner and Scroll are implemented by libass and gated; font-fallback differs because fontconfig fallback is environment-dependent; font-collection supplies an isolated TTC fontsdir with host provider enabled; ycbcr-* references are host/video conversion artifacts and are not raw libass color proofs'
     ycbcr_reference_layer = 'FFmpeg final-composited video RGB; raw subtitle colors are tested by direct SubtitleRenderer RGBA tests'
     ycbcr_input_colorspace = 'BT.709'
     ycbcr_input_range = 'TV/limited'
     ycbcr_output_colorspace = 'BT.709'
     ycbcr_output_range = 'TV/limited'
 }
-$json = ($prov | ConvertTo-Json) -replace "`r`n", "`n"
+$json = ($prov | ConvertTo-Json -Depth 8) -replace "`r`n", "`n"
+$provenancePath = if ($referenceFilter.Count -gt 0) {
+    'tests/reference/provenance-partial.json'
+} else {
+    'tests/reference/provenance.json'
+}
 [System.IO.File]::WriteAllText(
-    (Join-Path $root 'tests/reference/provenance.json'),
+    (Join-Path $root $provenancePath),
     "$json`n",
     [System.Text.UTF8Encoding]::new($false))
-Write-Host 'wrote tests/reference/provenance.json'
+Write-Host "wrote $provenancePath"

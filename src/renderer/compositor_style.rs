@@ -71,6 +71,7 @@ impl Compositor {
             drawing_mode: 0,
             drawing_baseline_offset: 0.0,
             blur: 0.0,
+            edge_blur: 0,
             scaled_border_and_shadow: true,
             kerning: false,
         };
@@ -118,7 +119,8 @@ impl Compositor {
                 }
                 "xshad" => resolved.shadow_x = resolved.base_style.shadow,
                 "yshad" => resolved.shadow_y = resolved.base_style.shadow,
-                "be" | "blur" => resolved.blur = 0.0,
+                "be" => resolved.edge_blur = 0,
+                "blur" => resolved.blur = 0.0,
                 _ => {}
             },
             OverrideTag::Bold(w) => resolved.font_weight = *w,
@@ -329,8 +331,10 @@ impl Compositor {
                     });
                 }
             }
-            OverrideTag::Blur(b) => resolved.blur = *b,
-            OverrideTag::EdgeBlur(b) => resolved.blur = *b,
+            OverrideTag::Blur(b) => resolved.blur = b.clamp(0.0, 100.0),
+            OverrideTag::EdgeBlur(b) => {
+                resolved.edge_blur = (b + 0.5).trunc().clamp(0.0, 127.0) as u32
+            }
             OverrideTag::Drawing(mode) => resolved.drawing_mode = *mode,
             OverrideTag::DrawingBaseline(pbo) => resolved.drawing_baseline_offset = *pbo,
             OverrideTag::WrapStyle(q) => resolved.wrap_style = Some(*q),

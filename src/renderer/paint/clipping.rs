@@ -5,24 +5,15 @@ use crate::renderer::effects;
 use super::super::lines::{drawing_unit_scale, scale_clip_rect};
 use super::super::state::{ResolvedStyle, VectorClip};
 
-/// Apply the event-level blur and user clip stages after all glyphs and
-/// drawings have been painted. Blur precedes clipping so its coverage cannot
-/// bleed back outside a requested mask.
+/// Clip painted runs after mask filtering, so blur cannot bleed outside clips.
 pub(crate) fn apply_event_clips(
     buffer: &mut RenderBuffer,
     resolved: &ResolvedStyle,
     scale_x: f64,
     scale_y: f64,
-    blur_scale_x: f64,
-    blur_scale_y: f64,
+    _blur_scale_x: f64,
+    _blur_scale_y: f64,
 ) {
-    if resolved.blur > 0.0 {
-        effects::apply_blur_xy(
-            buffer,
-            resolved.blur * blur_scale_x,
-            resolved.blur * blur_scale_y,
-        );
-    }
     if let Some(clip_rect) = resolved.clip {
         effects::apply_clip(buffer, scale_clip_rect(clip_rect, scale_x, scale_y));
     }

@@ -221,11 +221,12 @@ where
                     chars.next();
                     word.push('\u{00A0}');
                 }
-                Some(&n) => {
+                Some(&n @ ('{' | '}')) => {
                     chars.next();
                     word.push('\\');
                     word.push(n);
                 }
+                Some(_) => word.push('\\'),
                 None => word.push('\\'),
             },
             ' ' | '\t' => {

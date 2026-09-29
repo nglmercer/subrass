@@ -35,13 +35,29 @@ pub(super) fn decode_ass_text(text: &str, default_encoding: i32) -> String {
                 offset = end;
                 continue;
             }
+            // An unterminated override consumes the remaining input. Never
+            // search for the same opening brace without advancing.
+            output.push_str(&text[offset..]);
+            break;
         }
 
-        let end = text[offset..]
-            .find('{')
-            .map_or(text.len(), |relative| offset + relative);
-        output.push_str(&decode_text_run(&text[offset..end], encoding));
-        offset = end;
+        let mut start = offset;
+        while offset < text.len() && text.as_bytes()[offset] != b'{' {
+            if text.as_bytes()[offset] == b'\\'
+                && text
+                    .as_bytes()
+                    .get(offset + 1)
+                    .is_some_and(|next| matches!(next, b'N' | b'n' | b'h' | b'{' | b'}'))
+            {
+                output.push_str(&decode_text_run(&text[start..offset], encoding));
+                output.push_str(&text[offset..offset + 2]);
+                offset += 2;
+                start = offset;
+                continue;
+            }
+            offset += 1;
+        }
+        output.push_str(&decode_text_run(&text[start..offset], encoding));
     }
 
     output
@@ -138,6 +154,8 @@ pub(super) fn decode_ass_bytes(bytes: &[u8], default_encoding: i32) -> String {
                 offset = end;
                 continue;
             }
+            output.push_str(&String::from_utf8_lossy(&bytes[offset..]));
+            break;
         }
 
         let mut start = offset;
@@ -145,7 +163,7 @@ pub(super) fn decode_ass_bytes(bytes: &[u8], default_encoding: i32) -> String {
             if bytes[offset] == b'\\'
                 && bytes
                     .get(offset + 1)
-                    .is_some_and(|next| matches!(next, b'N' | b'n' | b'h'))
+                    .is_some_and(|next| matches!(next, b'N' | b'n' | b'h' | b'{' | b'}'))
             {
                 if start < offset {
                     output.push_str(&decode_mixed_bytes(&bytes[start..offset], encoding));

@@ -11,3 +11,5 @@ pub(super) mod event;
 pub(super) mod glyph;
 pub(super) mod karaoke;
 pub(super) mod text;
+
+pub(super) mod transform;

@@ -515,6 +515,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_and_escaped_braces_advance_encoding_scanner() {
+        for input in ["{", "prefix{\\fe2", "2a{\\nt Info]", "日本語{"] {
+            assert_eq!(TextShaper::decode_font_encoding(input, 1), input);
+            assert_eq!(TextShaper::decode_ass_bytes(input.as_bytes(), 1), input);
+        }
+        let escaped = r"\{\fe2\}A";
+        assert_eq!(TextShaper::decode_font_encoding(escaped, 1), escaped);
+        assert_eq!(TextShaper::decode_ass_bytes(escaped.as_bytes(), 1), escaped);
+        assert_eq!(
+            TextShaper::decode_font_encoding(r"\{A\}", 2),
+            "\\{\u{F041}\\}"
+        );
+        assert_eq!(TextShaper::decode_ass_bytes(br"\{A\}", 2), "\\{\u{F041}\\}");
+    }
+
+    #[test]
     fn test_text_shaper_new() {
         let _ = TextShaper;
     }

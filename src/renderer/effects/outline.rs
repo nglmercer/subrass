@@ -29,8 +29,17 @@ pub fn apply_outline(
     let inv_max_dist_sq = 1.0 / max_dist_sq;
     let base_alpha = f64::from(outline_color[3]);
 
-    for gy in 0..glyph_height {
-        for gx in 0..glyph_width {
+    // Hidden coverage beyond the maximum dilation cannot contribute to the
+    // frame. Clip work before the stencil loops, particularly for projected
+    // drawings whose bounded mask includes off-frame effect padding.
+    let x0 = (-i64::from(x) - i64::from(radius)).clamp(0, i64::from(glyph_width)) as u32;
+    let x1 = (i64::from(buffer.width) - i64::from(x) + i64::from(radius))
+        .clamp(0, i64::from(glyph_width)) as u32;
+    let y0 = (-i64::from(y) - i64::from(radius)).clamp(0, i64::from(glyph_height)) as u32;
+    let y1 = (i64::from(buffer.height) - i64::from(y) + i64::from(radius))
+        .clamp(0, i64::from(glyph_height)) as u32;
+    for gy in y0..y1 {
+        for gx in x0..x1 {
             let idx = (u64::from(gy) * u64::from(glyph_width) + u64::from(gx)) as usize;
             let alpha = glyph_bitmap.get(idx).copied().unwrap_or(0);
             if alpha > 0 {
@@ -111,8 +120,17 @@ pub fn apply_outline_xy(
     }
     let base_alpha = f64::from(outline_color[3]);
 
-    for gy in 0..glyph_height {
-        for gx in 0..glyph_width {
+    // Hidden coverage beyond the maximum dilation cannot contribute to the
+    // frame. Clip work before the stencil loops, particularly for projected
+    // drawings whose bounded mask includes off-frame effect padding.
+    let x0 = (-i64::from(x) - i64::from(radius_x)).clamp(0, i64::from(glyph_width)) as u32;
+    let x1 = (i64::from(buffer.width) - i64::from(x) + i64::from(radius_x))
+        .clamp(0, i64::from(glyph_width)) as u32;
+    let y0 = (-i64::from(y) - i64::from(radius_y)).clamp(0, i64::from(glyph_height)) as u32;
+    let y1 = (i64::from(buffer.height) - i64::from(y) + i64::from(radius_y))
+        .clamp(0, i64::from(glyph_height)) as u32;
+    for gy in y0..y1 {
+        for gx in x0..x1 {
             let idx = (u64::from(gy) * u64::from(glyph_width) + u64::from(gx)) as usize;
             let alpha = glyph_bitmap.get(idx).copied().unwrap_or(0);
             if alpha > 0 {

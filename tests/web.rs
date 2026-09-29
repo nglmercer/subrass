@@ -445,3 +445,64 @@ fn test_event_serialization_shape() {
     let event = doc.get_event(0).unwrap();
     assert_eq!(field_string(&event, "text"), "Hello World!");
 }
+
+#[wasm_bindgen_test]
+fn utf16_bytes_reach_the_browser_renderer_without_legacy_redecoding() {
+    let script = TEST_ASS.replace("Hello World!", "日本語🦀");
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in script.encode_utf16() {
+        bytes.extend(unit.to_le_bytes());
+    }
+    let mut utf16 = subrass::renderer::SubtitleRenderer::from_bytes(&bytes).unwrap();
+    let mut utf8 = subrass::renderer::SubtitleRenderer::new(&script).unwrap();
+    for renderer in [&mut utf16, &mut utf8] {
+        renderer.set_video_size(256, 144).unwrap();
+        renderer.render_frame(2000).unwrap();
+    }
+    assert_eq!(utf16.frame_data(), utf8.frame_data());
+}
+
+#[wasm_bindgen_test]
+fn collision_seeking_and_drawing_animation_work_in_wasm() {
+    let mut renderer = subrass::renderer::SubtitleRenderer::new(include_str!(
+        "compatibility/collision-staggered.ass"
+    ))
+    .unwrap();
+    renderer.render_frame(2000).unwrap();
+    let expected = renderer.frame_data().to_vec();
+    renderer.render_frame(999).unwrap();
+    renderer.render_frame(2000).unwrap();
+    assert_eq!(renderer.frame_data(), expected);
+    let mut drawing = subrass::renderer::SubtitleRenderer::new(include_str!(
+        "compatibility/drawing-animated.ass"
+    ))
+    .unwrap();
+    drawing.render_frame(1000).unwrap();
+    let early = drawing.frame_data().to_vec();
+    drawing.render_frame(1500).unwrap();
+    assert_ne!(drawing.frame_data(), early);
+}
+
+#[wasm_bindgen_test]
+fn inline_blur_reset_is_preserved_in_wasm() {
+    let script = include_str!("compatibility/blur-inline.ass");
+    let mut a = subrass::renderer::SubtitleRenderer::new(script).unwrap();
+    let mut b =
+        subrass::renderer::SubtitleRenderer::new(&script.replace("{\\r}", "{\\be0\\blur0}"))
+            .unwrap();
+    a.render_frame(1000).unwrap();
+    b.render_frame(1000).unwrap();
+    assert_eq!(a.frame_data(), b.frame_data());
+}
+
+#[wasm_bindgen_test]
+fn malformed_override_encoding_scanner_terminates_in_wasm() {
+    let script = TEST_ASS.replace("Hello World!", r"2a{\nt Info]");
+    let mut text = subrass::renderer::SubtitleRenderer::new(&script).unwrap();
+    let mut bytes = subrass::renderer::SubtitleRenderer::from_bytes(script.as_bytes()).unwrap();
+    for renderer in [&mut text, &mut bytes] {
+        renderer.set_video_size(256, 144).unwrap();
+        renderer.render_frame(2000).unwrap();
+    }
+    assert_eq!(text.frame_data(), bytes.frame_data());
+}

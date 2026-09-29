@@ -105,6 +105,11 @@ pub struct ScriptInfo {
     pub script_type: ScriptType,
     pub play_res_x: u32,
     pub play_res_y: u32,
+    /// Whether the source explicitly provided each PlayRes dimension.
+    #[serde(default)]
+    pub play_res_x_present: bool,
+    #[serde(default)]
+    pub play_res_y_present: bool,
     pub layout_res_x: Option<u32>,
     pub layout_res_y: Option<u32>,
     pub scaled_border_and_shadow: bool,
@@ -133,8 +138,10 @@ impl Default for ScriptInfo {
         Self {
             title: None,
             script_type: ScriptType::V400Plus,
-            play_res_x: 1920,
-            play_res_y: 1080,
+            play_res_x: 384,
+            play_res_y: 288,
+            play_res_x_present: false,
+            play_res_y_present: false,
             layout_res_x: None,
             layout_res_y: None,
             scaled_border_and_shadow: true,
@@ -179,6 +186,35 @@ impl ScriptInfo {
         }
     }
 
+    /// Resolve absent dimensions using libass 0.17.5 `ass_lazy_track_init`.
+    /// Keep presence separate from the effective resolution exposed to callers.
+    pub(crate) fn infer_play_resolution(&mut self) {
+        match (self.play_res_x_present, self.play_res_y_present) {
+            (false, false) => {
+                self.play_res_x = 384;
+                self.play_res_y = 288;
+            }
+            (true, false) => {
+                self.play_res_y = if self.play_res_x == 1280 {
+                    1024
+                } else {
+                    let n = self.play_res_x.saturating_sub(1);
+                    (n - n / 4).max(1)
+                };
+            }
+            (false, true) => {
+                self.play_res_x = if self.play_res_y == 1024 {
+                    1280
+                } else {
+                    self.play_res_y
+                        .saturating_add(self.play_res_y / 3)
+                        .min(i32::MAX as u32)
+                };
+            }
+            (true, true) => {}
+        }
+    }
+
     /// Set a known field, validating the value. Unknown keys are stored
     /// in `extra_fields`. YCbCr metadata follows libass's tolerant parsing:
     /// an empty value selects `Default`, while an unrecognized value selects
@@ -201,9 +237,11 @@ impl ScriptInfo {
             }
             "playresx" => {
                 self.play_res_x = parse_res("PlayResX", value)?;
+                self.play_res_x_present = true;
             }
             "playresy" => {
                 self.play_res_y = parse_res("PlayResY", value)?;
+                self.play_res_y_present = true;
             }
             "layoutresx" => {
                 self.layout_res_x = Some(parse_res("LayoutResX", value)?);
@@ -284,8 +322,8 @@ mod tests {
     #[test]
     fn test_script_info_defaults() {
         let info = ScriptInfo::default();
-        assert_eq!(info.play_res_x, 1920);
-        assert_eq!(info.play_res_y, 1080);
+        assert_eq!(info.play_res_x, 384);
+        assert_eq!(info.play_res_y, 288);
         assert!(info.scaled_border_and_shadow);
         assert!(!info.kerning);
         assert_eq!(info.y_cb_cr_matrix, YCbCrMatrix::Default);
@@ -331,7 +369,7 @@ mod tests {
         assert_eq!(info.y_cb_cr_matrix, YCbCrMatrix::Unknown);
         assert!(info.set_field("ScaledBorderAndShadow", "maybe").is_err());
         // Defaults preserved after rejected writes
-        assert_eq!(info.play_res_x, 1920);
+        assert_eq!(info.play_res_x, 384);
         // Unknown keys still accepted
         assert!(info.set_field("CustomKey", "anything").is_ok());
         assert_eq!(info.extra_fields.get("CustomKey").unwrap(), "anything");

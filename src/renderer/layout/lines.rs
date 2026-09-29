@@ -5,14 +5,12 @@ use crate::renderer::font::DecorationMetrics;
 use crate::types::override_tag::{OverrideTag, TextSegment};
 
 /// Measured vector drawing for one segment, in video pixels.
-/// `min_x` is the ink's left bearing (libass preserves it: ink at
-/// pen + min); the advance is `width` and the box hangs `height`
-/// above the baseline. `min_y` needs no field: ink lands at
-/// origin + y with the origin one height above the baseline.
+/// The advance is `width` and the box hangs `height` above the
+/// baseline. Original path coordinates preserve the ink bearing;
+/// ink lands at origin + y, with the origin one height above baseline.
 #[derive(Debug, Clone)]
 pub(super) struct DrawingLayout {
     pub(super) mode: i32,
-    pub(super) min_x: f64,
     pub(super) width: f64,
     pub(super) height: f64,
     pub(super) baseline: f64,

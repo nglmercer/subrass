@@ -46,7 +46,7 @@ ab_glyph = "0.2"
 unicode-bidi = "0.3.18"
 encoding_rs = "0.8"
 fontdb = { version = "0.23", optional = true }
-harfrust = "0.13"
+harfrust = "0.14"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

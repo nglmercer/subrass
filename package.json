@@ -13,7 +13,7 @@
     "test:demo:browser": "bun scripts/check-demo-browser.ts"
   },
   "devDependencies": {
-    "@types/bun": "1.4.2",
+    "@types/bun": "1.4.4",
     "typescript": "^5.5.0"
   }
 }
